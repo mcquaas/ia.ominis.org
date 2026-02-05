@@ -79,6 +79,12 @@ export default function MainLayout() {
       
       console.log("Fetching from:", API_ENDPOINT);
       
+      // Build chat history for context (last 6 messages, excluding welcome)
+      const history = messages
+        .filter(m => m.id !== "welcome")
+        .slice(-6)
+        .map(m => ({ role: m.role, content: m.content }));
+      
       const response = await fetch(API_ENDPOINT, {
         method: "POST",
         headers: {
@@ -86,6 +92,7 @@ export default function MainLayout() {
         },
         body: JSON.stringify({
           question: question,
+          history: history,
           num_sources: 5,
         }),
         signal: controller.signal,
@@ -225,11 +232,9 @@ export default function MainLayout() {
                 {isLoading && (
                   <div className="flex justify-start">
                     <div className="bg-white/10 text-gray-100 rounded-2xl rounded-bl-sm p-3">
-                      <div className="flex items-center gap-1">
-                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></span>
-                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: "0.2s" }}></span>
-                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: "0.4s" }}></span>
-                        <span className="ml-2 text-gray-400 text-xs">Buscando...</span>
+                      <div className="flex items-center gap-2">
+                        <div className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
+                        <span className="text-gray-300 text-xs">Investigando en más de 1,400 fuentes curadas...</span>
                       </div>
                     </div>
                   </div>
