@@ -1,0 +1,40 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::ominis-health-*",
+        "arn:aws:s3:::ominis-health-*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sagemaker:InvokeEndpoint"
+      ],
+      "Resource": "arn:aws:sagemaker:*:*:endpoint/ominis-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:*:*:*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

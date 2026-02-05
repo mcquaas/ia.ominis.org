@@ -1,0 +1,7 @@
+# Ominis Health - Frontend Server Configuration
+FRONTEND_INSTANCE_ID=i-0efb1b3c28d64cdb5
+FRONTEND_ELASTIC_IP=78.13.37.163
+FRONTEND_DOMAIN=ia.ominis.org
+FRONTEND_DOMAIN_ALT=ai.ominis.org
+FRONTEND_URL=https://ia.ominis.org
+FRONTEND_URL_ALT=https://ai.ominis.org

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>API Test</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #1a1a2e; color: white; }
+        button { padding: 10px 20px; margin: 10px; cursor: pointer; }
+        pre { background: #0a0a1a; padding: 15px; border-radius: 8px; overflow: auto; }
+        .success { color: #4ade80; }
+        .error { color: #f87171; }
+    </style>
+</head>
+<body>
+    <h1>Ominis API Test</h1>
+    <p>API Endpoint: <code>http://78.13.254.66/query</code></p>
+    
+    <button onclick="testConnection()">1. Test Connection (Fast)</button>
+    <button onclick="testQuery()">2. Test Query (Slow ~30s)</button>
+    
+    <h3>Results:</h3>
+    <pre id="output">Click a button to test...</pre>
+    
+    <script>
+        const output = document.getElementById('output');
+        
+        async function testConnection() {
+            output.innerHTML = 'Testing connection...';
+            try {
+                const start = Date.now();
+                const response = await fetch('http://78.13.254.66/test');
+                const data = await response.json();
+                const elapsed = Date.now() - start;
+                output.innerHTML = `<span class="success">SUCCESS (${elapsed}ms)</span>\n\n${JSON.stringify(data, null, 2)}`;
+            } catch (error) {
+                output.innerHTML = `<span class="error">ERROR</span>\n\n${error.message}\n\nCheck browser console (F12) for details.`;
+                console.error('Connection test error:', error);
+            }
+        }
+        
+        async function testQuery() {
+            output.innerHTML = 'Sending query... (this takes 30-60 seconds on CPU)';
+            try {
+                const start = Date.now();
+                const response = await fetch('http://78.13.254.66/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question: 'diabetes', num_sources: 3 })
+                });
+                const data = await response.json();
+                const elapsed = Date.now() - start;
+                output.innerHTML = `<span class="success">SUCCESS (${elapsed}ms)</span>\n\n${JSON.stringify(data, null, 2)}`;
+            } catch (error) {
+                output.innerHTML = `<span class="error">ERROR</span>\n\n${error.message}\n\nCheck browser console (F12) for details.`;
+                console.error('Query test error:', error);
+            }
+        }
+    </script>
+</body>
+</html>

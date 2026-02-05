@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Secrets
+.env
+*.pem
+*credentials*
+*secret*
+
+# Build
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Logs
+*.log
+logs/
+
+# Temp files
+*.tmp
+.cache/
+tmp/
+
+# Lambda packages
+lambda/**/package/
+*.zip
+
+# Local data
+data/
+*.faiss

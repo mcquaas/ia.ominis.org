@@ -1,0 +1,6 @@
+# Ominis Health - EC2 Server Configuration
+OLLAMA_INSTANCE_ID=i-02264316b8b094bad
+ELASTIC_IP=78.13.254.66
+DOMAIN=api.ominis.org
+OLLAMA_API_URL=https://api.ominis.org:11434
+RAG_API_URL=https://api.ominis.org/query
