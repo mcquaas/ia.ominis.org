@@ -25,9 +25,8 @@ export async function POST(request: NextRequest) {
         question: body.question,
         history: body.history,
         image: body.images && body.images.length > 0 ? body.images[0] : undefined,
-        rag_search: body.rag_search !== false,
         web_search: body.web_search !== false,
-        pubmed_search: body.pubmed_search !== false,
+        pubmed_search: body.pubmed_search || false,
       };
 
       console.log('[query-stream] Request:', apiBody.question?.slice(0, 50));
