@@ -16,7 +16,7 @@ export default function Footer() {
               className="h-8 w-auto mb-4"
             />
             <p className="text-gray-500 text-sm">
-              Observatorio Mexicano para la Investigación y la Inteligencia en Salud. Herramientas de IA para investigadores.
+              Observatorio Mexicano para la Investigación y la Inteligencia en Salud.
             </p>
           </div>
 
