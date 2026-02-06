@@ -1,0 +1,31 @@
+{
+  "name": "ominis-admin-backend",
+  "version": "1.0.0",
+  "description": "Ominis Health Admin Backend - Strapi V5",
+  "private": true,
+  "scripts": {
+    "develop": "strapi develop",
+    "start": "strapi start",
+    "build": "strapi build",
+    "strapi": "strapi",
+    "seed": "node scripts/seed.js",
+    "seed:roles": "node scripts/seed-roles.js"
+  },
+  "dependencies": {
+    "@strapi/strapi": "^5.7.0",
+    "@strapi/plugin-users-permissions": "^5.7.0",
+    "better-sqlite3": "^11.6.0",
+    "pg": "^8.13.1",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=6.0.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,137 @@
+{
+  "kind": "collectionType",
+  "collectionName": "rag_sources",
+  "info": {
+    "singularName": "rag-source",
+    "pluralName": "rag-sources",
+    "displayName": "RAG Source",
+    "description": "Sources for the RAG system (medical documents, guidelines, etc.)"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "title": {
+      "type": "string",
+      "required": true,
+      "maxLength": 500
+    },
+    "slug": {
+      "type": "uid",
+      "targetField": "title",
+      "required": true
+    },
+    "sourceType": {
+      "type": "enumeration",
+      "enum": [
+        "tainacan",
+        "wordpress",
+        "imss_guideline",
+        "issste_guideline",
+        "pubmed",
+        "manual_upload",
+        "nom_cofepris",
+        "nom_ssa",
+        "epidemiological_data",
+        "clinical_protocol",
+        "technical_manual",
+        "official_guideline",
+        "pdf_document",
+        "other"
+      ],
+      "default": "manual_upload",
+      "required": true
+    },
+    "status": {
+      "type": "enumeration",
+      "enum": [
+        "pending",
+        "processing",
+        "indexed",
+        "failed",
+        "archived"
+      ],
+      "default": "pending",
+      "required": true
+    },
+    "content": {
+      "type": "richtext"
+    },
+    "contentFile": {
+      "type": "media",
+      "multiple": false,
+      "required": false,
+      "allowedTypes": [
+        "files"
+      ]
+    },
+    "sourceUrl": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "externalId": {
+      "type": "string",
+      "maxLength": 255
+    },
+    "metadata": {
+      "type": "json"
+    },
+    "chunksCount": {
+      "type": "integer",
+      "default": 0
+    },
+    "lastIndexedAt": {
+      "type": "datetime"
+    },
+    "indexingError": {
+      "type": "text"
+    },
+    "category": {
+      "type": "enumeration",
+      "enum": [
+        "general_health",
+        "nutrition",
+        "mental_health",
+        "chronic_diseases",
+        "maternal_health",
+        "pediatrics",
+        "geriatrics",
+        "emergency",
+        "prevention",
+        "medications",
+        "cardiology",
+        "oncology",
+        "epidemiology",
+        "normatividad",
+        "protocolos_clinicos",
+        "lineamientos",
+        "datos_abiertos",
+        "other"
+      ],
+      "default": "general_health"
+    },
+    "language": {
+      "type": "enumeration",
+      "enum": [
+        "es",
+        "en",
+        "es-mx"
+      ],
+      "default": "es"
+    },
+    "qualityScore": {
+      "type": "decimal",
+      "min": 0,
+      "max": 100
+    },
+    "addedBy": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "plugin::users-permissions.user"
+    },
+    "notes": {
+      "type": "text"
+    }
+  }
+}
