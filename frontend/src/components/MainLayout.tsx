@@ -19,10 +19,9 @@ interface Message {
   images?: string[];
 }
 
-// API endpoint - Uses ominis-2.0 (Mexican LLM by FUNSALUD)
+// ominis-2.0 (Mexican LLM by FUNSALUD)
 // Data is stored in Mexico (S3 mx-central-1), no 3rd party models
-// Inference runs on GPU for speed, but no data is stored outside Mexico
-const API_ENDPOINT = "/api/query-gpu";
+// Inference runs on GPU for speed via /api/query-stream
 
 export default function MainLayout() {
   const [messages, setMessages] = useState<Message[]>([
@@ -64,11 +63,80 @@ export default function MainLayout() {
 
   const generateId = () => Math.random().toString(36).substring(2, 9);
 
+  // Extract sources from URLs embedded in LLM-generated text
+  // When the LLM includes URLs (e.g. <https://...> or standalone), auto-create Source objects
+  const extractSourcesFromContent = (content: string): Source[] => {
+    const sources: Source[] = [];
+    const lines = content.split("\n");
+    for (const line of lines) {
+      // Match URLs in angle brackets: <https://...>
+      const angleBracketMatch = line.match(/<(https?:\/\/[^>]+)>/);
+      if (angleBracketMatch) {
+        const url = angleBracketMatch[1];
+        if (!sources.some(s => s.url === url)) {
+          // Extract title from text before the URL on the same line
+          const beforeUrl = line.slice(0, line.indexOf("<")).trim();
+          let title = beforeUrl.replace(/^\[\d+\]\s*/, "").replace(/^\d+\.\s*/, "").replace(/[:\s]+$/, "").trim();
+          if (!title || title.length < 3) {
+            try { title = new URL(url).hostname; } catch { title = url; }
+          }
+          sources.push({ title, url, type: "web" });
+        }
+        continue; // Don't double-match standalone URL in same line
+      }
+      // Match standalone URLs (not in brackets)
+      const standaloneMatch = line.match(/(?:^|\s)(https?:\/\/[^\s<>)]+)/);
+      if (standaloneMatch) {
+        const url = standaloneMatch[1];
+        if (!sources.some(s => s.url === url)) {
+          const beforeUrl = line.slice(0, line.indexOf("http")).trim();
+          let title = beforeUrl.replace(/^\[\d+\]\s*/, "").replace(/^\d+\.\s*/, "").replace(/[:\s]+$/, "").trim();
+          if (!title || title.length < 3) {
+            try { title = new URL(url).hostname; } catch { title = url; }
+          }
+          sources.push({ title, url, type: "web" });
+        }
+      }
+    }
+    return sources;
+  };
+
+  // Merge existing sources with any URLs found in content that aren't already covered
+  // Extracted URL sources go FIRST since the LLM references them as [1], [2], etc.
+  const getEffectiveSources = (content: string, existingSources?: Source[]): Source[] | undefined => {
+    const extracted = extractSourcesFromContent(content);
+    if (extracted.length === 0) return existingSources;
+    if (!existingSources || existingSources.length === 0) return extracted.length > 0 ? extracted : undefined;
+    // Extracted URL sources first (match LLM's in-text [1], [2], etc.)
+    // Then add existing (RAG/backend) sources that aren't duplicates
+    const result = [...extracted];
+    for (const existing of existingSources) {
+      const alreadyCovered = result.some(s =>
+        s.url === existing.url || existing.url.includes(s.url) || s.url.includes(existing.url.replace(/\/$/, ""))
+      );
+      if (!alreadyCovered) result.push(existing);
+    }
+    return result;
+  };
+
   // Format content with citation references [1], [2], etc.
   const formatContentWithCitations = (content: string, sources?: Source[]) => {
     if (!sources || sources.length === 0) return content;
 
     let formattedContent = content;
+
+    // Pre-process: on lines that contain URLs, strip leading [N] or N. numbering
+    // This prevents duplicate citations since the URL will be converted to [N] below
+    const lines = formattedContent.split("\n");
+    formattedContent = lines.map(line => {
+      if (/^\[\d+\]/.test(line) && (/<https?:\/\/[^>]+>/.test(line) || /https?:\/\/[^\s<>)]+/.test(line))) {
+        return line.replace(/^\[\d+\]\s*/, "");
+      }
+      if (/^\d+\.\s/.test(line) && (/<https?:\/\/[^>]+>/.test(line) || /https?:\/\/[^\s<>)]+/.test(line))) {
+        return line.replace(/^\d+\.\s*/, "");
+      }
+      return line;
+    }).join("\n");
 
     // Replace URLs with source references
     // Handle URLs in angle brackets like <https://...>
@@ -135,6 +203,42 @@ export default function MainLayout() {
     formattedContent = formattedContent.replace(
       /Fuente\s+(\d+)/gi,
       (_, num) => `[${num}]`
+    );
+
+    // Handle author-style citations like [Author, et al., Year] or [Author et al., Year]
+    // These are common when PubMed results are summarized by the LLM
+    // Strategy: collect all author citations in order, map sequentially to sources
+    const authorCitationPattern = /\[([A-Z][a-zA-ZÀ-ÿ]+(?:\s+[A-Z][a-zA-ZÀ-ÿ]*)*(?:\s*,?\s*et\s*al\.?)?)(?:\s*,?\s*\(?(\d{4})\)?)?\]/g;
+    let authorCitationIndex = 0;
+    const usedSourceIndices = new Set<number>();
+    formattedContent = formattedContent.replace(
+      authorCitationPattern,
+      (match, authorPart: string) => {
+        // Skip if it looks like an already-converted numeric citation
+        if (/^\[\d+\]$/.test(match)) return match;
+        
+        // Extract the first author surname for matching
+        const surname = authorPart.split(/[\s,]/)[0].toLowerCase();
+        
+        // Try to find a matching source by author surname in title
+        let sourceIdx = sources.findIndex((s, i) => {
+          if (usedSourceIndices.has(i)) return false;
+          const titleWords = s.title.toLowerCase().split(/[\s,.:;]+/);
+          return titleWords.some(w => w === surname || (surname.length >= 4 && w.startsWith(surname.slice(0, 4))));
+        });
+        
+        // If no match by name, assign sequentially based on appearance order
+        if (sourceIdx === -1 && authorCitationIndex < sources.length) {
+          sourceIdx = authorCitationIndex;
+        }
+        
+        authorCitationIndex++;
+        if (sourceIdx !== -1 && sourceIdx < sources.length) {
+          usedSourceIndices.add(sourceIdx);
+          return `[${sourceIdx + 1}]`;
+        }
+        return match; // Keep original if no match found
+      }
     );
 
     // Clean up extra spaces and empty parentheses
@@ -341,67 +445,133 @@ export default function MainLayout() {
         throw new Error("No response body");
       }
 
-      
       const decoder = new TextDecoder();
       let buffer = "";
       let receivedData = false;
+      let streamedContent = "";
+      let streamedSources: Source[] = [];
+      const assistantId = generateId();
+      let messageAdded = false;
 
       try {
         while (true) {
           const { done, value } = await reader.read();
-          if (done) {
-            
-            break;
-          }
+          if (done) break;
 
           // Clear timeout once we start receiving data
           if (!receivedData) {
             receivedData = true;
             clearTimeout(timeoutId);
-            
           }
 
           buffer += decoder.decode(value, { stream: true });
-          
           const lines = buffer.split("\n");
-          buffer = lines.pop() || ""; // Keep incomplete line in buffer
+          buffer = lines.pop() || "";
 
           for (const line of lines) {
             if (line.startsWith("data: ")) {
               const jsonStr = line.slice(6);
-              if (!jsonStr.trim()) continue; // Skip empty data lines
-              
+              if (!jsonStr.trim()) continue;
+
               try {
                 const eventData = JSON.parse(jsonStr);
-                
-                
+
                 if (eventData.type === "status") {
                   setLoadingStatus(eventData.message);
+
+                } else if (eventData.type === "chunk") {
+                  // Token-by-token streaming: append text as it arrives
+                  streamedContent += eventData.text || "";
+                  if (!messageAdded) {
+                    // First chunk: create the assistant message
+                    messageAdded = true;
+                    setIsLoading(false);
+                    setLoadingStatus("");
+                    const newMsg: Message = {
+                      id: assistantId,
+                      role: "assistant",
+                      content: streamedContent,
+                    };
+                    setMessages((prev) => [...prev, newMsg]);
+                  } else {
+                    // Subsequent chunks: update content in-place
+                    setMessages((prev) =>
+                      prev.map((m) =>
+                        m.id === assistantId
+                          ? { ...m, content: streamedContent }
+                          : m
+                      )
+                    );
+                  }
+
+                } else if (eventData.type === "sources") {
+                  // RAG sources arrived (may come during or after streaming)
+                  if (eventData.sources && eventData.sources.length > 0) {
+                    streamedSources = eventData.sources;
+                    setMessages((prev) =>
+                      prev.map((m) =>
+                        m.id === assistantId
+                          ? { ...m, sources: streamedSources }
+                          : m
+                      )
+                    );
+                  }
+
                 } else if (eventData.type === "done") {
-                  console.log("[OMINIS] Got done event, clearing state");
-                  // Add the message first
-                  const assistantMessage: Message = {
-                    id: generateId(),
-                    role: "assistant",
-                    content: eventData.answer || "No pude generar una respuesta.",
-                    sources: eventData.sources,
-                  };
-                  setMessages((prev) => [...prev, assistantMessage]);
-                  
-                  // Clear loading
+                  console.log("[OMINIS] Got done event");
+                  // Final event: ensure message is complete
+                  const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
+                  const finalSources = eventData.sources?.length > 0 ? eventData.sources : streamedSources;
+
+                  if (!messageAdded) {
+                    // Fallback: no chunks were sent (legacy protocol)
+                    const assistantMessage: Message = {
+                      id: assistantId,
+                      role: "assistant",
+                      content: finalContent,
+                      sources: finalSources.length > 0 ? finalSources : undefined,
+                    };
+                    setMessages((prev) => [...prev, assistantMessage]);
+                  } else {
+                    // Update with final content and sources
+                    setMessages((prev) =>
+                      prev.map((m) =>
+                        m.id === assistantId
+                          ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : m.sources }
+                          : m
+                      )
+                    );
+                  }
+
                   setIsLoading(false);
                   setLoadingStatus("");
                   inputRef.current?.focus();
-                  console.log("[OMINIS] State cleared, returning");
                   return;
+
                 } else if (eventData.type === "error") {
                   throw new Error(eventData.message);
                 }
               } catch (parseError) {
-                console.warn("[OMINIS] Parse error:", parseError);
+                // Only warn if it's not an error we threw
+                if (parseError instanceof Error && parseError.message !== (JSON.parse(jsonStr) as any)?.message) {
+                  console.warn("[OMINIS] Parse error:", parseError);
+                } else {
+                  throw parseError;
+                }
               }
             }
           }
+        }
+
+        // Stream ended without a done event: finalize with what we have
+        if (streamedContent && !messageAdded) {
+          const assistantMessage: Message = {
+            id: assistantId,
+            role: "assistant",
+            content: streamedContent,
+            sources: streamedSources.length > 0 ? streamedSources : undefined,
+          };
+          setMessages((prev) => [...prev, assistantMessage]);
         }
       } finally {
         console.log("[OMINIS] Inner finally - clearing timeout");
@@ -525,6 +695,10 @@ export default function MainLayout() {
       const decoder = new TextDecoder();
       let buffer = "";
       let receivedData = false;
+      let streamedContent = "";
+      let streamedSources: Source[] = [];
+      const assistantId = generateId();
+      let messageAdded = false;
 
       try {
         while (true) {
@@ -550,27 +724,57 @@ export default function MainLayout() {
                 
                 if (eventData.type === "status") {
                   setLoadingStatus(eventData.message);
+
+                } else if (eventData.type === "chunk") {
+                  streamedContent += eventData.text || "";
+                  if (!messageAdded) {
+                    messageAdded = true;
+                    setIsLoading(false);
+                    setLoadingStatus("");
+                    setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent }]);
+                  } else {
+                    setMessages((prev) =>
+                      prev.map((m) => m.id === assistantId ? { ...m, content: streamedContent } : m)
+                    );
+                  }
+
+                } else if (eventData.type === "sources") {
+                  if (eventData.sources?.length > 0) {
+                    streamedSources = eventData.sources;
+                    setMessages((prev) =>
+                      prev.map((m) => m.id === assistantId ? { ...m, sources: streamedSources } : m)
+                    );
+                  }
+
                 } else if (eventData.type === "done") {
-                  console.log("[OMINIS-EDIT] Got done event, clearing state");
-                  // Add the message first
-                  const assistantMessage: Message = {
-                    id: generateId(),
-                    role: "assistant",
-                    content: eventData.answer || "No pude generar una respuesta.",
-                    sources: eventData.sources,
-                  };
-                  setMessages((prev) => [...prev, assistantMessage]);
-                  
-                  // Clear loading
+                  const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
+                  const finalSources = eventData.sources?.length > 0 ? eventData.sources : streamedSources;
+
+                  if (!messageAdded) {
+                    setMessages((prev) => [...prev, {
+                      id: assistantId, role: "assistant",
+                      content: finalContent,
+                      sources: finalSources.length > 0 ? finalSources : undefined,
+                    }]);
+                  } else {
+                    setMessages((prev) =>
+                      prev.map((m) => m.id === assistantId
+                        ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : m.sources }
+                        : m)
+                    );
+                  }
                   setIsLoading(false);
                   setLoadingStatus("");
                   inputRef.current?.focus();
-                  console.log("[OMINIS-EDIT] State cleared, returning");
                   return;
+
                 } else if (eventData.type === "error") {
                   throw new Error(eventData.message);
                 }
               } catch (parseError) {
+                if (parseError instanceof Error && parseError.message.startsWith("GPU") || parseError instanceof Error && parseError.message.startsWith("Connection")) {
+                  throw parseError;
+                }
                 console.warn("[OMINIS-EDIT] Parse error:", parseError);
               }
             }
@@ -617,7 +821,7 @@ export default function MainLayout() {
   const suggestedQuestions = [
     "¿Cuál es la diferencia entre diabetes tipo 1 y tipo 2?",
     "¿Cuáles son las principales causas de muerte en México?",
-    "¿Dónde puedo encontrar más información sobre el cáncer de mama?",
+    "¿Qué fuentes de datos de salud hay en México?",
   ];
 
   return (
@@ -666,7 +870,13 @@ export default function MainLayout() {
 
               {/* Messages Area */}
               <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
-                {messages.map((message) => (
+                {messages.map((message) => {
+                  // Compute effective sources: merge backend sources with any URLs found in content
+                  const effectiveSources = message.role === "assistant"
+                    ? getEffectiveSources(message.content, message.sources)
+                    : message.sources;
+
+                  return (
                   <div
                     key={message.id}
                     className={`flex ${message.role === "user" ? "justify-end" : "justify-start"} group`}
@@ -731,16 +941,16 @@ export default function MainLayout() {
                         <>
                           <p className="whitespace-pre-wrap text-sm leading-relaxed">
                             {message.role === "assistant" 
-                              ? renderContentWithCitations(message.content, message.sources)
+                              ? renderContentWithCitations(message.content, effectiveSources)
                               : message.content
                             }
                           </p>
 
                           {/* Sources - show cited ones and external sources (web/pubmed) */}
-                          {message.sources && message.sources.length > 0 && (() => {
+                          {effectiveSources && effectiveSources.length > 0 && (() => {
                             // Find which source numbers are actually cited in the response
                             const citedNumbers = new Set<number>();
-                            const formattedContent = formatContentWithCitations(message.content, message.sources);
+                            const formattedContent = formatContentWithCitations(message.content, effectiveSources);
                             const matches = formattedContent.match(/\[(\d+)\]/g);
                             if (matches) {
                               matches.forEach(m => {
@@ -750,7 +960,7 @@ export default function MainLayout() {
                             }
                             
                             // Filter to cited sources OR external sources (web/pubmed)
-                            const displaySources = message.sources
+                            const displaySources = effectiveSources
                               .map((source, i) => ({ ...source, index: i + 1 }))
                               .filter(s => citedNumbers.has(s.index) || s.type === "web" || s.type === "pubmed");
                             
@@ -782,7 +992,8 @@ export default function MainLayout() {
                       )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
 
                 {/* Loading indicator */}
                 {isLoading && (
@@ -935,13 +1146,13 @@ export default function MainLayout() {
 
                         <div className="border-t border-white/10 my-1"></div>
 
-                        {/* Search sources section */}
-                        <p className="px-4 pt-2 pb-1 text-gray-500 text-xs font-medium uppercase tracking-wider">Buscar en fuentes</p>
+                        {/* Section header */}
+                        <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Buscar en fuentes</div>
 
-                        {/* Ominis RAG search toggle */}
+                        {/* Ominis RAG toggle */}
                         <button
                           onClick={() => setRagSearchEnabled(!ragSearchEnabled)}
-                          className="w-full flex items-center justify-between gap-3 px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
+                          className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
                         >
                           <div className="flex items-center gap-3">
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -949,31 +1160,15 @@ export default function MainLayout() {
                             </svg>
                             Ominis
                           </div>
-                          <div className={`w-8 h-5 rounded-full transition-colors ${ragSearchEnabled ? "bg-blue-500" : "bg-gray-600"} relative`}>
+                          <div className={`w-8 h-5 rounded-full transition-colors ${ragSearchEnabled ? "bg-cyan-500" : "bg-gray-600"} relative`}>
                             <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${ragSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`}></div>
-                          </div>
-                        </button>
-
-                        {/* PubMed search toggle */}
-                        <button
-                          onClick={() => setPubmedSearchEnabled(!pubmedSearchEnabled)}
-                          className="w-full flex items-center justify-between gap-3 px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
-                        >
-                          <div className="flex items-center gap-3">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                            </svg>
-                            PubMed
-                          </div>
-                          <div className={`w-8 h-5 rounded-full transition-colors ${pubmedSearchEnabled ? "bg-blue-500" : "bg-gray-600"} relative`}>
-                            <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${pubmedSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`}></div>
                           </div>
                         </button>
 
                         {/* Web search toggle */}
                         <button
                           onClick={() => setWebSearchEnabled(!webSearchEnabled)}
-                          className="w-full flex items-center justify-between gap-3 px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
+                          className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
                         >
                           <div className="flex items-center gap-3">
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -983,6 +1178,22 @@ export default function MainLayout() {
                           </div>
                           <div className={`w-8 h-5 rounded-full transition-colors ${webSearchEnabled ? "bg-blue-500" : "bg-gray-600"} relative`}>
                             <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${webSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`}></div>
+                          </div>
+                        </button>
+
+                        {/* PubMed search toggle */}
+                        <button
+                          onClick={() => setPubmedSearchEnabled(!pubmedSearchEnabled)}
+                          className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
+                        >
+                          <div className="flex items-center gap-3">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                            </svg>
+                            PubMed
+                          </div>
+                          <div className={`w-8 h-5 rounded-full transition-colors ${pubmedSearchEnabled ? "bg-purple-500" : "bg-gray-600"} relative`}>
+                            <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${pubmedSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`}></div>
                           </div>
                         </button>
                       </div>
@@ -1059,9 +1270,9 @@ export default function MainLayout() {
                     <Link href="/modelo" className="text-blue-400 hover:underline">ominis-2.0</Link>
                   </h3>
                   <p className="text-gray-400 text-xs mt-1">
-                    Modelo de IA mexicano especializado en salud. Tus datos siempre permanecen en México (S3 mx-central-1).{" "}
+                    Modelo de IA mexicano especializado en salud. Entrenado con protocolos, datos y artículos hospedados exclusivamente en México (S3 mx-central-1).{" "}
                     <strong className="text-green-400">No usamos modelos de terceros (OpenAI, Google, Anthropic, Meta).</strong>{" "}
-                    Tus consultas son completamente efímeras: no almacenamos tus interacciones ni usamos tus datos o investigaciones para entrenar el modelo.{" "}
+                    Tus consultas son completamente efímeras: no almacenamos tus interacciones ni usamos tus datos para entrenar el modelo.{" "}
                     Infraestructura 100% administrada por FUNSALUD.{" "}
                     <Link href="/modelo" className="text-blue-400 hover:underline">Ver más →</Link>
                   </p>
@@ -1074,10 +1285,10 @@ export default function MainLayout() {
                   cualquier comportamiento inesperado o ideas de mejora.
                 </p>
                 <a
-                  href="mailto:curacion-ominis@funsalud.org.mx"
+                  href="mailto:ominis@funsalud.org.mx"
                   className="text-blue-400 hover:text-blue-300 text-xs transition-colors"
                 >
-                  curacion-ominis@funsalud.org.mx
+                  ominis@funsalud.org.mx
                 </a>
               </div>
               <div className="border-t border-white/10 pt-3 mt-3">
@@ -1087,10 +1298,10 @@ export default function MainLayout() {
                   contáctanos para solicitar acceso.
                 </p>
                 <a
-                  href="mailto:curacion-ominis@funsalud.org.mx"
+                  href="mailto:ominis@funsalud.org.mx"
                   className="text-blue-400 hover:text-blue-300 text-xs transition-colors"
                 >
-                  curacion-ominis@funsalud.org.mx
+                  ominis@funsalud.org.mx
                 </a>
               </div>
             </div>
