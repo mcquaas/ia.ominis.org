@@ -1,0 +1,5 @@
+# Ominis Health - GPU Ollama Server Configuration (US)
+GPU_INSTANCE_ID=i-067dd350739288262
+GPU_ELASTIC_IP=3.213.91.241
+GPU_REGION=us-east-1
+GPU_OLLAMA_API_URL=http://3.213.91.241:11434

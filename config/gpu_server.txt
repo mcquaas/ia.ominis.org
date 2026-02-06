@@ -1,0 +1,9 @@
+# Ominis Health - GPU Server Configuration (us-east-1)
+# Tesla T4 GPU - 10x faster than CPU
+GPU_INSTANCE_ID=i-09028184c9802b22f
+GPU_INSTANCE_TYPE=g4dn.xlarge
+GPU_ELASTIC_IP=44.215.64.245
+GPU_REGION=us-east-1
+OLLAMA_API_URL=http://44.215.64.245:11434
+RAG_API_URL=http://44.215.64.245:8080/query
+# Note: Data is fetched from S3 in mx-central-1, only inference runs in us-east-1
