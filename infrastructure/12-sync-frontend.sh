@@ -15,9 +15,9 @@ source "$SCRIPT_DIR/../config/frontend_server.txt"
 # Load RAG API URL
 if [ -f "$SCRIPT_DIR/../config/ollama_server.txt" ]; then
     source "$SCRIPT_DIR/../config/ollama_server.txt"
-    API_URL="${RAG_API_URL:-http://$ELASTIC_IP/query}"
+    API_URL="${RAG_API_URL:-https://api.ominis.org/query}"
 else
-    API_URL="http://78.13.254.66/query"
+    API_URL="https://api.ominis.org/query"
 fi
 
 KEY_FILE="$SCRIPT_DIR/../config/ominis-frontend-key.pem"
@@ -55,13 +55,18 @@ for i in {1..30}; do
     sleep 10
 done
 
+# Strapi API URL (v1 prefix for Strapi endpoints)
+STRAPI_URL="${STRAPI_URL:-https://api.ominis.org/v1}"
+
 # Create .env.local with correct API endpoint
 echo ""
 echo "Creating environment configuration..."
 cat << EOF > "$FRONTEND_DIR/.env.local"
 NEXT_PUBLIC_API_ENDPOINT=$API_URL
+NEXT_PUBLIC_STRAPI_URL=$STRAPI_URL
 EOF
 echo "  ✓ .env.local created with API_ENDPOINT=$API_URL"
+echo "  ✓ .env.local created with STRAPI_URL=$STRAPI_URL"
 
 # Build the frontend locally first
 echo ""

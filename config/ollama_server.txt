@@ -1,6 +1,10 @@
-# Ominis Health - EC2 Server Configuration
+# Ominis Health - Mexico EC2 Server Configuration (mx-central-1)
+# Instance type: t3.medium (downsized from c6i.4xlarge)
+# Purpose: Data storage, future CPU inference when mx-central-1 has GPUs
+# Status: Ollama STOPPED (using GPU in us-east-1 for inference)
 OLLAMA_INSTANCE_ID=i-02264316b8b094bad
+INSTANCE_TYPE=t3.medium
 ELASTIC_IP=78.13.254.66
 DOMAIN=api.ominis.org
-OLLAMA_API_URL=https://api.ominis.org:11434
-RAG_API_URL=https://api.ominis.org/query
+# LLM inference currently handled by GPU instance in us-east-1
+# Data always stored in S3 mx-central-1

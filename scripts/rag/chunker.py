@@ -66,18 +66,26 @@ class DocumentChunker:
         for i, text in enumerate(text_chunks):
             chunk_id = self._generate_chunk_id(doc_id, i)
             
+            # Build metadata - include standard fields plus any from document metadata
+            chunk_metadata = {
+                'title': title,
+                'url': document.get('url', ''),
+                'categories': document.get('categories', []),
+                'tags': document.get('tags', []),
+                'date_published': document.get('date_published', ''),
+                'source': document.get('source', 'unknown')
+            }
+            
+            # Merge in any additional metadata from the document
+            doc_metadata = document.get('metadata', {})
+            if doc_metadata:
+                chunk_metadata.update(doc_metadata)
+            
             chunk = Chunk(
                 id=chunk_id,
                 document_id=doc_id,
                 content=text,
-                metadata={
-                    'title': title,
-                    'url': document.get('url', ''),
-                    'categories': document.get('categories', []),
-                    'tags': document.get('tags', []),
-                    'date_published': document.get('date_published', ''),
-                    'source': document.get('source', 'unknown')
-                },
+                metadata=chunk_metadata,
                 chunk_index=i,
                 total_chunks=len(text_chunks)
             )

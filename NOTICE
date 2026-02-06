@@ -8,9 +8,24 @@ This product includes software developed by:
 
 ---
 
+OMINIS-2.0 MODEL
+
+The ominis-2.0 model is the first Mexican LLM specialized in health,
+developed for clinical, epidemiological, and administrative health research.
+
+Model specifications:
+- 7 billion parameters
+- 32,768 token context window
+- Trained on 33+ million medical documents
+- 1,400+ human-curated sources (IMSS, ISSSTE, Tainacan)
+
+---
+
 THIRD-PARTY COMPONENTS
 
 This project uses the following open-source libraries:
+
+Backend - Python (RAG Engine):
 
 1. FAISS (Facebook AI Similarity Search)
    License: MIT License
@@ -20,41 +35,86 @@ This project uses the following open-source libraries:
    License: Apache License 2.0
    https://github.com/UKPLab/sentence-transformers
 
-3. LangChain
-   License: MIT License
-   https://github.com/langchain-ai/langchain
-
-4. boto3 (AWS SDK for Python)
+3. boto3 (AWS SDK for Python)
    License: Apache License 2.0
    https://github.com/boto/boto3
 
-5. NumPy
+4. NumPy
    License: BSD-3-Clause
    https://github.com/numpy/numpy
 
-6. BeautifulSoup4
+5. BeautifulSoup4
    License: MIT License
    https://www.crummy.com/software/BeautifulSoup/
 
-7. html2text
+6. html2text
    License: GPL-3.0
    https://github.com/Alir3z4/html2text
+
+7. Transformers (Hugging Face)
+   License: Apache License 2.0
+   https://github.com/huggingface/transformers
 
 8. Ollama
    License: MIT License
    https://github.com/ollama/ollama
 
-9. Transformers (Hugging Face)
-   License: Apache License 2.0
-   https://github.com/huggingface/transformers
+Backend - Node.js (Admin Panel):
 
-10. FastAPI
-    License: MIT License
-    https://github.com/tiangolo/fastapi
+9. Strapi
+   License: MIT License
+   https://github.com/strapi/strapi
 
-11. Pydantic
+10. bcrypt
     License: MIT License
-    https://github.com/pydantic/pydantic
+    https://github.com/kelektiv/node.bcrypt.js
+
+Frontend - Node.js:
+
+11. Next.js
+    License: MIT License
+    https://github.com/vercel/next.js
+
+12. React
+    License: MIT License
+    https://github.com/facebook/react
+
+13. Tailwind CSS
+    License: MIT License
+    https://github.com/tailwindlabs/tailwindcss
+
+14. TypeScript
+    License: Apache License 2.0
+    https://github.com/microsoft/TypeScript
+
+---
+
+DATA SOURCES
+
+Health content is sourced from:
+
+1. Tainacan Collections (WordPress)
+   Curated by FUNSALUD health specialists
+
+2. IMSS Clinical Guidelines
+   Instituto Mexicano del Seguro Social
+   https://www.imss.gob.mx/
+
+3. ISSSTE Guidelines
+   Instituto de Seguridad y Servicios Sociales de los Trabajadores del Estado
+   https://www.issste.gob.mx/
+
+4. Official Mexican Health Sources
+   Secretaría de Salud and other institutions
+
+---
+
+INFRASTRUCTURE
+
+This project is designed to run on:
+- AWS Mexico Region (mx-central-1) for data storage
+- AWS US Region (us-east-1) for optional GPU inference
+- All infrastructure managed by FUNSALUD
 
 ---
 
@@ -66,6 +126,18 @@ Always seek the advice of your physician or other qualified health provider
 with any questions you may have regarding a medical condition.
 
 The health content provided through this system is sourced from public
-educational materials and may not reflect the most current medical research
-or guidelines. Never disregard professional medical advice or delay in
-seeking it because of information obtained through this software.
+educational materials and human-curated sources verified by FUNSALUD health
+specialists. Content may not reflect the most current medical research or
+guidelines.
+
+Never disregard professional medical advice or delay in seeking it because
+of information obtained through this software.
+
+---
+
+CONTACT
+
+Website: https://ai.ominis.org
+Admin: https://admin.ominis.org
+Email: curacion-ominis@funsalud.org.mx
+Organization: Fundación Mexicana para la Salud A.C.

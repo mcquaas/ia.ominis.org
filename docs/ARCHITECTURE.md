@@ -1,349 +1,514 @@
-# Ominis Health LLM - Architecture Documentation
+# Architecture Documentation
 
-This document provides a detailed technical overview of the Ominis Health LLM system architecture.
-
-**All components run 100% within Mexico (AWS mx-central-1) with no external AI API calls.**
+This document provides a comprehensive overview of the Ominis Health LLM system architecture.
 
 ## Table of Contents
 
-- [System Overview](#system-overview)
-- [Component Architecture](#component-architecture)
+- [High-Level Overview](#high-level-overview)
+- [System Components](#system-components)
+- [Frontend Architecture](#frontend-architecture)
+- [Backend Architecture (Strapi)](#backend-architecture-strapi)
+- [RAG Engine](#rag-engine)
+- [Hybrid Inference](#hybrid-inference)
 - [Data Flow](#data-flow)
 - [AWS Resources](#aws-resources)
-- [Security Architecture](#security-architecture)
-- [Scalability Considerations](#scalability-considerations)
+- [Security](#security)
+- [Scalability](#scalability)
 
-## System Overview
+## High-Level Overview
 
-Ominis Health LLM is a Retrieval-Augmented Generation (RAG) system designed to provide accurate health information in Spanish. The system follows a serverless architecture pattern with self-hosted LLM inference, ensuring **100% data residency in Mexico**.
+The Ominis Health LLM is a multi-component system with:
 
-### High-Level Architecture
+- **Frontend**: Next.js 16 web application
+- **Admin Backend**: Strapi V5 for user and content management
+- **RAG Engine**: Python-based retrieval and generation
+- **Inference**: Self-hosted ominis-2.0 (CPU/GPU)
+- **Data Storage**: 100% in Mexico (AWS mx-central-1)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                              USER LAYER                                  │
-│  ┌─────────────────────────────────────────────────────────────────────┐│
-│  │                      Frontend (index.html)                          ││
-│  │  - Chat interface                                                   ││
-│  │  - Source display                                                   ││
-│  │  - API endpoint configuration                                       ││
-│  └─────────────────────────────────────────────────────────────────────┘│
+│                              Users                                       │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ HTTPS
+        ┌───────────────────────────┼───────────────────────────┐
+        ▼                           ▼                           ▼
+┌───────────────┐         ┌───────────────┐         ┌───────────────┐
+│  ai.ominis.org│         │admin.ominis.org│        │ api.ominis.org│
+│  (Frontend)   │         │   (Strapi)    │         │  (RAG API)    │
+│               │         │               │         │               │
+│  - Chat UI    │         │  - Auth       │         │  - Query      │
+│  - /modelo    │         │  - API Keys   │         │  - Sources    │
+│  - Login/Reg  │         │  - Sources    │         │  - Inference  │
+└───────────────┘         └───────────────┘         └───────────────┘
+        │                           │                           │
+        └───────────────────────────┼───────────────────────────┘
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    API LAYER (mx-central-1 - Mexico)                     │
-│  ┌─────────────────────────────────────────────────────────────────────┐│
-│  │                    AWS API Gateway                                  ││
-│  │  - REST API endpoint                                                ││
-│  │  - CORS configuration                                               ││
-│  │  - Request validation                                               ││
-│  └─────────────────────────────────────────────────────────────────────┘│
+│                     Data Layer (AWS mx-central-1)                        │
+│                                                                          │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐        │
+│  │  S3 Raw    │  │ S3 Chunks  │  │ S3 Vectors │  │ PostgreSQL │        │
+│  │  (sources) │  │            │  │  (FAISS)   │  │  (Strapi)  │        │
+│  └────────────┘  └────────────┘  └────────────┘  └────────────┘        │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ AWS Internal
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    COMPUTE LAYER (mx-central-1 - Mexico)                 │
-│  ┌─────────────────────────────────────────────────────────────────────┐│
-│  │                    AWS Lambda (ominis-query)                        ││
-│  │  1. Parse request                                                   ││
-│  │  2. Load cached chunks from S3                                      ││
-│  │  3. Search for relevant content (keyword + semantic)                ││
-│  │  4. Build context from results                                      ││
-│  │  5. Call Ominis-2.0 LLM (EC2 in Mexico)                             ││
-│  │  6. Return formatted response                                       ││
-│  └─────────────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                    ┌───────────────┴───────────────┐
-                    │                               │
-                    ▼                               ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    SERVICE LAYER (mx-central-1 - Mexico)                 │
-│  ┌───────────────────────────┐  ┌───────────────────────────────────┐  │
-│  │ S3 Storage (mx-central-1) │  │ Ominis-2.0 on EC2 (mx-central-1)  │  │
-│  │                           │  │                                    │  │
-│  │ - Vector index            │  │ - Self-hosted LLM inference       │  │
-│  │ - Document chunks         │  │ - Medical-focused model           │  │
-│  │ - Metadata                │  │ - No external API calls           │  │
-│  │ - Raw content             │  │ - 100% Mexico data residency      │  │
-│  └───────────────────────────┘  └───────────────────────────────────┘  │
+│                     Inference Layer                                      │
+│                                                                          │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────┐       │
+│  │   CPU (mx-central-1)        │  │   GPU (us-east-1) Optional  │       │
+│  │   c6i.4xlarge               │  │   g4dn.xlarge (T4)          │       │
+│  │   ~5-10s response           │  │   ~2-3s response            │       │
+│  └─────────────────────────────┘  └─────────────────────────────┘       │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Design Principles
+## System Components
 
-1. **100% Mexico Data Residency**: All data storage and processing in mx-central-1
-2. **Self-hosted LLM**: Ominis-2.0 on EC2 eliminates external AI API dependencies
-3. **Local Embeddings**: Sentence-transformers run locally during indexing
-4. **No External Calls**: Query processing makes no calls outside Mexico
-5. **Serverless API**: Lambda + API Gateway for cost efficiency
+### 1. Frontend (Next.js)
 
-## Component Architecture
+Modern web application built with Next.js 16 and React 19.
 
-### 1. Data Ingestion Pipeline
+**Features:**
+- Chat interface with multi-source search
+- Model information page (`/modelo`)
+- User authentication (login, register, password reset)
+- User profile management
+- Responsive design with Tailwind CSS 4
 
-The ingestion pipeline fetches content from WordPress/Tainacan and prepares it for the RAG system.
+**Tech Stack:**
+| Technology | Version | Purpose |
+|------------|---------|---------|
+| Next.js | 16.x | React framework |
+| React | 19.x | UI library |
+| Tailwind CSS | 4.x | Styling |
+| TypeScript | 5.x | Type safety |
 
+**Key Files:**
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  WordPress/  │────▶│   Content    │────▶│   Document   │────▶│   S3 Raw     │
-│  Tainacan    │     │   Extraction │     │   Formatting │     │   (Mexico)   │
-│  API         │     │              │     │              │     │              │
-└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+frontend/src/
+├── app/
+│   ├── page.tsx              # Main chat interface
+│   ├── modelo/page.tsx       # Model specifications
+│   ├── login/page.tsx        # Login page
+│   ├── register/page.tsx     # Registration page
+│   ├── profile/page.tsx      # User profile
+│   ├── forgot-password/      # Password reset
+│   └── api/
+│       ├── query/route.ts    # CPU inference proxy
+│       ├── query-gpu/route.ts # GPU inference proxy
+│       └── query-stream/route.ts # Streaming proxy
+├── components/
+│   ├── MainLayout.tsx        # Chat UI component
+│   ├── Header.tsx            # Site header
+│   ├── Footer.tsx            # Site footer
+│   └── auth/                 # Auth components
+├── hooks/
+│   └── useAuth.tsx           # Authentication hook
+├── services/
+│   └── auth.ts               # Auth API service
+└── types/
+    └── auth.ts               # TypeScript types
 ```
+
+### 2. Backend (Strapi V5)
+
+Headless CMS for administration and API management.
+
+**Features:**
+- User authentication with JWT
+- Role-based access control (Researcher, Admin, SuperAdmin)
+- API key generation and management
+- RAG source CRUD operations
+- System statistics and monitoring
+- Query log aggregation
+
+**Roles:**
+| Role | Capabilities |
+|------|-------------|
+| Researcher | Use API, manage own API keys |
+| Admin | + View stats, manage RAG sources |
+| SuperAdmin | + Manage users and roles |
+
+**API Endpoints:**
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/auth/local` | POST | Login |
+| `/v1/auth/local/register` | POST | Register |
+| `/v1/users/me` | GET | Get current user |
+| `/v1/api-keys` | GET/POST | Manage API keys |
+| `/v1/api-keys/:id/revoke` | POST | Revoke key |
+| `/v1/rag-sources` | GET/POST | Manage sources |
+| `/v1/system-stats` | GET | System statistics |
+| `/v1/query-logs` | GET | Query logs |
+
+**Key Files:**
+```
+backend/src/
+├── api/
+│   ├── api-key/              # API key management
+│   ├── rag-source/           # RAG source management
+│   ├── system-stat/          # System statistics
+│   └── query-log/            # Query logging
+├── middlewares/
+│   ├── api-key-auth.js       # API key validation
+│   └── rate-limit.js         # Rate limiting
+├── policies/
+│   ├── is-admin.js           # Admin check
+│   ├── is-owner-or-admin.js  # Ownership check
+│   └── is-super-admin.js     # SuperAdmin check
+└── index.js                  # Bootstrap
+```
+
+### 3. RAG Engine (Python)
+
+Retrieval-Augmented Generation pipeline.
 
 **Components:**
-- `wordpress_client.py`: WordPress REST API client
-- `tainacan_client.py`: Tainacan collection API client
-- `ingest_wordpress.py`: WordPress ingestion orchestrator
-- `ingest_tainacan.py`: Tainacan ingestion orchestrator
 
-**Data Extracted:**
-- Post/page content (HTML → Markdown)
-- Titles and URLs
-- Metadata (categories, tags, dates)
-- Tainacan custom fields
+#### Ingestion
+- WordPress/Tainacan content
+- IMSS clinical guidelines
+- ISSSTE guidelines
+- Mexican health sources
 
-### 2. RAG Index Building Pipeline
-
-Transforms raw documents into a searchable vector index. **All processing runs locally - no external API calls.**
-
+#### Processing
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   S3 Raw     │────▶│   Document   │────▶│   Embedding  │────▶│   FAISS      │
-│   Documents  │     │   Chunking   │     │   Generation │     │   Index      │
-│   (Mexico)   │     │              │     │   (LOCAL)    │     │   (Mexico)   │
-└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
-                            │                    │
-                            ▼                    ▼
-                     512 tokens/chunk      sentence-transformers
-                     50 token overlap      (runs locally)
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   Raw Data   │───▶│   Chunker    │───▶│   Embedder   │───▶│   FAISS      │
+│   (JSON)     │    │  (512 tok)   │    │  (local)     │    │   Index      │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
 ```
 
-**Components:**
-- `chunker.py`: Document segmentation (512 tokens, 50 overlap)
-- `embedder.py`: Text → vector using local sentence-transformers
-- `vector_store.py`: FAISS index management
-- `build_index.py`: Pipeline orchestrator
-
-**Embedding Generation:**
-- Model: `sentence-transformers/all-MiniLM-L6-v2`
-- Dimension: 384
-- Runs locally on build machine - no external API calls
-- Index uploaded to S3 in Mexico
-
-### 3. Query Processing Pipeline
-
-Real-time query handling in AWS Lambda with self-hosted LLM.
-
+**Key Files:**
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   User       │────▶│   Keyword    │────▶│   Content    │────▶│   Context    │
-│   Question   │     │   Matching   │     │   Retrieval  │     │   Building   │
-└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
-                                                                      │
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐           │
-│   Response   │◀────│   Answer     │◀────│   Ollama     │◀──────────┘
-│   + Sources  │     │   Formatting │     │   (EC2 MX)   │
-└──────────────┘     └──────────────┘     └──────────────┘
+scripts/
+├── ingestion/
+│   ├── ingest_tainacan.py
+│   ├── ingest_wordpress.py
+│   ├── ingest_imss_guidelines.py
+│   ├── ingest_issste_guidelines.py
+│   └── ingest_mexican_health_sources.py
+├── rag/
+│   ├── chunker.py            # 512 tokens, 50 overlap
+│   ├── embedder.py           # sentence-transformers
+│   ├── vector_store.py       # FAISS operations
+│   ├── build_index.py        # Pipeline orchestration
+│   └── query_engine.py       # Query processing
+└── sync_rag_to_strapi.py     # Sync sources to Strapi
 ```
 
-**Processing Steps:**
-1. **Parse Request**: Extract question from API call
-2. **Load Chunks**: Get cached document chunks from S3
-3. **Keyword Search**: Find relevant chunks using semantic keyword matching
-4. **Context Building**: Format retrieved chunks with metadata
-5. **LLM Generation**: Generate answer via Ominis-2.0 on EC2 in Mexico
-6. **Response Formatting**: Structure answer with source citations
+### 4. Lambda Functions
 
-**Search Algorithm:**
-The Lambda uses a lightweight semantic search without external embeddings:
-- Word overlap scoring with stop word filtering
-- Phrase match boosting
-- Title match boosting
-- All computation stays in Mexico
+Serverless query handlers.
 
-### 4. LLM Inference (Ominis-2.0)
+| Handler | Description |
+|---------|-------------|
+| `handler.py` | Basic query processing |
+| `handler_authenticated.py` | With API key validation |
+| `handler_improved.py` | Enhanced prompts and responses |
 
-Self-hosted LLM inference ensures no data leaves Mexico.
+## Frontend Architecture
+
+### Chat Interface
+
+The main chat interface supports:
+
+- **Multi-source search**: RAG, Web, PubMed
+- **Toggle controls**: Enable/disable search sources
+- **Image upload**: Attach images to queries
+- **Message editing**: Edit and regenerate responses
+- **Citation formatting**: Automatic source references
+- **Streaming responses**: Real-time text generation
+
+```tsx
+// MainLayout.tsx - Key state
+const [ragSearchEnabled, setRagSearchEnabled] = useState(true);
+const [webSearchEnabled, setWebSearchEnabled] = useState(true);
+const [pubmedSearchEnabled, setPubmedSearchEnabled] = useState(true);
+const [uploadedImages, setUploadedImages] = useState([]);
+```
+
+### Authentication Flow
+
+```
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   Login      │───▶│   Strapi     │───▶│   JWT Token  │
+│   Form       │    │   Auth API   │    │   Storage    │
+└──────────────┘    └──────────────┘    └──────────────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │   useAuth    │
+                    │   Hook       │
+                    └──────────────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │  user    │ │  isAdmin │ │  logout  │
+        └──────────┘ └──────────┘ └──────────┘
+```
+
+### API Routes
+
+Next.js API routes proxy requests to backend services:
+
+| Route | Target |
+|-------|--------|
+| `/api/query` | Mexico RAG server (CPU) |
+| `/api/query-gpu` | US GPU server (faster) |
+| `/api/query-stream` | Streaming endpoint |
+
+## Backend Architecture (Strapi)
+
+### Content Types
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                       Strapi Content Types                        │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │  api-key    │    │  rag-source │    │ system-stat │          │
+│  │             │    │             │    │             │          │
+│  │ - name      │    │ - title     │    │ - total*    │          │
+│  │ - keyHash   │    │ - slug      │    │ - model*    │          │
+│  │ - owner     │    │ - sourceType│    │ - avgTime*  │          │
+│  │ - status    │    │ - status    │    │ - errors    │          │
+│  │ - perms     │    │ - content   │    │             │          │
+│  │ - rateLimit │    │ - chunks    │    │             │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
+│                                                                   │
+│  ┌─────────────┐                                                 │
+│  │ query-log   │                                                 │
+│  │             │                                                 │
+│  │ - query     │                                                 │
+│  │ - response  │                                                 │
+│  │ - timing    │                                                 │
+│  │ - apiKey    │                                                 │
+│  └─────────────┘                                                 │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Middleware
+
+**API Key Authentication:**
+```javascript
+// middlewares/api-key-auth.js
+module.exports = async (ctx, next) => {
+  const apiKey = ctx.request.header['x-api-key'];
+  if (!apiKey) return ctx.unauthorized('API key required');
+  
+  const valid = await validateApiKey(apiKey);
+  if (!valid) return ctx.unauthorized('Invalid API key');
+  
+  await next();
+};
+```
+
+**Rate Limiting:**
+```javascript
+// middlewares/rate-limit.js
+module.exports = async (ctx, next) => {
+  const key = ctx.state.apiKey;
+  const limit = key.rateLimit || 100;
+  // ... rate limit logic
+};
+```
+
+## RAG Engine
+
+### Ingestion Pipeline
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│              Ominis-2.0 Server (EC2 mx-central-1)                │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                     Ominis-2.0 Model                       │  │
-│  │  - Optimized for health information                       │  │
-│  │  - Spanish language support                               │  │
-│  │  - Runs entirely within Mexico                            │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│                     Ingestion Sources                            │
+├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                     Ollama API                             │  │
-│  │  - POST /api/generate                                     │  │
-│  │  - Temperature: 0.3 (factual responses)                   │  │
-│  │  - Max tokens: 1024                                       │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │  Tainacan    │  │  WordPress   │  │  IMSS        │           │
+│  │  Collections │  │  Posts/Pages │  │  Guidelines  │           │
+│  └──────────────┘  └──────────────┘  └──────────────┘           │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐                             │
+│  │  ISSSTE      │  │  Manual      │                             │
+│  │  Guidelines  │  │  Uploads     │                             │
+│  └──────────────┘  └──────────────┘                             │
+│                                                                  │
 └─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │   S3 Raw Data    │
+                    │   (mx-central-1) │
+                    └──────────────────┘
 ```
 
-**Configuration:**
-- Endpoint: `http://ollama-ec2:11434/api/generate`
-- Model: Ominis-2.0 (7B parameters, 32K context)
-- No external API calls - 100% self-hosted
+### Processing Pipeline
 
-**Model Specifications:**
-| Spec | Value |
-|------|-------|
-| Parameters | 7 billion |
-| Context | 32,768 tokens |
-| Training | ~3M PubMed articles |
-| Architecture | Transformer + GQA |
+```python
+# build_index.py - Pipeline flow
+documents = load_documents_from_s3(prefix)  # 1. Load
+chunks = chunker.chunk_document(doc)        # 2. Chunk (512 tokens)
+embeddings = embedder.embed_texts(texts)    # 3. Embed (local)
+vector_store.add_chunks(chunks)             # 4. Index (FAISS)
+vector_store.save_to_s3(bucket, prefix)     # 5. Persist
+```
 
-For complete model documentation, see [MODEL.md](MODEL.md).
-
-### 5. Vector Store Architecture
-
-FAISS-based similarity search with S3 persistence.
+### Query Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                       S3 Persistence (Mexico)                    │
-│  vectors/                                                        │
-│  ├── chunks.json      # Chunk content + metadata                │
-│  ├── embeddings.json  # Pre-computed embeddings (optional)      │
-│  └── metadata.json    # Index configuration                     │
-└─────────────────────────────────────────────────────────────────┘
+User Query
+    │
+    ▼
+┌──────────────────┐
+│  Keyword Search  │  (fast pre-filter)
+└──────────────────┘
+    │
+    ▼
+┌──────────────────┐
+│  Vector Search   │  (FAISS similarity)
+└──────────────────┘
+    │
+    ▼
+┌──────────────────┐
+│  Context Format  │  (top-k chunks)
+└──────────────────┘
+    │
+    ▼
+┌──────────────────┐
+│  ominis-2.0      │  (generate answer)
+└──────────────────┘
+    │
+    ▼
+┌──────────────────┐
+│  Response +      │
+│  Citations       │
+└──────────────────┘
 ```
+
+## Hybrid Inference
+
+### Deployment Options
+
+| Option | Location | Hardware | Response Time | Cost |
+|--------|----------|----------|---------------|------|
+| CPU | Mexico (mx-central-1) | c6i.4xlarge | 5-10s | $0.17/hr |
+| GPU | US (us-east-1) | g4dn.xlarge (T4) | 2-3s | $0.52/hr |
+
+### Data Flow (GPU)
+
+When GPU inference is used:
+1. Query arrives at frontend
+2. Frontend routes to GPU API
+3. GPU server fetches vectors from Mexico S3
+4. Inference runs on ominis-2.0
+5. Response returns to user
+
+**Only query text travels to US. All data remains in Mexico.**
 
 ## Data Flow
 
-### Ingestion Flow
+### Complete Request Flow
 
 ```
-1. Content Source (WordPress/Tainacan)
-   └─▶ API Request (GET posts/items)
-       └─▶ HTML Content
-           └─▶ Markdown Conversion (html2text)
-               └─▶ Structured Document
-                   └─▶ S3 Upload (mx-central-1)
-                       └─▶ Manifest Generation
+┌──────────────────────────────────────────────────────────────────┐
+│  1. User submits question via chat UI                            │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  2. Frontend calls /api/query or /api/query-gpu                  │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  3. API validates request (optional API key)                     │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  4. RAG pipeline:                                                 │
+│     a. Keyword search (stop word removal)                        │
+│     b. Vector similarity (FAISS)                                 │
+│     c. Top-k chunk retrieval                                     │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  5. ominis-2.0 generates response with citations                 │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  6. Response + sources returned to frontend                      │
+└──────────────────────────────────────────────────────────────────┘
 ```
-
-### Index Building Flow
-
-```
-1. S3 Raw Documents (Mexico)
-   └─▶ Document Loading
-       └─▶ Text Chunking (512 tokens)
-           └─▶ Local Embedding Generation
-               └─▶ sentence-transformers (no external API)
-                   └─▶ FAISS Index Creation
-                       └─▶ S3 Upload (mx-central-1)
-```
-
-### Query Flow (100% Mexico)
-
-```
-1. User Question (Spanish)
-   └─▶ API Gateway (mx-central-1)
-       └─▶ Lambda Handler (mx-central-1)
-           └─▶ Load Chunks from S3 (mx-central-1)
-               └─▶ Keyword Semantic Search (in-memory)
-                   └─▶ Build Context String
-                       └─▶ Ollama API Call (EC2 mx-central-1)
-                           └─▶ Response + Sources
-                               └─▶ API Response (JSON)
-```
-
-**No external calls at any step.**
 
 ## AWS Resources
 
-### Resource Inventory
+### Mexico Region (mx-central-1)
 
-| Resource Type | Name | Region | Purpose |
-|---------------|------|--------|---------|
-| S3 Bucket | ominis-health-raw-data-mx | mx-central-1 | Raw ingested content |
-| S3 Bucket | ominis-health-processed-data-mx | mx-central-1 | Processed chunks |
-| S3 Bucket | ominis-health-embeddings-mx | mx-central-1 | Vector index storage |
-| S3 Bucket | ominis-health-models-mx | mx-central-1 | Model artifacts |
-| EC2 Instance | ominis-2.0-server | mx-central-1 | Ominis-2.0 LLM inference |
-| IAM Role | ominis-lambda-role | Global | Lambda execution |
-| Lambda Function | ominis-query | mx-central-1 | Query processing |
-| API Gateway | ominis-health-api | mx-central-1 | REST API |
+| Resource | Name | Purpose |
+|----------|------|---------|
+| S3 | ominis-health-raw-data-mx | Raw sources |
+| S3 | ominis-health-processed-data-mx | Chunks |
+| S3 | ominis-health-embeddings-mx | FAISS index |
+| EC2 | ominis-ollama | CPU inference |
+| EC2 | ominis-frontend | Next.js |
+| EC2 | ominis-strapi | Strapi backend |
+| RDS | ominis-postgres | Strapi database |
 
-### IAM Permissions
+### US Region (us-east-1) - Optional
 
-**Lambda Execution Role:**
-```json
-{
-  "s3:GetObject": "ominis-health-* buckets",
-  "s3:ListBucket": "ominis-health-* buckets",
-  "logs:*": "CloudWatch Logs"
-}
-```
+| Resource | Name | Purpose |
+|----------|------|---------|
+| EC2 | ominis-ollama-gpu | GPU inference |
+| EIP | ominis-ollama-gpu-eip | Static IP |
 
-Note: No Bedrock or SageMaker permissions needed - LLM runs on self-hosted EC2.
+## Security
 
-## Security Architecture
+### Authentication
 
-### Network Architecture
+- **Frontend**: JWT tokens stored in localStorage
+- **API Keys**: Hashed with bcrypt, shown once on creation
+- **Strapi**: Built-in users-permissions plugin
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Security Boundaries                          │
-│                                                                  │
-│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐       │
-│  │   Public    │────▶│ API Gateway │────▶│   Lambda    │       │
-│  │   Internet  │     │  (CORS)     │     │             │       │
-│  └─────────────┘     └─────────────┘     └─────────────┘       │
-│                                                 │                │
-│                                    ┌────────────┘                │
-│                                    ▼                             │
-│                           ┌─────────────┐                       │
-│                           │ EC2 Ollama  │                       │
-│                           │ (VPC only)  │                       │
-│                           └─────────────┘                       │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+### Authorization
+
+- **Role-based**: Researcher < Admin < SuperAdmin
+- **Resource-based**: Owner or admin access
+- **API Keys**: Per-key permissions (query, queryGpu, sources)
 
 ### Data Protection
 
-- **At Rest**: S3 server-side encryption (SSE-S3)
-- **In Transit**: TLS 1.2+ for all API calls
-- **Access Control**: IAM policies with least privilege
-- **LLM Security**: Ollama runs in private VPC subnet
+- **In Transit**: TLS 1.2+
+- **At Rest**: S3 default encryption (AES-256)
+- **Secrets**: AWS Secrets Manager / env vars
 
-## Scalability Considerations
+## Scalability
 
-### Current Limitations
+### Horizontal Scaling
 
-| Component | Limit | Mitigation |
-|-----------|-------|------------|
-| Lambda Memory | 10GB max | Sufficient for chunk search |
-| Lambda Timeout | 15 min | Queries complete in <30s |
-| Ominis-2.0 Throughput | EC2 instance size | Scale vertically or add replicas |
-| Cold Start | ~5-10s | Provisioned concurrency option |
+| Component | Strategy |
+|-----------|----------|
+| Frontend | Vercel / EC2 Auto Scaling |
+| Strapi | Containerize with load balancer |
+| RAG API | Lambda concurrency / EC2 ASG |
+| FAISS | Read replicas from S3 |
 
-### Scaling Strategy
+### Performance
 
-1. **Query Scaling**: Lambda auto-scales to demand
-2. **LLM Scaling**: Add Ominis-2.0 replicas behind load balancer
-3. **Storage Scaling**: S3 scales automatically
-4. **Cost Scaling**: Pay-per-use model optimal for variable load
-
-### Performance Optimization
-
-- **Lambda Warm Starts**: Chunks cached in global scope
-- **Keyword Search**: Fast in-memory search without external API calls
-- **Model Caching**: Ominis-2.0 stays loaded in memory
-- **Connection Reuse**: Keep-alive connections to LLM server
+| Optimization | Implementation |
+|--------------|----------------|
+| Caching | Lambda warm starts, FAISS in memory |
+| CDN | CloudFront for static assets |
+| GPU | Optional T4 for 10-30x speed |
+| Streaming | SSE for real-time responses |
 
 ---
 
-For implementation details, see [DEVELOPMENT.md](DEVELOPMENT.md).
-For data privacy information, see [DATA_PRIVACY.md](DATA_PRIVACY.md).
+For development guide, see [DEVELOPMENT.md](DEVELOPMENT.md).
+For API documentation, see [API_STRAPI.md](API_STRAPI.md).
