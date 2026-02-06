@@ -1,0 +1,46 @@
+import { NextRequest, NextResponse } from 'next/server';
+
+// GPU RAG API - Faster processing in US (same ominis-2.0 model)
+const GPU_API = process.env.GPU_API_URL || 'http://44.215.64.245:8080/query';
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    
+    // Transform request for backend API
+    const apiBody = {
+      question: body.question,
+      history: body.history,
+      image: body.images && body.images.length > 0 ? body.images[0] : undefined,
+      rag_search: body.rag_search !== false, // Default to true
+      web_search: body.web_search !== false, // Default to true
+      pubmed_search: body.pubmed_search !== false, // Default to true
+      num_sources: body.num_sources || 5,
+    };
+    
+    const response = await fetch(GPU_API, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(apiBody),
+    });
+
+    if (!response.ok) {
+      throw new Error(`GPU API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return NextResponse.json(data);
+  } catch (error) {
+    console.error('GPU API error:', error);
+    return NextResponse.json(
+      { error: 'Error connecting to GPU server', answer: 'Lo siento, hubo un error. Por favor intenta de nuevo.' },
+      { status: 500 }
+    );
+  }
+}
+
+export async function OPTIONS() {
+  return NextResponse.json({}, { status: 200 });
+}
