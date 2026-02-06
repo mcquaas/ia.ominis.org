@@ -296,4 +296,4 @@ For anonymous users:
 For technical details, see [ARCHITECTURE.md](ARCHITECTURE.md).
 For API documentation, see [API_STRAPI.md](API_STRAPI.md).
 
-**Contact**: curacion-ominis@funsalud.org.mx
+**Contact**: ominis@funsalud.org.mx

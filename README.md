@@ -344,7 +344,7 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 ## Support
 
 - Website: [ai.ominis.org](https://ai.ominis.org)
-- Email: curacion-ominis@funsalud.org.mx
+- Email: ominis@funsalud.org.mx
 - Organization: [Fundación Mexicana para la Salud A.C.](https://funsalud.org.mx/)
 
 ---

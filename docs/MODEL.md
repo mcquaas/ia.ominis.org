@@ -297,4 +297,4 @@ https://ai.ominis.org
 For system architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 For development guide, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
-**Contact**: curacion-ominis@funsalud.org.mx
+**Contact**: ominis@funsalud.org.mx

@@ -60,7 +60,7 @@ export default function Footer() {
               </li>
               <li>
                 <a 
-                  href="mailto:curacion-ominis@funsalud.org.mx"
+                  href="mailto:ominis@funsalud.org.mx"
                   className="text-gray-400 hover:text-white transition-colors text-sm"
                 >
                   Contacto
