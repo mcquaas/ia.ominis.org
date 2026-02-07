@@ -98,34 +98,38 @@ For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITE
 
 Modern web interface with:
 - Chat interface with multi-source search (RAG, Web, PubMed)
+- **Multi-model selection**: ominis-2.0 (BioMistral) and falcon-40b-instruct
 - Model information page (`/modelo`)
 - User authentication (login, register, forgot password)
 - User profile management
+- Citation capsules with clickable source references
 - Responsive design with Tailwind CSS
 
-### Backend (Strapi V5)
+### Backend (Haystack + FastAPI)
 
-Admin panel and API for:
+Python-based API server with:
+- **RAG Pipeline**: Haystack-powered document retrieval
 - **User Management**: JWT authentication, role-based access control
 - **Roles**: Researcher, Admin, SuperAdmin
 - **API Keys**: Generate, revoke, and manage API keys
-- **RAG Sources**: CRUD operations for knowledge base sources
-- **System Stats**: Monitor model status, query metrics
-- **Query Logs**: Track API usage and performance
+- **Multi-Model Support**: Route queries to different LLMs
+- **Streaming Responses**: SSE for real-time text generation
 
-### RAG Engine (Python)
+### RAG Engine
 
 - **Ingestion**: WordPress, Tainacan, IMSS, ISSSTE guidelines
 - **Chunking**: 512 tokens with 50 token overlap
 - **Embeddings**: Local sentence-transformers (no external API)
-- **Vector Store**: FAISS index stored in S3
-- **Query**: ominis-2.0 for response generation
+- **Vector Store**: PostgreSQL with pgvector / FAISS
+- **Query**: Multiple LLM options for response generation
 
 ### Infrastructure
 
 - **Data Storage**: AWS S3 in Mexico (mx-central-1)
-- **CPU Inference**: EC2 in Mexico (default)
-- **GPU Inference**: EC2 g4dn.xlarge in US (optional, 10-30x faster)
+- **Haystack Backend**: EC2 t3.large in Mexico
+- **GPU Inference**: 
+  - EC2 g4dn.xlarge (T4) for ominis-2.0
+  - EC2 g5.2xlarge (A10G) for falcon-40b-instruct
 - **CDN**: CloudFront for global delivery
 - **Monitoring**: Status watchdog for health checks
 
@@ -173,27 +177,35 @@ For complete model documentation, see [docs/MODEL.md](docs/MODEL.md).
 | Styling | Tailwind CSS | 4.x |
 | Language | TypeScript | 5.x |
 
-### Backend (Admin)
-| Component | Technology | Version |
+### Backend (Haystack)
+| Component | Technology | Purpose |
 |-----------|------------|---------|
-| CMS | Strapi | V5 |
-| Database | PostgreSQL / SQLite | - |
-| Auth | JWT | - |
+| Framework | FastAPI | REST API server |
+| RAG Framework | Haystack | Document retrieval |
+| Database | PostgreSQL | User data, API keys |
+| Auth | JWT + API Keys | Authentication |
 
 ### RAG Engine
 | Component | Technology | Purpose |
 |-----------|------------|---------|
 | Language | Python 3.11+ | Core logic |
-| Vector Store | FAISS | Similarity search |
+| Vector Store | FAISS / pgvector | Similarity search |
 | Embeddings | Sentence-Transformers | Text vectorization |
-| LLM | ominis-2.0 via Ollama | Response generation |
+| LLM | Ollama (multi-model) | Response generation |
+
+### Available Models
+| Model | GPU | Purpose |
+|-------|-----|---------|
+| ominis-2.0 (BioMistral) | T4 16GB | Medical-specialized |
+| falcon-40b-instruct | A10G 24GB | General knowledge |
 
 ### Infrastructure
 | Component | Technology | Purpose |
 |-----------|------------|---------|
 | Data Storage | AWS S3 (mx-central-1) | 100% Mexico |
-| CPU Inference | EC2 c6i.4xlarge | Cost-effective |
-| GPU Inference | EC2 g4dn.xlarge (T4) | Fast inference |
+| Haystack Backend | EC2 t3.large | API server |
+| GPU (ominis-2.0) | EC2 g4dn.xlarge | Medical LLM |
+| GPU (falcon-40b) | EC2 g5.2xlarge | General LLM |
 
 ## Quick Start
 

@@ -16,8 +16,9 @@ import type {
   QueryStats,
 } from '@/types/auth';
 
-// Configuration
-const STRAPI_URL = process.env.NEXT_PUBLIC_STRAPI_URL || 'http://localhost:1337';
+// Configuration - Backend API URL
+// Supports both the new Haystack backend and legacy Strapi backend
+const STRAPI_URL = process.env.NEXT_PUBLIC_STRAPI_URL || 'http://localhost:8000';
 const API_PREFIX = '/v1';
 
 // Token storage key

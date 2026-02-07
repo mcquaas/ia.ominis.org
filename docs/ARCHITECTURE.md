@@ -72,9 +72,12 @@ Modern web application built with Next.js 16 and React 19.
 
 **Features:**
 - Chat interface with multi-source search
+- **Multi-model selection**: ominis-2.0 and falcon-40b-instruct
 - Model information page (`/modelo`)
 - User authentication (login, register, password reset)
 - User profile management
+- Citation capsules with clickable references
+- Streaming responses with SSE
 - Responsive design with Tailwind CSS 4
 
 **Tech Stack:**
@@ -112,17 +115,18 @@ frontend/src/
     └── auth.ts               # TypeScript types
 ```
 
-### 2. Backend (Strapi V5)
+### 2. Backend (Haystack + FastAPI)
 
-Headless CMS for administration and API management.
+Python-based API server with Haystack for RAG.
 
 **Features:**
 - User authentication with JWT
 - Role-based access control (Researcher, Admin, SuperAdmin)
 - API key generation and management
-- RAG source CRUD operations
-- System statistics and monitoring
-- Query log aggregation
+- RAG pipeline with Haystack
+- Multi-model routing (ominis-2.0, falcon-40b)
+- Streaming responses via SSE
+- Rate limiting per API key
 
 **Roles:**
 | Role | Capabilities |
@@ -134,14 +138,13 @@ Headless CMS for administration and API management.
 **API Endpoints:**
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/auth/local` | POST | Login |
-| `/v1/auth/local/register` | POST | Register |
-| `/v1/users/me` | GET | Get current user |
+| `/v1/auth/login` | POST | Login |
+| `/v1/auth/register` | POST | Register |
+| `/v1/auth/me` | GET | Get current user |
 | `/v1/api-keys` | GET/POST | Manage API keys |
-| `/v1/api-keys/:id/revoke` | POST | Revoke key |
-| `/v1/rag-sources` | GET/POST | Manage sources |
-| `/v1/system-stats` | GET | System statistics |
-| `/v1/query-logs` | GET | Query logs |
+| `/v1/query` | POST | Non-streaming query |
+| `/v1/query-stream` | POST | Streaming query (SSE) |
+| `/v1/health` | GET | Health check |
 
 **Key Files:**
 ```
