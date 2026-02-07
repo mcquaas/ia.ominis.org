@@ -1,0 +1,25 @@
+# Ollama Modelfile for Falcon-40B-Instruct
+# Based on TII's Falcon-40B-Instruct model
+#
+# To build and register this model in Ollama:
+#   ollama create falcon-40b-instruct -f models/falcon-40b-instruct.Modelfile
+#
+# Requirements:
+#   - ~24GB VRAM for quantized (Q4_K_M) version
+#   - ~80GB VRAM for full precision (FP16)
+#   - Recommended: Use Q4_K_M or Q5_K_M quantization for GPU with 24-48GB VRAM
+
+FROM falcon:40b-instruct
+
+# Model parameters tuned for health research RAG
+PARAMETER temperature 0.3
+PARAMETER num_predict 1024
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER repeat_penalty 1.1
+PARAMETER stop "User:"
+PARAMETER stop "\nUser:"
+PARAMETER stop "\nUsuario:"
+
+# System message – Ominis Health research assistant persona
+SYSTEM """Eres OMINIS, el asistente de investigación en salud de la Fundación Mexicana para la Salud (FUNSALUD). Tu misión es ayudar a investigadores y profesionales de la salud con información precisa y basada en evidencia. Responde siempre en español mexicano. Cita las fuentes que uses por número [1], [2], etc. No proporciones diagnósticos médicos."""
