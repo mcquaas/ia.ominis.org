@@ -19,6 +19,13 @@ interface Message {
   images?: string[];
 }
 
+interface ModelOption {
+  id: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+}
+
 // ominis-2.0 (Mexican LLM by FUNSALUD)
 // Data is stored in Mexico (S3 mx-central-1), no 3rd party models
 // Inference runs on GPU for speed via /api/query-stream
@@ -40,6 +47,10 @@ export default function MainLayout() {
   const [uploadedImages, setUploadedImages] = useState<Array<{ data: string; name: string }>>([]);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
   const [modalImage, setModalImage] = useState<string | null>(null);
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([
+    { id: "ominis-2.0", displayName: "Ominis 2.0 (BioMistral)", description: "Medical-specialized LLM", isDefault: true },
+  ]);
+  const [selectedModel, setSelectedModel] = useState<string>("ominis-2.0");
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -51,7 +62,10 @@ export default function MainLayout() {
 
   const scrollToBottom = () => {
     if (messagesContainerRef.current) {
-      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+      messagesContainerRef.current.scrollTo({
+        top: messagesContainerRef.current.scrollHeight,
+        behavior: "smooth",
+      });
     }
   };
 
@@ -60,6 +74,11 @@ export default function MainLayout() {
     // Always refocus the input after messages change
     inputRef.current?.focus();
   }, [messages]);
+
+  // Also scroll when loading status changes (keeps spinner in view)
+  useEffect(() => {
+    if (isLoading) scrollToBottom();
+  }, [isLoading, loadingStatus]);
 
   const generateId = () => Math.random().toString(36).substring(2, 9);
 
@@ -241,63 +260,182 @@ export default function MainLayout() {
       }
     );
 
-    // Clean up extra spaces and empty parentheses
+    // Clean up extra spaces and empty parentheses (but preserve newlines)
     formattedContent = formattedContent.replace(/\(\s*\)/g, "");
-    formattedContent = formattedContent.replace(/\s{2,}/g, " ");
+    formattedContent = formattedContent.replace(/[^\S\n]{2,}/g, " "); // collapse spaces but NOT newlines
     formattedContent = formattedContent.replace(/\s+\./g, ".");
     formattedContent = formattedContent.replace(/\s+,/g, ",");
 
     return formattedContent.trim();
   };
 
-  // Render content with clickable citation links
+  // Render a citation capsule - maps [N] to source by ref_num or array index
+  const renderCitationCapsule = (sourceNum: string, sources: Source[], key: string | number) => {
+    const num = parseInt(sourceNum, 10);
+    // First try to find by ref_num (Perplexity-style backend numbering)
+    let source = sources.find((s: any) => s.ref_num === num);
+    // Fallback to array index
+    if (!source) {
+      source = sources[num - 1];
+    }
+    if (source && source.url) {
+      return (
+        <a
+          key={key}
+          href={source.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-medium bg-blue-500 hover:bg-blue-400 text-white rounded-full align-super mx-0.5 transition-colors"
+          title={source.title}
+        >
+          {sourceNum}
+        </a>
+      );
+    }
+    // No URL or source not found - render grey (non-clickable)
+    return (
+      <span
+        key={key}
+        className="inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-medium bg-gray-500 text-white rounded-full align-super mx-0.5"
+        title="Fuente no disponible"
+      >
+        {sourceNum}
+      </span>
+    );
+  };
+
+  // Render inline text with citations and markdown bold/italic
+  const renderInlineContent = (text: string, sources: Source[], keyPrefix: string) => {
+    // Split by citations [N], bold **text**, and italic *text*
+    const parts = text.split(/(\[\d+\]|\*\*[^*]+\*\*|\*[^*]+\*)/g);
+    return parts.map((part, i) => {
+      const citationMatch = part.match(/^\[(\d+)\]$/);
+      if (citationMatch) {
+        return renderCitationCapsule(citationMatch[1], sources, `${keyPrefix}-${i}`);
+      }
+      const boldMatch = part.match(/^\*\*(.+)\*\*$/);
+      if (boldMatch) {
+        return <strong key={`${keyPrefix}-${i}`} className="font-semibold text-white">{boldMatch[1]}</strong>;
+      }
+      const italicMatch = part.match(/^\*(.+)\*$/);
+      if (italicMatch) {
+        return <em key={`${keyPrefix}-${i}`}>{italicMatch[1]}</em>;
+      }
+      return <span key={`${keyPrefix}-${i}`}>{part}</span>;
+    });
+  };
+
+  // Render content with clickable citation links, preserving paragraphs and formatting
   const renderContentWithCitations = (content: string, sources?: Source[]) => {
     const formattedContent = formatContentWithCitations(content, sources);
     
     if (!sources || sources.length === 0) {
-      return <span>{formattedContent}</span>;
+      // Still render paragraphs and basic markdown even without sources
+      const paragraphs = formattedContent.split(/\n{2,}/);
+      if (paragraphs.length <= 1) {
+        // Single paragraph - render with line breaks
+        const lines = formattedContent.split("\n");
+        return (
+          <span>
+            {lines.map((line, i) => (
+              <span key={i}>
+                {line}
+                {i < lines.length - 1 && <br />}
+              </span>
+            ))}
+          </span>
+        );
+      }
+      return (
+        <div className="space-y-3">
+          {paragraphs.map((para, i) => {
+            const trimmed = para.trim();
+            if (!trimmed) return null;
+            const lines = trimmed.split("\n");
+            return (
+              <p key={i}>
+                {lines.map((line, j) => (
+                  <span key={j}>
+                    {line}
+                    {j < lines.length - 1 && <br />}
+                  </span>
+                ))}
+              </p>
+            );
+          })}
+        </div>
+      );
     }
 
-    // Split content by citation patterns [1], [2], etc. and make them clickable
-    const parts = formattedContent.split(/(\[\d+\])/g);
-    
+    // Split into paragraphs (double newline)
+    const paragraphs = formattedContent.split(/\n{2,}/);
+
     return (
-      <>
-        {parts.map((part, index) => {
-          const citationMatch = part.match(/^\[(\d+)\]$/);
-          if (citationMatch) {
-            const sourceNum = citationMatch[1];
-            const sourceIndex = parseInt(sourceNum, 10) - 1;
-            const source = sources[sourceIndex];
-            if (source) {
-              return (
-                <a
-                  key={index}
-                  href={source.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-medium bg-blue-500 hover:bg-blue-400 text-white rounded-full align-super mx-0.5 transition-colors"
-                  title={source.title}
-                >
-                  {sourceNum}
-                </a>
-              );
-            } else {
-              // Show styled reference even without a matching source
-              return (
-                <span
-                  key={index}
-                  className="inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-medium bg-gray-500 text-white rounded-full align-super mx-0.5"
-                  title="Fuente no disponible"
-                >
-                  {sourceNum}
-                </span>
-              );
-            }
+      <div className="space-y-3">
+        {paragraphs.map((para, pIdx) => {
+          const trimmed = para.trim();
+          if (!trimmed) return null;
+
+          // Check for markdown headers (### Header, ## Header, # Header)
+          const headerMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
+          if (headerMatch) {
+            const level = headerMatch[1].length;
+            const headerText = headerMatch[2];
+            const className = level === 1
+              ? "text-base font-bold text-white mt-2"
+              : level === 2
+                ? "text-sm font-semibold text-white mt-1"
+                : "text-sm font-medium text-gray-200 mt-1";
+            return (
+              <div key={pIdx} className={className}>
+                {renderInlineContent(headerText, sources, `h-${pIdx}`)}
+              </div>
+            );
           }
-          return <span key={index}>{part}</span>;
+
+          // Handle lines within a paragraph (single newlines = line breaks)
+          const lines = trimmed.split("\n");
+          return (
+            <p key={pIdx}>
+              {lines.map((line, lIdx) => {
+                const trimmedLine = line.trim();
+                if (!trimmedLine) return null;
+
+                // Check for bullet points (- item or * item or • item)
+                const bulletMatch = trimmedLine.match(/^[-*•]\s+(.+)$/);
+                if (bulletMatch) {
+                  return (
+                    <span key={lIdx} className="block ml-3 relative">
+                      <span className="absolute -left-3 text-gray-500">•</span>
+                      {renderInlineContent(bulletMatch[1], sources, `p${pIdx}-l${lIdx}`)}
+                      {lIdx < lines.length - 1 && <br />}
+                    </span>
+                  );
+                }
+
+                // Check for numbered list (1. item, 2. item)
+                const numberedMatch = trimmedLine.match(/^(\d+)\.\s+(.+)$/);
+                if (numberedMatch) {
+                  return (
+                    <span key={lIdx} className="block ml-4 relative">
+                      <span className="absolute -left-4 text-gray-400 text-xs">{numberedMatch[1]}.</span>
+                      {renderInlineContent(numberedMatch[2], sources, `p${pIdx}-l${lIdx}`)}
+                      {lIdx < lines.length - 1 && <br />}
+                    </span>
+                  );
+                }
+
+                return (
+                  <span key={lIdx}>
+                    {renderInlineContent(trimmedLine, sources, `p${pIdx}-l${lIdx}`)}
+                    {lIdx < lines.length - 1 && <br />}
+                  </span>
+                );
+              })}
+            </p>
+          );
         })}
-      </>
+      </div>
     );
   };
 
@@ -359,6 +497,28 @@ export default function MainLayout() {
     }
   };
 
+  // Fetch available models from backend
+  useEffect(() => {
+    const fetchModels = async () => {
+      try {
+        // Try fetching models list from the backend
+        const modelsRes = await fetch(
+          (process.env.NEXT_PUBLIC_STRAPI_URL || "http://localhost:8000") + "/v1/models"
+        ).catch(() => null);
+        if (modelsRes && modelsRes.ok) {
+          const data = await modelsRes.json();
+          if (data.models?.length > 0) {
+            setAvailableModels(data.models);
+            if (data.default) setSelectedModel(data.default);
+          }
+        }
+      } catch {
+        // Silently keep defaults if backend is unreachable
+      }
+    };
+    fetchModels();
+  }, []);
+
   // Close menu when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -371,10 +531,8 @@ export default function MainLayout() {
   }, []);
 
   const sendMessage = async () => {
-    console.log("[OMINIS] sendMessage called");
     const question = input.trim();
     if ((!question && uploadedImages.length === 0) || isLoading) return;
-    console.log("[OMINIS] sendMessage proceeding with question:", question.slice(0, 50));
 
     // Build user message content (with image indicator if present)
     const imageNames = uploadedImages.map((img) => img.name).join(", ");
@@ -397,12 +555,11 @@ export default function MainLayout() {
     const currentPubmedSearch = pubmedSearchEnabled;
     clearAllImages(); // Clear images after capturing
     setIsLoading(true);
-    setLoadingStatus("Conectando...");
+    setLoadingStatus("Analizando...");
 
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => {
-        console.error("[OMINIS] Stream timeout - aborting");
         controller.abort();
       }, 120000); // 120s timeout for streaming
 
@@ -414,7 +571,6 @@ export default function MainLayout() {
 
       // Use streaming endpoint
       
-      console.log("[OMINIS] Fetching /api/query-stream...");
       const response = await fetch("/api/query-stream", {
         method: "POST",
         headers: {
@@ -424,14 +580,13 @@ export default function MainLayout() {
           question: question || "Describe esta imagen",
           history: history,
           images: currentImages.length > 0 ? currentImages : undefined,
+          model: selectedModel,
           rag_search: currentRagSearch,
           web_search: currentWebSearch,
           pubmed_search: currentPubmedSearch,
         }),
         signal: controller.signal,
       });
-
-      console.log("[OMINIS] Got response, status:", response.status);
 
       if (!response.ok) {
         clearTimeout(timeoutId);
@@ -518,7 +673,6 @@ export default function MainLayout() {
                   }
 
                 } else if (eventData.type === "done") {
-                  console.log("[OMINIS] Got done event");
                   // Final event: ensure message is complete
                   const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
                   const finalSources = eventData.sources?.length > 0 ? eventData.sources : streamedSources;
@@ -552,10 +706,8 @@ export default function MainLayout() {
                   throw new Error(eventData.message);
                 }
               } catch (parseError) {
-                // Only warn if it's not an error we threw
-                if (parseError instanceof Error && parseError.message !== (JSON.parse(jsonStr) as any)?.message) {
-                  console.warn("[OMINIS] Parse error:", parseError);
-                } else {
+                // Re-throw actual errors
+                if (parseError instanceof Error && parseError.message === (JSON.parse(jsonStr) as { message?: string })?.message) {
                   throw parseError;
                 }
               }
@@ -574,11 +726,9 @@ export default function MainLayout() {
           setMessages((prev) => [...prev, assistantMessage]);
         }
       } finally {
-        console.log("[OMINIS] Inner finally - clearing timeout");
         clearTimeout(timeoutId);
       }
     } catch (error) {
-      console.log("[OMINIS] Caught error:", error);
       let errorText = "Error desconocido";
       if (error instanceof Error) {
         if (error.name === "AbortError") {
@@ -594,7 +744,6 @@ export default function MainLayout() {
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
-      console.log("[OMINIS] Outer finally - clearing loading state");
       setLoadingStatus("");
       setIsLoading(false);
       inputRef.current?.focus();
@@ -654,7 +803,7 @@ export default function MainLayout() {
 
     setMessages([...newMessages, userMessage]);
     setIsLoading(true);
-    setLoadingStatus("Conectando...");
+    setLoadingStatus("Analizando...");
 
     try {
       const controller = new AbortController();
@@ -673,6 +822,7 @@ export default function MainLayout() {
           question: question,
           history: history,
           images: originalMessage.images || undefined,
+          model: selectedModel,
           rag_search: ragSearchEnabled,
           web_search: webSearchEnabled,
           pubmed_search: pubmedSearchEnabled,
@@ -772,10 +922,9 @@ export default function MainLayout() {
                   throw new Error(eventData.message);
                 }
               } catch (parseError) {
-                if (parseError instanceof Error && parseError.message.startsWith("GPU") || parseError instanceof Error && parseError.message.startsWith("Connection")) {
+                if (parseError instanceof Error && (parseError.message.startsWith("GPU") || parseError.message.startsWith("Connection"))) {
                   throw parseError;
                 }
-                console.warn("[OMINIS-EDIT] Parse error:", parseError);
               }
             }
           }
@@ -841,10 +990,10 @@ export default function MainLayout() {
       {/* Content */}
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
         {/* Main Grid: Chat Left, Info Right */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6" style={{ minHeight: "calc(100vh - 6rem)" }}>
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Left Column: Chat */}
-          <div className="lg:col-span-7 order-1 lg:order-1 flex flex-col">
-            <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden flex-1 flex flex-col" style={{ minHeight: "calc(100vh - 8rem)" }}>
+          <div className="lg:col-span-7 order-1 lg:order-1 flex flex-col" style={{ height: "calc(100vh - 7rem)" }}>
+            <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden flex flex-col h-full">
               {/* Chat Header */}
               <div className="bg-white/5 border-b border-white/10 px-4 py-3 flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -939,30 +1088,22 @@ export default function MainLayout() {
                         </div>
                       ) : (
                         <>
-                          <p className="whitespace-pre-wrap text-sm leading-relaxed">
+                          <div className="text-sm leading-relaxed">
                             {message.role === "assistant" 
                               ? renderContentWithCitations(message.content, effectiveSources)
-                              : message.content
+                              : <p className="whitespace-pre-wrap">{message.content}</p>
                             }
-                          </p>
+                          </div>
 
-                          {/* Sources - show cited ones and external sources (web/pubmed) */}
+                          {/* Sources - show all sources with backend ref numbers */}
                           {effectiveSources && effectiveSources.length > 0 && (() => {
-                            // Find which source numbers are actually cited in the response
-                            const citedNumbers = new Set<number>();
-                            const formattedContent = formatContentWithCitations(message.content, effectiveSources);
-                            const matches = formattedContent.match(/\[(\d+)\]/g);
-                            if (matches) {
-                              matches.forEach(m => {
-                                const num = parseInt(m.replace(/[\[\]]/g, ""), 10);
-                                citedNumbers.add(num);
-                              });
-                            }
-                            
-                            // Filter to cited sources OR external sources (web/pubmed)
+                            // Use ref_num from backend (Perplexity-style) or fallback to index
                             const displaySources = effectiveSources
-                              .map((source, i) => ({ ...source, index: i + 1 }))
-                              .filter(s => citedNumbers.has(s.index) || s.type === "web" || s.type === "pubmed");
+                              .map((source: any, i: number) => ({
+                                ...source,
+                                displayNum: source.ref_num || (i + 1),
+                              }))
+                              .filter((s: any) => s.url && s.url.length > 0);
                             
                             if (displaySources.length === 0) return null;
                             
@@ -970,15 +1111,15 @@ export default function MainLayout() {
                               <div className="mt-3 pt-3 border-t border-white/10">
                                 <p className="text-xs text-gray-400 mb-1">📚 Fuentes consultadas:</p>
                                 <ul className="space-y-1">
-                                  {displaySources.map((source) => (
-                                    <li key={source.index} className="text-xs">
+                                  {displaySources.map((source: any) => (
+                                    <li key={source.displayNum} className="text-xs">
                                       <a
                                         href={source.url}
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="text-blue-400 hover:text-blue-300 transition-colors hover:underline"
                                       >
-                                        [{source.index}] {source.title}
+                                        [{source.displayNum}] {source.title}
                                         {source.type === "pubmed" && " 🔬"}
                                         {source.type === "web" && " 🌐"}
                                       </a>
@@ -1059,8 +1200,17 @@ export default function MainLayout() {
                 )}
 
                 {/* Active features indicator */}
-                {(ragSearchEnabled || webSearchEnabled || pubmedSearchEnabled || uploadedImages.length > 0) && (
+                {(ragSearchEnabled || webSearchEnabled || pubmedSearchEnabled || uploadedImages.length > 0 || selectedModel !== "ominis-2.0") && (
                   <div className="flex items-center gap-1.5 mb-2 text-xs flex-wrap">
+                    {/* Model badge (shown when non-default model selected) */}
+                    {selectedModel !== "ominis-2.0" && (
+                      <span className="flex items-center gap-1 text-amber-400 bg-amber-500/10 px-2 py-1 rounded-full">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                        </svg>
+                        {availableModels.find(m => m.id === selectedModel)?.displayName || selectedModel}
+                      </span>
+                    )}
                     {ragSearchEnabled && (
                       <span className="flex items-center gap-1 text-cyan-400 bg-cyan-500/10 pl-2 pr-1 py-1 rounded-full">
                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1143,6 +1293,34 @@ export default function MainLayout() {
                           </svg>
                           Agregar imágenes
                         </button>
+
+                        <div className="border-t border-white/10 my-1"></div>
+
+                        {/* Model selector section */}
+                        <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modelo</div>
+                        {availableModels.map((m) => (
+                          <button
+                            key={m.id}
+                            onClick={() => setSelectedModel(m.id)}
+                            className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${
+                              selectedModel === m.id
+                                ? "text-white bg-white/10"
+                                : "text-gray-300 hover:bg-white/10 hover:text-white"
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                              </svg>
+                              <span className="truncate">{m.displayName}</span>
+                            </div>
+                            {selectedModel === m.id && (
+                              <svg className="w-4 h-4 text-cyan-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                              </svg>
+                            )}
+                          </button>
+                        ))}
 
                         <div className="border-t border-white/10 my-1"></div>
 
