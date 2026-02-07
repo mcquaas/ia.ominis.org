@@ -5,8 +5,8 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120; // 2 minutes max
 
-// GPU RAG API - Streaming endpoint
-const GPU_API = process.env.GPU_API_URL || 'http://44.215.64.245:8080/query-stream';
+// Haystack backend - Streaming endpoint
+const GPU_API = process.env.GPU_API_URL || 'http://localhost:8000/v1/query-stream';
 
 export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
@@ -25,11 +25,13 @@ export async function POST(request: NextRequest) {
         question: body.question,
         history: body.history,
         image: body.images && body.images.length > 0 ? body.images[0] : undefined,
+        model: body.model || undefined,
+        rag_search: body.rag_search !== false,
         web_search: body.web_search !== false,
-        pubmed_search: body.pubmed_search || false,
+        pubmed_search: body.pubmed_search !== false,
       };
 
-      console.log('[query-stream] Request:', apiBody.question?.slice(0, 50));
+      console.log('[query-stream] Request:', apiBody.question?.slice(0, 50), 'model:', apiBody.model || 'default');
 
       const response = await fetch(GPU_API, {
         method: 'POST',

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// GPU RAG API - Faster processing in US (same ominis-2.0 model)
-const GPU_API = process.env.GPU_API_URL || 'http://44.215.64.245:8080/query';
+// Haystack backend - Non-streaming query endpoint
+const GPU_API = process.env.GPU_API_URL || 'http://localhost:8000/v1/query';
 
 export async function POST(request: NextRequest) {
   try {
