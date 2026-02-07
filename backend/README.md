@@ -78,22 +78,40 @@ Strapi V5 backend for managing the Ominis Health LLM system. Provides user authe
 
 ### Database Configuration
 
-#### SQLite (Development)
+#### PostgreSQL (Recommended for Production)
+
+```bash
+# Install PostgreSQL
+sudo apt-get install -y postgresql postgresql-contrib
+
+# Create database and user
+sudo -u postgres psql << EOF
+CREATE USER ominis_admin WITH PASSWORD 'your-secure-password';
+CREATE DATABASE ominis_strapi OWNER ominis_admin;
+GRANT ALL PRIVILEGES ON DATABASE ominis_strapi TO ominis_admin;
+\c ominis_strapi
+GRANT ALL ON SCHEMA public TO ominis_admin;
+EOF
+```
+
+```env
+DATABASE_CLIENT=postgres
+DATABASE_HOST=127.0.0.1
+DATABASE_PORT=5432
+DATABASE_NAME=ominis_strapi
+DATABASE_USERNAME=ominis_admin
+DATABASE_PASSWORD=your-secure-password
+DATABASE_SSL=false
+```
+
+#### SQLite (Development Only)
+
 ```env
 DATABASE_CLIENT=sqlite
 DATABASE_FILENAME=.tmp/data.db
 ```
 
-#### PostgreSQL (Production)
-```env
-DATABASE_CLIENT=postgres
-DATABASE_HOST=localhost
-DATABASE_PORT=5432
-DATABASE_NAME=ominis_admin
-DATABASE_USERNAME=ominis_admin
-DATABASE_PASSWORD=your-secure-password
-DATABASE_SSL=true
-```
+> **Note**: SQLite is not recommended for production due to limitations with concurrent access.
 
 ## API Endpoints
 
