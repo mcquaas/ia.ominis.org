@@ -146,6 +146,33 @@ async def _generate_summary_with_llm(
 # --- Endpoints ---
 
 
+@router.get("/proxy-status")
+async def proxy_status():
+    """
+    Check if the XMLA proxy is reachable.
+    Returns 200 if healthy, 503 if proxy is down or not configured.
+    """
+    url = settings.sinba_xmla_url or "http://127.0.0.1:5001"
+    if not url or url.strip() == "":
+        return {
+            "healthy": False,
+            "error": "SINBA_XMLA_URL not configured. The XMLA proxy must be running to query cubes.",
+            "hint": "Deploy the .NET proxy (see xmla-proxy/) or configure SINBA_XMLA_URL.",
+        }
+    proxy = build_proxy_client(url)
+    try:
+        result = await proxy.health_check()
+        if result.get("status") == "healthy":
+            return {"healthy": True, "proxy_url": url}
+        return {
+            "healthy": False,
+            "error": result.get("error", "Proxy unhealthy"),
+            "proxy_url": url,
+        }
+    finally:
+        await proxy.close()
+
+
 @router.get("/cubes", response_model=CubeListResponse)
 async def list_cubes():
     """
@@ -226,6 +253,19 @@ async def query_cube(request: CubeQueryRequest):
 
     # 3. Execute MDX via the .NET XMLA proxy
     proxy = _get_proxy_client()
+    # Quick health check before long-running query
+    health = await proxy.health_check()
+    if health.get("status") != "healthy":
+        err = health.get("error", "Proxy unreachable")
+        return CubeQueryResponse(
+            success=False,
+            cube_id=request.cube_id,
+            cube_name=metadata.name,
+            mdx_query=mdx,
+            error=f"XMLA proxy no disponible: {err}. "
+            "El proxy debe estar en ejecución para consultar cubos SSAS.",
+        )
+
     try:
         result = await proxy.execute_mdx(
             query=mdx,

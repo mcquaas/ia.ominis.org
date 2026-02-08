@@ -67,11 +67,32 @@ async function sinbaFetch<T>(endpoint: string, options: RequestInit = {}): Promi
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new Error(error.detail || error.message || `HTTP ${response.status}`);
+    const error = await response.json().catch(() => ({}));
+    throw new Error(
+      error.error || error.detail || error.message || `HTTP ${response.status}`
+    );
   }
 
   return response.json();
+}
+
+/**
+ * Check if the XMLA proxy is reachable.
+ */
+export async function getProxyStatus(): Promise<{
+  healthy: boolean;
+  error?: string;
+  hint?: string;
+  proxy_url?: string;
+}> {
+  const res = await fetch(`${API_BASE}/proxy-status`);
+  const data = await res.json().catch(() => ({}));
+  return {
+    healthy: data.healthy === true,
+    error: data.error,
+    hint: data.hint,
+    proxy_url: data.proxy_url,
+  };
 }
 
 /**

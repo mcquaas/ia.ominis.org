@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Header from '@/components/Header';
-import { listCubes, getCubeMetadata, queryCube } from '@/services/sinba';
+import { listCubes, getCubeMetadata, queryCube, getProxyStatus } from '@/services/sinba';
 import type { CubeMetadata, CubeQueryResult } from '@/services/sinba';
 
 /* ────────── Tiny UI components ────────── */
@@ -66,12 +66,26 @@ export default function SinbaPage() {
   const [querying, setQuerying] = useState(false);
   const [error, setError] = useState('');
 
-  // Load cube list on mount
+  // Proxy status (XMLA proxy must be running to query cubes)
+  const [proxyHealthy, setProxyHealthy] = useState<boolean | null>(null);
+  const [proxyError, setProxyError] = useState<string>('');
+
+  // Load cube list and proxy status on mount
   useEffect(() => {
     listCubes()
       .then(data => setCubePages(data.cubes || []))
       .catch(err => setError(err.message))
       .finally(() => setLoadingCubes(false));
+
+    getProxyStatus()
+      .then(s => {
+        setProxyHealthy(s.healthy);
+        setProxyError(s.error || '');
+      })
+      .catch(() => {
+        setProxyHealthy(false);
+        setProxyError('No se pudo verificar el estado del proxy');
+      });
   }, []);
 
   // Load cube metadata when selected
@@ -153,6 +167,31 @@ export default function SinbaPage() {
       <Header />
 
       <main className="pt-20 pb-10 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
+        {/* Proxy status banner */}
+        {proxyHealthy === false && (
+          <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-amber-300 font-medium">Consulta de datos no disponible</p>
+              <p className="text-amber-200/80 text-sm mt-1">
+                {proxyError || 'El proxy XMLA no está disponible.'} Las consultas requieren el proxy .NET en ejecución. Puedes explorar metadatos o ver la fuente en SINBA.
+              </p>
+            </div>
+            <button
+              onClick={() =>
+                getProxyStatus()
+                  .then(s => {
+                    setProxyHealthy(s.healthy);
+                    setProxyError(s.error || '');
+                  })
+                  .catch(() => setProxyHealthy(false))
+              }
+              className="text-xs px-3 py-1.5 rounded border border-amber-500/50 text-amber-300 hover:bg-amber-500/20 transition-colors"
+            >
+              Reintentar
+            </button>
+          </div>
+        )}
+
         {/* Page Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-white flex items-center gap-3">
@@ -339,7 +378,7 @@ export default function SinbaPage() {
                       />
                       <button
                         onClick={handleQuery}
-                        disabled={querying || !question.trim()}
+                        disabled={querying || !question.trim() || proxyHealthy === false}
                         className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
                       >
                         {querying ? (
@@ -376,7 +415,7 @@ export default function SinbaPage() {
                       </p>
                       <button
                         onClick={handleQuery}
-                        disabled={querying || !mdxQuery.trim()}
+                        disabled={querying || !mdxQuery.trim() || proxyHealthy === false}
                         className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
                       >
                         {querying && <div className="animate-spin w-4 h-4 border-2 border-white/30 border-t-white rounded-full" />}
@@ -388,11 +427,13 @@ export default function SinbaPage() {
               </Section>
             )}
 
-            {/* Error */}
-            {error && (
+            {/* Error (from query or other) */}
+            {(error || (queryResult && !queryResult.success && queryResult.error)) && (
               <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-red-300 text-sm">
                 <p className="font-medium">Error</p>
-                <p className="mt-1 text-red-400">{error}</p>
+                <p className="mt-1 text-red-400">
+                  {error || (queryResult?.error ?? '')}
+                </p>
               </div>
             )}
 

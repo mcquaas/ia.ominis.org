@@ -460,7 +460,10 @@ class SINBAProxyClient:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=120.0)
+            # 10s connect timeout, 90s read (MDX can be slow)
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=None)
+            )
         return self._client
 
     async def close(self):
@@ -510,10 +513,16 @@ class SINBAProxyClient:
             )
         except httpx.ConnectError:
             return XmlaResult(
-                error="XMLA proxy not running. Start it with: cd xmla-proxy && dotnet run"
+                error="XMLA proxy no disponible. Verifique que el proxy esté en ejecución "
+                "(cd xmla-proxy && dotnet run) o que SINBA_XMLA_URL apunte al host correcto."
+            )
+        except httpx.TimeoutException:
+            return XmlaResult(
+                error="Tiempo de espera agotado: el proxy o SSAS no respondió. "
+                "Los servidores SSAS de SINBA pueden restringir conexiones externas."
             )
         except Exception as e:
-            return XmlaResult(error=f"Proxy request failed: {e}")
+            return XmlaResult(error=f"Error en proxy: {e}")
 
     async def discover(
         self,
@@ -553,10 +562,14 @@ class SINBAProxyClient:
             )
         except httpx.ConnectError:
             return XmlaResult(
-                error="XMLA proxy not running. Start it with: cd xmla-proxy && dotnet run"
+                error="XMLA proxy no disponible. Verifique que el proxy esté en ejecución."
+            )
+        except httpx.TimeoutException:
+            return XmlaResult(
+                error="Tiempo de espera agotado. El proxy o SSAS no respondió."
             )
         except Exception as e:
-            return XmlaResult(error=f"Proxy discover failed: {e}")
+            return XmlaResult(error=f"Error en proxy: {e}")
 
 
 def build_client_from_connection(
