@@ -19,6 +19,7 @@ from app.api_keys.router import router as api_keys_router
 from app.rag.router import router as rag_router
 from app.admin.router import router as admin_router
 from app.chat.router import router as chat_router
+from app.feedback.router import router as feedback_router
 from app.sinba.router import router as sinba_router
 from app.auth.dependencies import get_current_user
 from app.auth.models import RoleEnum, User
@@ -142,6 +143,7 @@ app.include_router(api_keys_router, prefix="/v1")
 app.include_router(rag_router, prefix="/v1")
 app.include_router(admin_router, prefix="/v1")
 app.include_router(chat_router, prefix="/v1")
+app.include_router(feedback_router, prefix="/v1")
 app.include_router(sinba_router, prefix="/v1")
 
 

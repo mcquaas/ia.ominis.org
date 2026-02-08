@@ -28,6 +28,10 @@ import {
   getServerPerformance,
   getGpuServerPerformance,
 } from '@/services/auth';
+import { listFeedback, REASON_CATEGORIES } from '@/services/feedback';
+import type { FeedbackOut } from '@/services/feedback';
+
+const REASON_LABELS: Record<string, string> = Object.fromEntries(REASON_CATEGORIES.map((c) => [c.value, c.label]));
 import type { SystemStats, QueryStats, User, RagSource } from '@/types/auth';
 
 // ---------- tiny stat card ----------
@@ -157,6 +161,13 @@ export default function DashboardPage() {
   const [chunks, setChunks] = useState<Array<{ id: string; contentPreview: string; title?: string; url?: string }>>([]);
   const [chunksLoading, setChunksLoading] = useState(false);
 
+  // Feedback state (admin/superadmin)
+  const [feedbackData, setFeedbackData] = useState<FeedbackOut[]>([]);
+  const [feedbackTotal, setFeedbackTotal] = useState(0);
+  const [feedbackPage, setFeedbackPage] = useState(1);
+  const [feedbackRating, setFeedbackRating] = useState<'positive' | 'negative' | undefined>(undefined);
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
+
   // ---------- fetch everything ----------
   const loadData = useCallback(async () => {
     setLoadingData(true);
@@ -186,12 +197,28 @@ export default function DashboardPage() {
           setUsers(Array.isArray(u) ? u : []);
         } catch { /* non-critical */ }
       }
+
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error loading data');
     } finally {
       setLoadingData(false);
     }
   }, [queryPeriod, isSuperAdmin]);
+
+  const loadFeedback = useCallback(async () => {
+    if (!isAdmin) return;
+    setFeedbackLoading(true);
+    try {
+      const fb = await listFeedback(feedbackPage, 50, feedbackRating);
+      setFeedbackData(fb.data);
+      setFeedbackTotal(fb.total);
+    } catch { /* non-critical */ }
+    finally { setFeedbackLoading(false); }
+  }, [isAdmin, feedbackPage, feedbackRating]);
+
+  useEffect(() => {
+    if (isAdmin) loadFeedback();
+  }, [isAdmin, loadFeedback]);
 
   useEffect(() => {
     if (!authLoading && isAdmin) loadData();
@@ -1108,6 +1135,90 @@ export default function DashboardPage() {
             )}
           </Section>
         )}
+
+        {/* ===== Feedback (Admin / SuperAdmin) ===== */}
+        <Section
+          title={`Comentarios de usuarios (${feedbackTotal})`}
+          action={
+            <div className="flex items-center gap-2">
+              <div className="flex gap-1">
+                {([undefined, 'positive', 'negative'] as const).map((r) => (
+                  <button
+                    key={r ?? 'all'}
+                    onClick={() => { setFeedbackRating(r); setFeedbackPage(1); }}
+                    className={`px-2 py-1 text-xs rounded ${feedbackRating === r ? 'bg-cyan-500/30 text-cyan-300' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    {r === undefined ? 'Todos' : r === 'positive' ? 'Positivos' : 'Negativos'}
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={loadFeedback}
+                disabled={feedbackLoading}
+                className="p-1 text-gray-400 hover:text-white disabled:opacity-50"
+                title="Actualizar"
+              >
+                <svg className={`w-4 h-4 ${feedbackLoading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+            </div>
+          }
+        >
+          {feedbackData.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-400 text-xs uppercase border-b border-white/10">
+                    <th className="pb-2 pr-4">Fecha</th>
+                    <th className="pb-2 pr-4">Usuario</th>
+                    <th className="pb-2 pr-4">Valoración</th>
+                    <th className="pb-2 pr-4">Categoría</th>
+                    <th className="pb-2 pr-4">Detalles</th>
+                    <th className="pb-2">Vista previa</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {feedbackData.map((f) => (
+                    <tr key={f.id} className="hover:bg-white/5 transition-colors">
+                      <td className="py-2.5 pr-4 text-gray-400 text-xs">{new Date(f.created_at).toLocaleString('es-MX')}</td>
+                      <td className="py-2.5 pr-4 text-gray-300">{f.user_email || '—'}</td>
+                      <td className="py-2.5 pr-4">
+                        <span className={`px-2 py-0.5 text-xs rounded-full ${f.rating === 'positive' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'}`}>
+                          {f.rating === 'positive' ? 'Positivo' : 'Negativo'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 pr-4 text-gray-400 text-xs">{f.reason_category ? REASON_LABELS[f.reason_category] || f.reason_category : '—'}</td>
+                      <td className="py-2.5 pr-4 text-gray-300 text-xs max-w-[200px] truncate">{f.reason_text || '—'}</td>
+                      <td className="py-2.5 text-gray-500 text-xs max-w-[250px] truncate">{f.content_preview || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="flex items-center justify-between mt-3 pt-2 border-t border-white/10">
+                <span className="text-gray-500 text-xs">Página {feedbackPage} · {feedbackTotal} total</span>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => setFeedbackPage((p) => Math.max(1, p - 1))}
+                    disabled={feedbackPage <= 1}
+                    className="px-2 py-1 text-xs rounded bg-white/5 text-gray-400 hover:text-white disabled:opacity-40"
+                  >
+                    Anterior
+                  </button>
+                  <button
+                    onClick={() => setFeedbackPage((p) => p + 1)}
+                    disabled={feedbackData.length < 50 || feedbackPage * 50 >= feedbackTotal}
+                    className="px-2 py-1 text-xs rounded bg-white/5 text-gray-400 hover:text-white disabled:opacity-40"
+                  >
+                    Siguiente
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <p className="text-gray-500 text-sm">{feedbackLoading ? 'Cargando...' : 'No hay comentarios aún.'}</p>
+          )}
+        </Section>
       </main>
     </div>
   );

@@ -14,6 +14,8 @@ from app.database import Base
 from app.auth.models import User  # noqa: F401 - import so metadata registers
 from app.api_keys.models import APIKey  # noqa: F401
 from app.admin.models import RAGSource, QueryLog, SystemStat  # noqa: F401
+from app.chat.models import Conversation, ChatMessage  # noqa: F401
+from app.feedback.models import MessageFeedback  # noqa: F401
 
 config = context.config
 

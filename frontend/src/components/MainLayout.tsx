@@ -7,6 +7,7 @@ import ChatSidebar from "@/components/ChatSidebar";
 import Footer from "@/components/Footer";
 import * as chatService from "@/services/chat";
 import type { ConversationSummary } from "@/services/chat";
+import * as feedbackService from "@/services/feedback";
 
 interface Source {
   title: string;
@@ -34,6 +35,8 @@ interface Message {
   images?: string[];
   charts?: ChartData[];
   isReport?: boolean;
+  model?: string;  // e.g. "openscholar" from done event
+  dbMessageId?: number;  // DB id when persisted (for feedback)
 }
 
 interface ModelOption {
@@ -75,6 +78,11 @@ export default function MainLayout() {
   const [selectedModel, setSelectedModel] = useState<string>("ominis-2.0");
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
+  const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<string, "positive" | "negative">>({});
+  const [feedbackModalMessageId, setFeedbackModalMessageId] = useState<string | null>(null);
+  const [feedbackReasonCategory, setFeedbackReasonCategory] = useState<string | null>(null);
+  const [feedbackReasonText, setFeedbackReasonText] = useState("");
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -137,6 +145,7 @@ export default function MainLayout() {
           content: m.content,
           sources: m.sources as Source[] | undefined,
           images: m.has_images ? [] : undefined, // Images are not stored server-side
+          dbMessageId: m.role === "assistant" ? m.id : undefined,
         });
       }
       setMessages(loaded);
@@ -203,6 +212,7 @@ export default function MainLayout() {
       assistantContent: string,
       sources?: Source[],
       hasImages: boolean = false,
+      assistantMessageId?: string,
     ) => {
       if (!isAuthenticated || !historyEnabled) return;
 
@@ -218,7 +228,7 @@ export default function MainLayout() {
         }
 
         // Add both messages
-        await chatService.addMessages(convId, [
+        const created = await chatService.addMessages(convId, [
           { role: "user", content: userContent, has_images: hasImages },
           {
             role: "assistant",
@@ -226,6 +236,16 @@ export default function MainLayout() {
             sources: sources as Array<Record<string, unknown>> | undefined,
           },
         ]);
+
+        // Update assistant message with dbMessageId for feedback
+        const assistantDb = created.find((m) => m.role === "assistant");
+        if (assistantDb && assistantMessageId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId ? { ...m, dbMessageId: assistantDb.id } : m
+            )
+          );
+        }
 
         // Refresh conversation list to show new/updated titles
         await loadConversations();
@@ -1042,7 +1062,7 @@ export default function MainLayout() {
         .map(m => ({ role: m.role, content: m.content }));
 
       // Use streaming endpoint
-      const endpoint = researchModeEnabled ? "/api/query-research-stream" : "/api/query-stream";
+      const endpoint = researchModeEnabled ? "/api/academic-query-stream" : "/api/query-stream";
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
@@ -1111,7 +1131,10 @@ export default function MainLayout() {
                 const eventData = JSON.parse(jsonStr);
 
                 if (eventData.type === "status") {
-                  setLoadingStatus(eventData.message);
+                  const statusMsg = eventData.model === "openscholar"
+                    ? `${eventData.message} (OpenScholar)`
+                    : eventData.message;
+                  setLoadingStatus(statusMsg);
 
                 } else if (eventData.type === "research_step") {
                   if (eventData.step) {
@@ -1136,6 +1159,7 @@ export default function MainLayout() {
                       id: assistantId,
                       role: "assistant",
                       content: streamedContent,
+                      model: researchModeEnabled ? "openscholar" : undefined,
                     };
                     setMessages((prev) => [...prev, newMsg]);
                   } else {
@@ -1179,24 +1203,25 @@ export default function MainLayout() {
                   const finalSources = Array.isArray(eventData.sources) ? eventData.sources : [];
                   const finalCharts = eventData.charts || undefined;
                   const isReport = !!eventData.is_report;
+                  const modelUsed = eventData.model || undefined;
 
                   if (!messageAdded) {
                     setMessages((prev) => [...prev, {
                       id: assistantId, role: "assistant", content: finalContent,
                       sources: finalSources.length > 0 ? finalSources : undefined,
-                      charts: finalCharts, isReport,
+                      charts: finalCharts, isReport, model: modelUsed,
                     }]);
                   } else {
                     setMessages((prev) =>
                       prev.map((m) =>
                         m.id === assistantId
-                          ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : undefined, charts: finalCharts || m.charts, isReport: isReport || m.isReport }
+                          ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : undefined, charts: finalCharts || m.charts, isReport: isReport || m.isReport, model: modelUsed || m.model }
                           : m
                       )
                     );
                   }
 
-                  persistMessages(messageContent, finalContent, finalSources.length > 0 ? finalSources : undefined, hadImages);
+                  persistMessages(messageContent, finalContent, finalSources.length > 0 ? finalSources : undefined, hadImages, assistantId);
 
                   setIsLoading(false);
                   setLoadingStatus("");
@@ -1238,6 +1263,7 @@ export default function MainLayout() {
             streamedContent,
             streamedSources.length > 0 ? streamedSources : undefined,
             hadImages,
+            assistantId,
           );
         }
       } finally {
@@ -1273,6 +1299,52 @@ export default function MainLayout() {
       setCopiedId(id);
       setTimeout(() => setCopiedId((prev) => prev === id ? null : prev), 2000);
     } catch { /* ignore */ }
+  };
+
+  const handleThumbsUp = async (message: Message) => {
+    if (feedbackByMessageId[message.id]) return;
+    try {
+      await feedbackService.submitFeedback({
+        message_id: message.dbMessageId,
+        conversation_id: activeConversationId ?? undefined,
+        rating: "positive",
+        content_preview: message.content.slice(0, 500),
+      });
+      setFeedbackByMessageId((prev) => ({ ...prev, [message.id]: "positive" }));
+    } catch (err) {
+      console.warn("[Ominis] Failed to submit feedback:", err);
+    }
+  };
+
+  const handleThumbsDown = (message: Message) => {
+    setFeedbackModalMessageId(message.id);
+    setFeedbackReasonCategory(null);
+    setFeedbackReasonText("");
+  };
+
+  const handleFeedbackModalSubmit = async () => {
+    const msgId = feedbackModalMessageId;
+    if (!msgId) return;
+    const msg = messages.find((m) => m.id === msgId);
+    if (!msg) return;
+
+    setFeedbackSubmitting(true);
+    try {
+      await feedbackService.submitFeedback({
+        message_id: msg.dbMessageId,
+        conversation_id: activeConversationId ?? undefined,
+        rating: "negative",
+        reason_category: feedbackReasonCategory ?? undefined,
+        reason_text: feedbackReasonText.trim() || undefined,
+        content_preview: msg.content.slice(0, 500),
+      });
+      setFeedbackByMessageId((prev) => ({ ...prev, [msgId]: "negative" }));
+      setFeedbackModalMessageId(null);
+    } catch (err) {
+      console.warn("[Ominis] Failed to submit feedback:", err);
+    } finally {
+      setFeedbackSubmitting(false);
+    }
   };
 
   const handleDownloadPdf = async (content: string, title: string) => {
@@ -1451,7 +1523,7 @@ ${html}
         .map(m => ({ role: m.role, content: m.content }));
 
       // Use streaming endpoint
-      const endpoint = researchModeEnabled ? "/api/query-research-stream" : "/api/query-stream";
+      const endpoint = researchModeEnabled ? "/api/academic-query-stream" : "/api/query-stream";
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1738,6 +1810,7 @@ ${html}
                           <span className="flex items-center gap-1 text-emerald-400 bg-emerald-500/15 backdrop-blur-sm border border-emerald-400/20 pl-2 pr-1 py-1 rounded-full">
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>
                             Investigación
+                            <span className="text-amber-300/90 text-[10px]" title="Usa OpenScholar">(OpenScholar)</span>
                             <button onClick={() => setResearchModeEnabled(false)} className="ml-0.5 hover:text-emerald-200 transition-colors" title="Desactivar">
                               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                             </button>
@@ -1935,31 +2008,54 @@ ${html}
                           </div>
 
                           {/* Action buttons for assistant messages */}
-                          {message.role === "assistant" && message.content.length > 100 && (
+                          {message.role === "assistant" && (
                             <div className="flex items-center gap-1.5 mt-2 pt-1">
+                              {message.model === "openscholar" && (
+                                <span className="text-[9px] text-amber-300 bg-amber-500/15 border border-amber-400/30 rounded px-1.5 py-0.5 mr-1" title="Generado con OpenScholar">OpenScholar</span>
+                              )}
                               {message.isReport && (
                                 <span className="text-[9px] text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 rounded px-1.5 py-0.5 mr-1">REPORTE</span>
                               )}
-                              <button
-                                onClick={() => handleCopyContent(message.id, message.content)}
-                                className="text-gray-500 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
-                                title="Copiar contenido"
-                              >
-                                {copiedId === message.id ? (
-                                  <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                                ) : (
-                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                                )}
-                              </button>
-                              {message.isReport && (
-                                <button
-                                  onClick={() => handleDownloadPdf(message.content, message.content.split("\n")[0]?.replace(/^#+ /, "") || "Reporte")}
-                                  className="text-gray-500 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
-                                  title="Descargar PDF"
-                                >
-                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                                </button>
+                              {message.content.length > 100 && (
+                                <>
+                                  <button
+                                    onClick={() => handleCopyContent(message.id, message.content)}
+                                    className="text-gray-500 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
+                                    title="Copiar contenido"
+                                  >
+                                    {copiedId === message.id ? (
+                                      <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                                    ) : (
+                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                                    )}
+                                  </button>
+                                  {message.isReport && (
+                                    <button
+                                      onClick={() => handleDownloadPdf(message.content, message.content.split("\n")[0]?.replace(/^#+ /, "") || "Reporte")}
+                                      className="text-gray-500 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
+                                      title="Descargar PDF"
+                                    >
+                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                    </button>
+                                  )}
+                                </>
                               )}
+                              <button
+                                onClick={() => handleThumbsUp(message)}
+                                className={`p-1 rounded transition-colors ${feedbackByMessageId[message.id] === "positive" ? "text-green-400" : "text-gray-500 hover:text-white hover:bg-white/10"}`}
+                                title="Útil"
+                                disabled={!!feedbackByMessageId[message.id]}
+                              >
+                                <svg className="w-3.5 h-3.5" fill={feedbackByMessageId[message.id] === "positive" ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" /></svg>
+                              </button>
+                              <button
+                                onClick={() => handleThumbsDown(message)}
+                                className={`p-1 rounded transition-colors ${feedbackByMessageId[message.id] === "negative" ? "text-red-400" : "text-gray-500 hover:text-white hover:bg-white/10"}`}
+                                title="No útil"
+                                disabled={!!feedbackByMessageId[message.id]}
+                              >
+                                <svg className="w-3.5 h-3.5" fill={feedbackByMessageId[message.id] === "negative" ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-4h-2a2 2 0 00-2 2v4a2 2 0 002 2h2a2 2 0 002-2v-4a2 2 0 00-2-2h-2z" /></svg>
+                              </button>
                             </div>
                           )}
 
@@ -2053,16 +2149,26 @@ ${html}
                     <div className="bg-white/10 backdrop-blur-md border border-white/10 text-gray-100 rounded-2xl rounded-bl-sm p-3 max-w-[85%]">
                       <div className="flex items-center gap-3">
                         <div className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
-                        {loadingStatus && (
-                          <span className="text-gray-300 text-sm animate-pulse">{loadingStatus}</span>
-                        )}
+                        <div className="flex items-center gap-2 min-w-0">
+                          {loadingStatus && (
+                            <span className="text-gray-300 text-sm animate-pulse">{loadingStatus}</span>
+                          )}
+                          {researchModeEnabled && (
+                            <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 bg-amber-500/20 border border-amber-400/30 rounded" title="Motor académico exclusivo">
+                              OpenScholar
+                            </span>
+                          )}
+                        </div>
                       </div>
                       {/* Research progress bar */}
                       {researchProgress && researchSteps.length > 0 && (
                         <div className="mt-3">
                           <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
                             <span>{researchProgress.found} fuentes · {researchProgress.read} leídas</span>
-                            <span>{researchProgress.elapsedSeconds}s</span>
+                            <span className="flex items-center gap-1.5">
+                              <span className="text-amber-300/90 font-medium">OpenScholar</span>
+                              <span>{researchProgress.elapsedSeconds}s</span>
+                            </span>
                           </div>
                           <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
                             <div className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, researchProgress.elapsedSeconds / 2.4)}%` }} />
@@ -2169,6 +2275,7 @@ ${html}
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
                         </svg>
                         Investigación
+                        <span className="text-amber-300/90 text-[10px]" title="Usa OpenScholar">(OpenScholar)</span>
                         <button onClick={() => setResearchModeEnabled(false)} className="ml-0.5 hover:text-emerald-200 transition-colors" title="Desactivar">
                           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
@@ -2331,6 +2438,62 @@ ${html}
           </div>
         </div>
       )}
+
+      {/* Feedback Modal (thumbs down) */}
+      {feedbackModalMessageId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={() => setFeedbackModalMessageId(null)}
+        >
+          <div
+            className="bg-[#1a2744] border border-white/15 rounded-xl shadow-xl max-w-md w-full p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-white font-semibold">Compartir comentarios</h3>
+              <button
+                onClick={() => setFeedbackModalMessageId(null)}
+                className="text-gray-400 hover:text-white transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <p className="text-gray-400 text-sm mb-3">¿Por qué no te resultó útil esta respuesta?</p>
+            <div className="flex flex-wrap gap-2 mb-4">
+              {feedbackService.REASON_CATEGORIES.map((cat) => (
+                <button
+                  key={cat.value}
+                  onClick={() => setFeedbackReasonCategory(feedbackReasonCategory === cat.value ? null : cat.value)}
+                  className={`px-3 py-2 rounded-lg text-sm transition-colors ${
+                    feedbackReasonCategory === cat.value
+                      ? "bg-cyan-500/30 text-cyan-200 border border-cyan-400/50"
+                      : "bg-white/5 text-gray-300 border border-white/10 hover:bg-white/10 hover:text-white"
+                  }`}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </div>
+            <textarea
+              placeholder="Compartir detalles (opcional)"
+              value={feedbackReasonText}
+              onChange={(e) => setFeedbackReasonText(e.target.value)}
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-cyan-400/50 resize-none"
+              rows={3}
+            />
+            <div className="flex justify-end mt-4">
+              <button
+                onClick={handleFeedbackModalSubmit}
+                disabled={feedbackSubmitting}
+                className="bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                {feedbackSubmitting ? "Enviando…" : "Enviar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Research panel reopen button (floating, shown when panel is closed but has data) */}
       {!showResearchPanel && researchSteps.length > 0 && (
         <button
@@ -2344,11 +2507,16 @@ ${html}
         </button>
       )}
 
-      {/* Research Activity Panel (right sidebar) */}
+      {/* Research Activity Panel (right sidebar) — OpenScholar */}
       {showResearchPanel && researchSteps.length > 0 && (
         <aside className="fixed top-16 right-0 bottom-0 z-40 w-80 bg-[#0b1426]/95 backdrop-blur-md border-l border-white/10 flex flex-col transition-transform duration-300">
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-            <h3 className="text-sm font-semibold text-white">Actividad de investigación</h3>
+            <div className="flex items-center gap-2 min-w-0">
+              <h3 className="text-sm font-semibold text-white">Actividad de investigación</h3>
+              <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 bg-amber-500/20 border border-amber-400/30 rounded" title="Motor académico exclusivo">
+                OpenScholar
+              </span>
+            </div>
             <button onClick={() => setShowResearchPanel(false)} className="text-gray-400 hover:text-white p-1 transition-colors">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
             </button>
