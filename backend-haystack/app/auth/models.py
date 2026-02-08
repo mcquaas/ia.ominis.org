@@ -21,6 +21,7 @@ from app.database import Base
 
 class RoleEnum(str, enum.Enum):
     researcher = "researcher"
+    developer = "developer"
     admin = "admin"
     superadmin = "superadmin"
 
@@ -52,6 +53,7 @@ class User(Base):
 
     # Relationships
     api_keys = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
+    conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User {self.email} role={self.role}>"

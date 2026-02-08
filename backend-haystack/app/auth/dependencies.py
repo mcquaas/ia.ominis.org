@@ -70,8 +70,9 @@ def require_role(*roles: RoleEnum):
 
     ROLE_HIERARCHY = {
         RoleEnum.researcher: 0,
-        RoleEnum.admin: 1,
-        RoleEnum.superadmin: 2,
+        RoleEnum.developer: 1,
+        RoleEnum.admin: 2,
+        RoleEnum.superadmin: 3,
     }
 
     async def _check_role(user: User = Depends(get_current_user)) -> User:

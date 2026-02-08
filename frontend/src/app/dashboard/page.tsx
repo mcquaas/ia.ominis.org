@@ -1,0 +1,1114 @@
+'use client';
+
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useAuth } from '@/hooks/useAuth';
+import Header from '@/components/Header';
+import Link from 'next/link';
+import {
+  getSystemStats,
+  getQueryStats,
+  getUsers,
+  getRagSources,
+  getHealth,
+  toggleUserBlock,
+  deleteUser,
+  updateUser,
+  deleteRagSource,
+  reindexSource,
+  uploadRagFile,
+  createRagSource,
+  getStoreStats,
+  getSourceChunks,
+  scrapePreview,
+  scrapeAndIndex,
+  tainacanPreview,
+  tainacanImport,
+  datasetPreview,
+  datasetIndex,
+  getServerPerformance,
+  getGpuServerPerformance,
+} from '@/services/auth';
+import type { SystemStats, QueryStats, User, RagSource } from '@/types/auth';
+
+// ---------- tiny stat card ----------
+function StatCard({ label, value, sub, color = 'cyan' }: { label: string; value: string | number; sub?: string; color?: string }) {
+  const colorMap: Record<string, string> = {
+    cyan: 'from-cyan-500/20 to-cyan-600/5 border-cyan-500/30 text-cyan-300',
+    green: 'from-green-500/20 to-green-600/5 border-green-500/30 text-green-300',
+    amber: 'from-amber-500/20 to-amber-600/5 border-amber-500/30 text-amber-300',
+    red: 'from-red-500/20 to-red-600/5 border-red-500/30 text-red-300',
+    purple: 'from-purple-500/20 to-purple-600/5 border-purple-500/30 text-purple-300',
+    blue: 'from-blue-500/20 to-blue-600/5 border-blue-500/30 text-blue-300',
+  };
+  return (
+    <div className={`bg-gradient-to-br ${colorMap[color]} border rounded-xl p-4`}>
+      <p className="text-xs text-gray-400 uppercase tracking-wide">{label}</p>
+      <p className="text-2xl font-bold mt-1">{value}</p>
+      {sub && <p className="text-xs text-gray-500 mt-1">{sub}</p>}
+    </div>
+  );
+}
+
+// ---------- status badge ----------
+function StatusBadge({ status }: { status: string }) {
+  const s = status?.toLowerCase();
+  const cls =
+    s === 'online' || s === 'healthy' || s === 'active'
+      ? 'bg-green-500/20 text-green-300 border-green-500/30'
+      : s === 'degraded' || s === 'pending' || s === 'indexing'
+        ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+        : 'bg-red-500/20 text-red-300 border-red-500/30';
+  return <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border ${cls}`}>
+    <span className={`w-1.5 h-1.5 rounded-full ${s === 'online' || s === 'healthy' || s === 'active' ? 'bg-green-400' : s === 'degraded' || s === 'pending' || s === 'indexing' ? 'bg-amber-400 animate-pulse' : 'bg-red-400'}`} />
+    {status}
+  </span>;
+}
+
+// ---------- section wrapper ----------
+function Section({ title, children, action }: { title: string; children: React.ReactNode; action?: React.ReactNode }) {
+  return (
+    <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl overflow-hidden">
+      <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 bg-white/5">
+        <h2 className="text-white font-semibold text-sm">{title}</h2>
+        {action}
+      </div>
+      <div className="p-5">{children}</div>
+    </div>
+  );
+}
+
+// =================================================================
+export default function DashboardPage() {
+  const { user, loading: authLoading, isAdmin, isSuperAdmin } = useAuth();
+
+  const [stats, setStats] = useState<SystemStats | null>(null);
+  const [queryStats, setQueryStats] = useState<QueryStats | null>(null);
+  const [health, setHealth] = useState<{ status: string; model: { version: string; status: string }; servers: Record<string, string> } | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
+  const [sources, setSources] = useState<RagSource[]>([]);
+  const [storeStats, setStoreStats] = useState<{ totalDocuments: number; embeddingModel: string; storageType: string } | null>(null);
+  const [serverPerf, setServerPerf] = useState<{
+    cpu?: { cores: number; loadAvg1m: number; usagePercent: number };
+    memory?: { totalMB: number; usedMB: number; availableMB: number; usagePercent: number };
+    disk?: { totalGB: number; usedGB: number; freeGB: number; usagePercent: number };
+    gpu?: { name: string; memoryTotalMB: number; memoryUsedMB: number; utilizationPercent: number; temperatureC: number } | null;
+    workers?: Array<{ pid: number; cpuPercent: number; memPercent: number; memMB: number }>;
+    database?: { activeConnections: number; idleConnections: number; totalConnections: number } | null;
+    uptimeHours?: number;
+    hostname?: string;
+    ip?: string;
+    awsInstanceId?: string;
+    awsInstanceType?: string;
+  } | null>(null);
+  const [gpuPerf, setGpuPerf] = useState<{
+    status: string;
+    ollamaUrl?: string;
+    ollamaVersion?: string;
+    gpuServerIp?: string;
+    models?: Array<{ name: string; sizeGB: number; parameterSize: string; quantization: string }>;
+    runningModels?: Array<{ name: string; sizeVramGB: number }>;
+    inference?: { latencyMs: number; tokensPerSecond: number; evalCount: number; evalDurationMs: number; loadDurationMs: number; error?: string };
+    error?: string;
+  } | null>(null);
+  const [queryPeriod, setQueryPeriod] = useState<'hour' | 'day' | 'week' | 'month'>('day');
+  const [loadingData, setLoadingData] = useState(true);
+  const [error, setError] = useState('');
+  const [actionMsg, setActionMsg] = useState('');
+
+  // Upload state
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadTitle, setUploadTitle] = useState('');
+  const [uploadCategory, setUploadCategory] = useState('');
+  const [uploadUrl, setUploadUrl] = useState('');
+  const [uploadText, setUploadText] = useState('');
+  const [uploadMode, setUploadMode] = useState<'file' | 'text' | 'url' | 'scrape' | 'dataset' | 'tainacan'>('file');
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Scrape state
+  const [scrapeUrl, setScrapeUrl] = useState('');
+  const [scrapeLoading, setScrapeLoading] = useState(false);
+  const [scrapedPdfs, setScrapedPdfs] = useState<Array<{ title: string; pdfUrl: string; sourcePage: string; selected: boolean }>>([]);
+  const [scrapePreviewDone, setScrapePreviewDone] = useState(false);
+
+  // Dataset scrape state
+  const [datasetUrl, setDatasetUrl] = useState('');
+  const [datasetLoading, setDatasetLoading] = useState(false);
+  const [datasetPreviewData, setDatasetPreviewData] = useState<{
+    pageTitle: string;
+    pageMetadata: Record<string, string>;
+    totalResources: number;
+    resources: Array<{ title: string; description: string; url: string; format: string; resourceId: string; sourcePage: string; selected: boolean }>;
+  } | null>(null);
+
+  // Tainacan import state
+  const [tainacanLoading, setTainacanLoading] = useState(false);
+  const [tainacanPreviewData, setTainacanPreviewData] = useState<{
+    totalItems: number;
+    indexableFiles: number;
+    metadataOnly: number;
+    byExtension: Record<string, number>;
+  } | null>(null);
+  const [tainacanImporting, setTainacanImporting] = useState(false);
+  const [tainacanResult, setTainacanResult] = useState<string>('');
+
+  // Chunk viewer state
+  const [viewingChunks, setViewingChunks] = useState<number | null>(null);
+  const [chunks, setChunks] = useState<Array<{ id: string; contentPreview: string; title?: string; url?: string }>>([]);
+  const [chunksLoading, setChunksLoading] = useState(false);
+
+  // ---------- fetch everything ----------
+  const loadData = useCallback(async () => {
+    setLoadingData(true);
+    setError('');
+    try {
+      const [healthRes, statsRes, qsRes, sourcesRes, storeRes, perfRes, gpuRes] = await Promise.allSettled([
+        getHealth(),
+        getSystemStats(),
+        getQueryStats(queryPeriod),
+        getRagSources({ pageSize: 100 }),
+        getStoreStats(),
+        getServerPerformance(),
+        getGpuServerPerformance(),
+      ]);
+
+      if (healthRes.status === 'fulfilled') setHealth(healthRes.value as typeof health);
+      if (statsRes.status === 'fulfilled') setStats((statsRes.value as { data: SystemStats }).data);
+      if (qsRes.status === 'fulfilled') setQueryStats(qsRes.value as QueryStats);
+      if (sourcesRes.status === 'fulfilled') setSources((sourcesRes.value as { data: RagSource[] }).data || []);
+      if (storeRes.status === 'fulfilled') setStoreStats(storeRes.value as typeof storeStats);
+      if (perfRes.status === 'fulfilled') setServerPerf(perfRes.value as typeof serverPerf);
+      if (gpuRes.status === 'fulfilled') setGpuPerf(gpuRes.value as typeof gpuPerf);
+
+      if (isSuperAdmin) {
+        try {
+          const u = await getUsers();
+          setUsers(Array.isArray(u) ? u : []);
+        } catch { /* non-critical */ }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error loading data');
+    } finally {
+      setLoadingData(false);
+    }
+  }, [queryPeriod, isSuperAdmin]);
+
+  useEffect(() => {
+    if (!authLoading && isAdmin) loadData();
+  }, [authLoading, isAdmin, loadData]);
+
+  // ---------- User actions ----------
+  const showMsg = (msg: string) => { setActionMsg(msg); setTimeout(() => setActionMsg(''), 4000); };
+
+  const handleToggleBlock = async (id: number, blocked: boolean) => {
+    try { await toggleUserBlock(id, blocked); showMsg(blocked ? 'Usuario bloqueado' : 'Usuario desbloqueado'); loadData(); }
+    catch { showMsg('Error al cambiar estado'); }
+  };
+  const handleDeleteUser = async (id: number, name: string) => {
+    if (!confirm(`Eliminar usuario "${name}"? Esta accion es irreversible.`)) return;
+    try { await deleteUser(id); showMsg('Usuario eliminado'); loadData(); }
+    catch { showMsg('Error al eliminar'); }
+  };
+  const handleChangeRole = async (id: number, newRole: string) => {
+    try { await updateUser(id, { role: newRole } as unknown as Partial<User>); showMsg(`Rol actualizado a ${newRole}`); loadData(); }
+    catch { showMsg('Error al cambiar rol'); }
+  };
+
+  // ---------- RAG source actions ----------
+  const handleDeleteSource = async (id: number, title: string) => {
+    if (!confirm(`Eliminar fuente "${title}" y todos sus chunks? Esta accion es irreversible.`)) return;
+    try { await deleteRagSource(id); showMsg('Fuente eliminada'); loadData(); }
+    catch { showMsg('Error al eliminar fuente'); }
+  };
+
+  const handleReindex = async (id: number) => {
+    try { await reindexSource(id); showMsg('Re-indexacion iniciada'); loadData(); }
+    catch { showMsg('Error al re-indexar'); }
+  };
+
+  const handleViewChunks = async (sourceId: number) => {
+    if (viewingChunks === sourceId) { setViewingChunks(null); return; }
+    setViewingChunks(sourceId);
+    setChunksLoading(true);
+    try {
+      const res = await getSourceChunks(sourceId);
+      setChunks(res.data || []);
+    } catch { setChunks([]); }
+    finally { setChunksLoading(false); }
+  };
+
+  // ---------- Upload / Index ----------
+  const handleUpload = async () => {
+    setUploading(true);
+    try {
+      if (uploadMode === 'file' && uploadFile) {
+        const title = uploadTitle || uploadFile.name.replace(/\.[^.]+$/, '');
+        await uploadRagFile(uploadFile, { title, category: uploadCategory });
+        showMsg(`Archivo "${uploadFile.name}" subido. Indexando...`);
+      } else if (uploadMode === 'text' && uploadText.trim()) {
+        const title = uploadTitle || 'Texto manual';
+        await createRagSource({ title, content: uploadText, category: uploadCategory, sourceType: 'text' });
+        showMsg('Texto indexado correctamente');
+      } else if (uploadMode === 'url' && uploadUrl.trim()) {
+        const title = uploadTitle || uploadUrl;
+        await createRagSource({ title, sourceUrl: uploadUrl, category: uploadCategory, sourceType: 'webpage' });
+        showMsg('URL enviada para indexacion');
+      } else {
+        showMsg('Proporciona un archivo, texto o URL');
+        setUploading(false);
+        return;
+      }
+      // Reset form
+      setUploadFile(null); setUploadTitle(''); setUploadCategory(''); setUploadUrl(''); setUploadText('');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      loadData();
+    } catch (e) {
+      showMsg(e instanceof Error ? e.message : 'Error al indexar');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleFileDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const f = e.dataTransfer.files[0];
+    if (f) { setUploadFile(f); setUploadMode('file'); }
+  };
+
+  // ---------- Scrape ----------
+  const handleScrapePreview = async () => {
+    if (!scrapeUrl.trim()) return;
+    setScrapeLoading(true);
+    setScrapePreviewDone(false);
+    setScrapedPdfs([]);
+    try {
+      const result = await scrapePreview(scrapeUrl);
+      setScrapedPdfs(result.pdfs.map(p => ({ ...p, selected: true })));
+      setScrapePreviewDone(true);
+      if (result.pdfs.length === 0) showMsg('No se encontraron PDFs en esta URL');
+    } catch (e) {
+      showMsg(e instanceof Error ? e.message : 'Error al escanear URL');
+    } finally {
+      setScrapeLoading(false);
+    }
+  };
+
+  const handleScrapeIndex = async () => {
+    const selected = scrapedPdfs.filter(p => p.selected);
+    if (selected.length === 0) { showMsg('Selecciona al menos un PDF'); return; }
+    setUploading(true);
+    try {
+      const result = await scrapeAndIndex(scrapeUrl, {
+        category: uploadCategory,
+        pdfs: selected.map(p => ({ title: p.title, pdfUrl: p.pdfUrl, sourcePage: p.sourcePage })),
+      });
+      showMsg(`${result.totalQueued} PDFs enviados para indexacion`);
+      // Reset
+      setScrapeUrl(''); setScrapedPdfs([]); setScrapePreviewDone(false); setUploadCategory('');
+      loadData();
+    } catch (e) {
+      showMsg(e instanceof Error ? e.message : 'Error al indexar PDFs');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const toggleAllPdfs = (selected: boolean) => {
+    setScrapedPdfs(prev => prev.map(p => ({ ...p, selected })));
+  };
+
+  // ---------- Tainacan import ----------
+  const handleTainacanPreview = async () => {
+    setTainacanLoading(true);
+    setTainacanResult('');
+    try {
+      const result = await tainacanPreview();
+      setTainacanPreviewData(result);
+    } catch (e) {
+      showMsg(e instanceof Error ? e.message : 'Error al conectar con Tainacan');
+    } finally {
+      setTainacanLoading(false);
+    }
+  };
+
+  const handleTainacanImport = async () => {
+    setTainacanImporting(true);
+    setTainacanResult('');
+    try {
+      const result = await tainacanImport({
+        category: uploadCategory || 'tainacan',
+        skipExisting: true,
+      });
+      setTainacanResult(`${result.totalQueued} fuentes enviadas para indexacion (${result.skipped} omitidas por ya existir)`);
+      showMsg(result.message);
+      loadData();
+    } catch (e) {
+      setTainacanResult(e instanceof Error ? e.message : 'Error al importar');
+      showMsg(e instanceof Error ? e.message : 'Error al importar desde Tainacan');
+    } finally {
+      setTainacanImporting(false);
+    }
+  };
+
+  // ---------- Dataset import ----------
+  const handleDatasetPreview = async () => {
+    if (!datasetUrl.trim()) return;
+    setDatasetLoading(true);
+    setDatasetPreviewData(null);
+    try {
+      const result = await datasetPreview(datasetUrl);
+      setDatasetPreviewData({
+        ...result,
+        resources: result.resources.map(r => ({ ...r, selected: true })),
+      });
+    } catch (e) {
+      showMsg(e instanceof Error ? e.message : 'Error al escanear la pagina de datasets');
+    } finally {
+      setDatasetLoading(false);
+    }
+  };
+
+  const handleDatasetIndex = async () => {
+    if (!datasetPreviewData) return;
+    const selected = datasetPreviewData.resources.filter(r => r.selected);
+    if (selected.length === 0) return;
+    setUploading(true);
+    try {
+      const result = await datasetIndex(datasetUrl, {
+        category: uploadCategory || datasetPreviewData.pageMetadata?.['Tema'] || 'dataset',
+        pageTitle: datasetPreviewData.pageTitle,
+        pageMetadata: datasetPreviewData.pageMetadata,
+        resources: selected.map(({ selected: _, ...r }) => r),
+      });
+      showMsg(`${result.totalQueued} recursos enviados para indexacion`);
+      setDatasetUrl(''); setDatasetPreviewData(null); setUploadCategory('');
+      loadData();
+    } catch (e) {
+      showMsg(e instanceof Error ? e.message : 'Error al indexar datasets');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const toggleAllDatasetResources = (sel: boolean) => {
+    if (datasetPreviewData) {
+      setDatasetPreviewData({
+        ...datasetPreviewData,
+        resources: datasetPreviewData.resources.map(r => ({ ...r, selected: sel })),
+      });
+    }
+  };
+
+  // ---------- guard ----------
+  if (authLoading) return <div className="min-h-screen bg-[#0a1628] flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-cyan-400" /></div>;
+  if (!user || !isAdmin) {
+    return (
+      <div className="min-h-screen bg-[#0a1628] flex flex-col">
+        <Header />
+        <div className="flex-1 flex items-center justify-center pt-16">
+          <div className="text-center">
+            <h1 className="text-2xl font-bold text-red-400">Acceso Denegado</h1>
+            <p className="mt-2 text-gray-400">Necesitas permisos de administrador.</p>
+            <Link href="/" className="mt-4 inline-block text-cyan-400 hover:underline">Volver al inicio</Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#0a1628]">
+      <Header />
+
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-20 pb-12">
+        {/* Page header */}
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-6">
+          <div>
+            <h1 className="text-2xl font-bold text-white">Dashboard del Sistema</h1>
+            <p className="text-gray-400 text-sm mt-1">Panel de administracion de Ominis Agent</p>
+          </div>
+          <button onClick={loadData} disabled={loadingData}
+            className="flex items-center gap-2 bg-white/10 hover:bg-white/15 text-white text-sm px-4 py-2 rounded-lg border border-white/10 transition-colors disabled:opacity-50">
+            <svg className={`w-4 h-4 ${loadingData ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            Actualizar
+          </button>
+        </div>
+
+        {error && <div className="mb-4 p-3 bg-red-500/20 border border-red-500/30 rounded-lg text-red-300 text-sm">{error}</div>}
+        {actionMsg && <div className="mb-4 p-3 bg-green-500/20 border border-green-500/30 rounded-lg text-green-300 text-sm">{actionMsg}</div>}
+
+        {/* ===== System Health ===== */}
+        <section className="mb-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            <StatCard label="Estado" value={health?.status || '—'} color={health?.status === 'healthy' ? 'green' : 'red'} />
+            <StatCard label="Modelo" value={health?.model?.version || '—'} sub={health?.model?.status} color={health?.model?.status === 'online' ? 'cyan' : 'red'} />
+            <StatCard label="Servidor Primario" value={health?.servers?.primary || '—'} color={health?.servers?.primary === 'online' ? 'green' : 'red'} />
+            <StatCard label="Consultas 24h" value={stats?.totalQueries24h ?? '—'} color="blue" />
+            <StatCard label="Docs en pgvector" value={storeStats?.totalDocuments ?? '—'} sub={storeStats?.storageType} color="purple" />
+            <StatCard label="Consultas Mes" value={stats?.totalQueriesMonth ?? '—'} color="amber" />
+          </div>
+        </section>
+
+        {/* ===== Server Performance ===== */}
+        {serverPerf && (
+          <section className="mb-6">
+            <div className="bg-white/5 backdrop-blur-md border border-white/10 rounded-2xl p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Rendimiento del servidor de aplicación</h3>
+                  <p className="text-[10px] text-gray-500 mt-0.5">
+                    {serverPerf.ip && <>{serverPerf.ip}</>}
+                    {serverPerf.awsInstanceId && <> · {serverPerf.awsInstanceId}</>}
+                    {serverPerf.awsInstanceType && <> ({serverPerf.awsInstanceType})</>}
+                  </p>
+                </div>
+                {serverPerf.uptimeHours != null && (
+                  <span className="text-[10px] text-gray-500">Uptime: {serverPerf.uptimeHours}h</span>
+                )}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                {/* CPU */}
+                {serverPerf.cpu && (
+                  <div className="bg-white/5 rounded-xl p-3">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">CPU ({serverPerf.cpu.cores} cores)</p>
+                    <p className={`text-lg font-bold ${serverPerf.cpu.usagePercent > 80 ? 'text-red-400' : serverPerf.cpu.usagePercent > 50 ? 'text-amber-400' : 'text-green-400'}`}>
+                      {serverPerf.cpu.usagePercent}%
+                    </p>
+                    <p className="text-[10px] text-gray-500">Load: {serverPerf.cpu.loadAvg1m}</p>
+                  </div>
+                )}
+                {/* Memory */}
+                {serverPerf.memory && (
+                  <div className="bg-white/5 rounded-xl p-3">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Memoria</p>
+                    <p className={`text-lg font-bold ${serverPerf.memory.usagePercent > 85 ? 'text-red-400' : serverPerf.memory.usagePercent > 60 ? 'text-amber-400' : 'text-green-400'}`}>
+                      {serverPerf.memory.usagePercent}%
+                    </p>
+                    <p className="text-[10px] text-gray-500">{(serverPerf.memory.usedMB / 1024).toFixed(1)} / {(serverPerf.memory.totalMB / 1024).toFixed(1)} GB</p>
+                  </div>
+                )}
+                {/* Disk */}
+                {serverPerf.disk && (
+                  <div className="bg-white/5 rounded-xl p-3">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Disco</p>
+                    <p className={`text-lg font-bold ${serverPerf.disk.usagePercent > 90 ? 'text-red-400' : serverPerf.disk.usagePercent > 70 ? 'text-amber-400' : 'text-green-400'}`}>
+                      {serverPerf.disk.usagePercent}%
+                    </p>
+                    <p className="text-[10px] text-gray-500">{serverPerf.disk.usedGB} / {serverPerf.disk.totalGB} GB</p>
+                  </div>
+                )}
+                {/* GPU */}
+                {serverPerf.gpu ? (
+                  <div className="bg-white/5 rounded-xl p-3">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">GPU</p>
+                    <p className={`text-lg font-bold ${serverPerf.gpu.utilizationPercent > 80 ? 'text-red-400' : serverPerf.gpu.utilizationPercent > 50 ? 'text-amber-400' : 'text-green-400'}`}>
+                      {serverPerf.gpu.utilizationPercent}%
+                    </p>
+                    <p className="text-[10px] text-gray-500">{serverPerf.gpu.name} · {serverPerf.gpu.temperatureC}°C</p>
+                    <p className="text-[10px] text-gray-500">{serverPerf.gpu.memoryUsedMB}/{serverPerf.gpu.memoryTotalMB} MB</p>
+                  </div>
+                ) : (
+                  <div className="bg-white/5 rounded-xl p-3">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">GPU</p>
+                    <p className="text-lg font-bold text-gray-600">N/A</p>
+                    <p className="text-[10px] text-gray-500">Sin GPU</p>
+                  </div>
+                )}
+                {/* Database */}
+                {serverPerf.database && (
+                  <div className="bg-white/5 rounded-xl p-3">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Base de datos</p>
+                    <p className="text-lg font-bold text-cyan-400">{serverPerf.database.totalConnections}</p>
+                    <p className="text-[10px] text-gray-500">{serverPerf.database.activeConnections} activas · {serverPerf.database.idleConnections} idle</p>
+                  </div>
+                )}
+              </div>
+              {/* Workers */}
+              {serverPerf.workers && serverPerf.workers.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-white/10">
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Workers ({serverPerf.workers.length})</p>
+                  <div className="flex flex-wrap gap-2">
+                    {serverPerf.workers.map((w) => (
+                      <div key={w.pid} className="bg-white/5 rounded-lg px-2.5 py-1.5 text-[11px]">
+                        <span className="text-gray-500">PID {w.pid}</span>
+                        <span className={`ml-2 ${w.cpuPercent > 50 ? 'text-red-400' : 'text-gray-300'}`}>CPU {w.cpuPercent}%</span>
+                        <span className="ml-2 text-gray-400">RAM {w.memMB}MB</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* ===== GPU Server Performance ===== */}
+        {gpuPerf && (
+          <section className="mb-6">
+            <div className="bg-white/5 backdrop-blur-md border border-white/10 rounded-2xl p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Servidor GPU / LLM</h3>
+                  <p className="text-[10px] text-gray-500 mt-0.5">
+                    {gpuPerf.gpuServerIp && <>{gpuPerf.gpuServerIp}</>}
+                    {gpuPerf.ollamaVersion && <> · Ollama v{gpuPerf.ollamaVersion}</>}
+                  </p>
+                </div>
+                <span className={`text-xs px-2 py-0.5 rounded-full ${gpuPerf.status === 'online' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                  {gpuPerf.status}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+                {/* Inference Speed */}
+                {gpuPerf.inference && !gpuPerf.inference.error && (
+                  <div className="bg-white/5 rounded-xl p-3">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Velocidad</p>
+                    <p className="text-lg font-bold text-cyan-400">{gpuPerf.inference.tokensPerSecond} <span className="text-xs font-normal text-gray-500">tok/s</span></p>
+                    <p className="text-[10px] text-gray-500">Latencia: {gpuPerf.inference.latencyMs}ms</p>
+                  </div>
+                )}
+                {gpuPerf.inference?.error && (
+                  <div className="bg-white/5 rounded-xl p-3">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Velocidad</p>
+                    <p className="text-sm font-bold text-red-400">Error</p>
+                    <p className="text-[10px] text-gray-500 truncate">{gpuPerf.inference.error}</p>
+                  </div>
+                )}
+                {/* Model Load */}
+                {gpuPerf.inference && !gpuPerf.inference.error && (
+                  <div className="bg-white/5 rounded-xl p-3">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Carga del modelo</p>
+                    <p className="text-lg font-bold text-green-400">{gpuPerf.inference.loadDurationMs} <span className="text-xs font-normal text-gray-500">ms</span></p>
+                    <p className="text-[10px] text-gray-500">Eval: {gpuPerf.inference.evalDurationMs}ms</p>
+                  </div>
+                )}
+                {/* Running Models */}
+                <div className="bg-white/5 rounded-xl p-3">
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Modelos activos</p>
+                  <p className="text-lg font-bold text-amber-400">{gpuPerf.runningModels?.length || 0}</p>
+                  {gpuPerf.runningModels && gpuPerf.runningModels.length > 0 ? (
+                    <p className="text-[10px] text-gray-500">{gpuPerf.runningModels.map(m => `${m.name} (${m.sizeVramGB}GB)`).join(', ')}</p>
+                  ) : (
+                    <p className="text-[10px] text-gray-500">Ninguno en VRAM</p>
+                  )}
+                </div>
+                {/* Total Models */}
+                <div className="bg-white/5 rounded-xl p-3">
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Modelos instalados</p>
+                  <p className="text-lg font-bold text-purple-400">{gpuPerf.models?.length || 0}</p>
+                  <p className="text-[10px] text-gray-500">
+                    {gpuPerf.models?.reduce((sum, m) => sum + m.sizeGB, 0).toFixed(1) || 0} GB total
+                  </p>
+                </div>
+              </div>
+
+              {/* Model list */}
+              {gpuPerf.models && gpuPerf.models.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-white/10">
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Modelos disponibles</p>
+                  <div className="flex flex-wrap gap-2">
+                    {gpuPerf.models.map((m) => (
+                      <div key={m.name} className="bg-white/5 rounded-lg px-2.5 py-1.5 text-[11px]">
+                        <span className="text-white font-medium">{m.name}</span>
+                        <span className="text-gray-500 ml-2">{m.sizeGB}GB</span>
+                        {m.parameterSize && <span className="text-gray-500 ml-1">· {m.parameterSize}</span>}
+                        {m.quantization && <span className="text-gray-500 ml-1">· {m.quantization}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* ===== Upload / Index Section ===== */}
+        <div className="mb-6">
+          <Section title="Agregar Fuente RAG">
+            {/* Mode tabs */}
+            <div className="flex gap-2 mb-4">
+              {(['file', 'text', 'url', 'scrape', 'dataset', 'tainacan'] as const).map((m) => (
+                <button key={m} onClick={() => { setUploadMode(m); if (m === 'scrape') { setScrapePreviewDone(false); setScrapedPdfs([]); } if (m === 'tainacan') { setTainacanPreviewData(null); setTainacanResult(''); } if (m === 'dataset') { setDatasetPreviewData(null); } }}
+                  className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${uploadMode === m ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' : 'text-gray-400 border-white/10 hover:text-white'}`}>
+                  {m === 'file' ? 'Archivo' : m === 'text' ? 'Texto' : m === 'url' ? 'URL' : m === 'scrape' ? 'Scrape PDFs' : m === 'dataset' ? 'Datasets' : 'Tainacan'}
+                </button>
+              ))}
+            </div>
+
+            {/* Dataset import mode */}
+            {uploadMode === 'dataset' ? (
+              <div className="space-y-4">
+                <div className="flex gap-3">
+                  <input
+                    type="url"
+                    value={datasetUrl}
+                    onChange={(e) => setDatasetUrl(e.target.value)}
+                    placeholder="https://datos.gob.mx/busca/dataset/..."
+                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
+                  />
+                  <input
+                    type="text"
+                    value={uploadCategory}
+                    onChange={(e) => setUploadCategory(e.target.value)}
+                    placeholder="Categoria"
+                    className="w-40 bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
+                  />
+                  <button
+                    onClick={handleDatasetPreview}
+                    disabled={datasetLoading || !datasetUrl.trim()}
+                    className="bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 flex items-center gap-2 whitespace-nowrap"
+                  >
+                    {datasetLoading ? (
+                      <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>Escaneando...</>
+                    ) : 'Buscar recursos'}
+                  </button>
+                </div>
+
+                {datasetPreviewData && datasetPreviewData.resources.length > 0 && (
+                  <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
+                    {/* Page metadata */}
+                    {Object.keys(datasetPreviewData.pageMetadata).length > 0 && (
+                      <div className="px-4 py-2.5 border-b border-white/10 bg-white/5">
+                        <p className="text-xs text-gray-400 font-medium mb-1">Metadatos del dataset:</p>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1">
+                          {Object.entries(datasetPreviewData.pageMetadata).map(([k, v]) => (
+                            <span key={k} className="text-xs"><span className="text-gray-500">{k}:</span> <span className="text-gray-300">{String(v).substring(0, 60)}</span></span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10 bg-white/5">
+                      <span className="text-white text-sm font-medium">{datasetPreviewData.resources.length} recursos encontrados</span>
+                      <div className="flex gap-2">
+                        <button onClick={() => toggleAllDatasetResources(true)} className="text-xs text-cyan-400 hover:text-cyan-300">Seleccionar todos</button>
+                        <span className="text-gray-600">|</span>
+                        <button onClick={() => toggleAllDatasetResources(false)} className="text-xs text-gray-400 hover:text-white">Deseleccionar</button>
+                      </div>
+                    </div>
+                    <div className="max-h-72 overflow-y-auto custom-scrollbar divide-y divide-white/5">
+                      {datasetPreviewData.resources.map((res, idx) => (
+                        <label key={idx} className="flex items-start gap-3 px-4 py-2.5 hover:bg-white/5 cursor-pointer transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={res.selected}
+                            onChange={() => setDatasetPreviewData(prev => prev ? {
+                              ...prev,
+                              resources: prev.resources.map((r, i) => i === idx ? { ...r, selected: !r.selected } : r),
+                            } : prev)}
+                            className="mt-1 rounded border-gray-500 bg-white/10 text-cyan-500 focus:ring-cyan-500/30"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-white text-sm truncate">{res.title}</p>
+                            {res.description && <p className="text-gray-500 text-xs truncate">{res.description}</p>}
+                            <p className="text-gray-600 text-xs truncate">{res.url}</p>
+                          </div>
+                          {res.format && (
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-gray-400 uppercase flex-shrink-0">{res.format}</span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                    <div className="px-4 py-3 border-t border-white/10 bg-white/5">
+                      <button
+                        onClick={handleDatasetIndex}
+                        disabled={uploading || datasetPreviewData.resources.filter(r => r.selected).length === 0}
+                        className="w-full bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
+                      >
+                        {uploading ? (
+                          <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>Indexando...</>
+                        ) : (
+                          <>Indexar {datasetPreviewData.resources.filter(r => r.selected).length} recursos seleccionados</>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {datasetPreviewData && datasetPreviewData.resources.length === 0 && (
+                  <div className="text-center py-6 text-gray-500 text-sm">
+                    No se encontraron recursos descargables en esta pagina.
+                  </div>
+                )}
+              </div>
+            ) : uploadMode === 'tainacan' ? (
+              <div className="space-y-4">
+                <div className="flex gap-3 items-end">
+                  <div className="flex-1">
+                    <p className="text-gray-400 text-sm mb-2">
+                      Importar las 1,400+ fuentes curadas desde la coleccion Tainacan de ominis.org.
+                      Detecta automaticamente el tipo de archivo (CSV, XLSX, XLS, PDF, HTML) y descarga e indexa el contenido con toda la metadata.
+                    </p>
+                  </div>
+                  <input
+                    type="text"
+                    value={uploadCategory}
+                    onChange={(e) => setUploadCategory(e.target.value)}
+                    placeholder="Categoria"
+                    className="w-40 bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
+                  />
+                  <button
+                    onClick={handleTainacanPreview}
+                    disabled={tainacanLoading}
+                    className="bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 flex items-center gap-2 whitespace-nowrap"
+                  >
+                    {tainacanLoading ? (
+                      <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>Conectando...</>
+                    ) : 'Vista previa'}
+                  </button>
+                </div>
+
+                {/* Preview results */}
+                {tainacanPreviewData && (
+                  <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
+                    <div className="px-4 py-3 border-b border-white/10 bg-white/5">
+                      <span className="text-white text-sm font-medium">{tainacanPreviewData.totalItems} fuentes encontradas</span>
+                      <span className="text-gray-400 text-xs ml-2">({tainacanPreviewData.indexableFiles} archivos descargables, {tainacanPreviewData.metadataOnly} solo metadata)</span>
+                    </div>
+                    <div className="px-4 py-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2">
+                      {Object.entries(tainacanPreviewData.byExtension).map(([ext, count]) => (
+                        <div key={ext} className="bg-white/5 rounded-lg px-3 py-2 text-center">
+                          <div className="text-cyan-300 text-sm font-bold">{count}</div>
+                          <div className="text-gray-400 text-xs">{ext || 'sin ext.'}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="px-4 py-3 border-t border-white/10 bg-white/5 flex items-center gap-3">
+                      <button
+                        onClick={handleTainacanImport}
+                        disabled={tainacanImporting}
+                        className="flex-1 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
+                      >
+                        {tainacanImporting ? (
+                          <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>Importando {tainacanPreviewData.totalItems} fuentes...</>
+                        ) : (
+                          <>Importar {tainacanPreviewData.totalItems} fuentes de Tainacan</>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {tainacanResult && (
+                  <div className="bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-4 py-3 text-cyan-300 text-sm">
+                    {tainacanResult}
+                  </div>
+                )}
+              </div>
+            ) : uploadMode === 'scrape' ? (
+              <div className="space-y-4">
+                <div className="flex gap-3">
+                  <input
+                    type="url"
+                    value={scrapeUrl}
+                    onChange={(e) => setScrapeUrl(e.target.value)}
+                    placeholder="https://www.gob.mx/salud/documentos/..."
+                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
+                  />
+                  <input
+                    type="text"
+                    value={uploadCategory}
+                    onChange={(e) => setUploadCategory(e.target.value)}
+                    placeholder="Categoria"
+                    className="w-40 bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
+                  />
+                  <button
+                    onClick={handleScrapePreview}
+                    disabled={scrapeLoading || !scrapeUrl.trim()}
+                    className="bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 flex items-center gap-2 whitespace-nowrap"
+                  >
+                    {scrapeLoading ? (
+                      <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>Escaneando...</>
+                    ) : (
+                      <>Buscar PDFs</>
+                    )}
+                  </button>
+                </div>
+
+                {/* Scraped PDF list */}
+                {scrapePreviewDone && scrapedPdfs.length > 0 && (
+                  <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10 bg-white/5">
+                      <span className="text-white text-sm font-medium">{scrapedPdfs.length} PDFs encontrados</span>
+                      <div className="flex gap-2">
+                        <button onClick={() => toggleAllPdfs(true)} className="text-xs text-cyan-400 hover:text-cyan-300">Seleccionar todos</button>
+                        <span className="text-gray-600">|</span>
+                        <button onClick={() => toggleAllPdfs(false)} className="text-xs text-gray-400 hover:text-white">Deseleccionar todos</button>
+                      </div>
+                    </div>
+                    <div className="max-h-72 overflow-y-auto custom-scrollbar divide-y divide-white/5">
+                      {scrapedPdfs.map((pdf, idx) => (
+                        <label key={idx} className="flex items-start gap-3 px-4 py-2.5 hover:bg-white/5 cursor-pointer transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={pdf.selected}
+                            onChange={() => setScrapedPdfs(prev => prev.map((p, i) => i === idx ? { ...p, selected: !p.selected } : p))}
+                            className="mt-1 rounded border-gray-500 bg-white/10 text-cyan-500 focus:ring-cyan-500/30"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-white text-sm truncate">{pdf.title}</p>
+                            <p className="text-gray-500 text-xs truncate">{pdf.pdfUrl}</p>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="px-4 py-3 border-t border-white/10 bg-white/5">
+                      <button
+                        onClick={handleScrapeIndex}
+                        disabled={uploading || scrapedPdfs.filter(p => p.selected).length === 0}
+                        className="w-full bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
+                      >
+                        {uploading ? (
+                          <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>Indexando...</>
+                        ) : (
+                          <>Indexar {scrapedPdfs.filter(p => p.selected).length} PDFs seleccionados</>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {scrapePreviewDone && scrapedPdfs.length === 0 && (
+                  <div className="text-center py-6 text-gray-500 text-sm">
+                    No se encontraron enlaces a PDFs en esta pagina.
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* File / Text / URL modes */
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                {/* Left: Input area */}
+                <div className="lg:col-span-2 space-y-3">
+                  {uploadMode === 'file' && (
+                    <div
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={handleFileDrop}
+                      className="border-2 border-dashed border-white/20 rounded-xl p-6 text-center hover:border-cyan-500/40 transition-colors cursor-pointer"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt,.html,.htm" className="hidden"
+                        onChange={(e) => { const f = e.target.files?.[0]; if (f) setUploadFile(f); }} />
+                      {uploadFile ? (
+                        <div>
+                          <p className="text-cyan-300 font-medium">{uploadFile.name}</p>
+                          <p className="text-gray-500 text-xs mt-1">{(uploadFile.size / 1024).toFixed(1)} KB</p>
+                        </div>
+                      ) : (
+                        <div>
+                          <svg className="w-8 h-8 mx-auto text-gray-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                          </svg>
+                          <p className="text-gray-400 text-sm">Arrastra un archivo o haz clic para seleccionar</p>
+                          <p className="text-gray-600 text-xs mt-1">PDF, DOCX, TXT, HTML (max 50MB)</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {uploadMode === 'text' && (
+                    <textarea
+                      value={uploadText}
+                      onChange={(e) => setUploadText(e.target.value)}
+                      placeholder="Pega el contenido de texto aqui..."
+                      rows={6}
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50 resize-none"
+                    />
+                  )}
+                  {uploadMode === 'url' && (
+                    <input
+                      type="url"
+                      value={uploadUrl}
+                      onChange={(e) => setUploadUrl(e.target.value)}
+                      placeholder="https://ejemplo.com/articulo"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
+                    />
+                  )}
+                </div>
+
+                {/* Right: Metadata + submit */}
+                <div className="space-y-3">
+                  <input
+                    type="text"
+                    value={uploadTitle}
+                    onChange={(e) => setUploadTitle(e.target.value)}
+                    placeholder="Titulo (opcional)"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
+                  />
+                  <input
+                    type="text"
+                    value={uploadCategory}
+                    onChange={(e) => setUploadCategory(e.target.value)}
+                    placeholder="Categoria (opcional)"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
+                  />
+                  <button
+                    onClick={handleUpload}
+                    disabled={uploading || (uploadMode === 'file' && !uploadFile) || (uploadMode === 'text' && !uploadText.trim()) || (uploadMode === 'url' && !uploadUrl.trim())}
+                    className="w-full bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {uploading ? (
+                      <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>Indexando...</>
+                    ) : (
+                      <>Indexar Fuente</>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+          </Section>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          {/* ===== Query Stats ===== */}
+          <Section
+            title="Estadísticas de Consultas"
+            action={
+              <div className="flex gap-1">
+                {(['hour', 'day', 'week', 'month'] as const).map((p) => (
+                  <button key={p} onClick={() => setQueryPeriod(p)}
+                    className={`px-2 py-1 text-xs rounded ${queryPeriod === p ? 'bg-cyan-500/30 text-cyan-300' : 'text-gray-400 hover:text-white'}`}>
+                    {p === 'hour' ? '1h' : p === 'day' ? '24h' : p === 'week' ? '7d' : '30d'}
+                  </button>
+                ))}
+              </div>
+            }
+          >
+            {queryStats ? (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div><p className="text-gray-400 text-xs">Total</p><p className="text-white text-lg font-bold">{queryStats.total}</p></div>
+                <div><p className="text-gray-400 text-xs">Exitosas</p><p className="text-green-300 text-lg font-bold">{queryStats.successful}</p></div>
+                <div><p className="text-gray-400 text-xs">Fallidas</p><p className="text-red-300 text-lg font-bold">{queryStats.failed}</p></div>
+                <div><p className="text-gray-400 text-xs">Tasa de exito</p><p className="text-cyan-300 text-lg font-bold">{queryStats.successRate}%</p></div>
+                <div><p className="text-gray-400 text-xs">Tiempo prom.</p><p className="text-white text-lg font-bold">{Math.round(queryStats.avgResponseTimeMs)}ms</p></div>
+                <div><p className="text-gray-400 text-xs">Tokens totales</p><p className="text-white text-lg font-bold">{queryStats.totalTokens.toLocaleString()}</p></div>
+              </div>
+            ) : (
+              <p className="text-gray-500 text-sm">Cargando...</p>
+            )}
+          </Section>
+
+          {/* ===== RAG Sources ===== */}
+          <Section title={`Fuentes RAG (${sources.length})`}>
+            {sources.length > 0 ? (
+              <div className="max-h-80 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                {sources.map((s) => (
+                  <div key={s.id} className="bg-white/5 rounded-lg px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-white text-sm truncate">{s.title}</p>
+                        <p className="text-gray-500 text-xs">
+                          {s.sourceType} · {s.chunksCount} chunks
+                          {s.publisher && <> · <span className="text-gray-400">{s.publisher}</span></>}
+                          {s.documentDate && <> · {s.documentDate}</>}
+                        </p>
+                        {s.description && <p className="text-gray-500 text-[10px] truncate mt-0.5">{s.description}</p>}
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        <StatusBadge status={s.status} />
+                        <button onClick={() => handleViewChunks(s.id)} title="Ver chunks"
+                          className="p-1 text-gray-400 hover:text-cyan-300 transition-colors">
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                        </button>
+                        <button onClick={() => handleReindex(s.id)} title="Re-indexar"
+                          className="p-1 text-gray-400 hover:text-amber-300 transition-colors">
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                        </button>
+                        <button onClick={() => handleDeleteSource(s.id, s.title)} title="Eliminar"
+                          className="p-1 text-gray-400 hover:text-red-300 transition-colors">
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                      </div>
+                    </div>
+                    {/* Chunk viewer */}
+                    {viewingChunks === s.id && (
+                      <div className="mt-2 pt-2 border-t border-white/10">
+                        {chunksLoading ? (
+                          <p className="text-gray-500 text-xs">Cargando chunks...</p>
+                        ) : chunks.length > 0 ? (
+                          <div className="space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar">
+                            {chunks.map((c, i) => (
+                              <div key={c.id || i} className="bg-white/5 rounded px-2 py-1.5">
+                                <p className="text-gray-300 text-xs leading-relaxed">{c.contentPreview}</p>
+                                {c.url && <p className="text-cyan-500/60 text-[10px] mt-0.5 truncate">{c.url}</p>}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-gray-500 text-xs">No hay chunks para esta fuente.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-sm">No hay fuentes configuradas. Usa el formulario de arriba para agregar una.</p>
+            )}
+          </Section>
+        </div>
+
+        {/* ===== User Management (SuperAdmin only) ===== */}
+        {isSuperAdmin && (
+          <Section title={`Gestion de Usuarios (${users.length})`}>
+            {users.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-gray-400 text-xs uppercase border-b border-white/10">
+                      <th className="pb-2 pr-4">Usuario</th>
+                      <th className="pb-2 pr-4">Email</th>
+                      <th className="pb-2 pr-4">Rol</th>
+                      <th className="pb-2 pr-4">Estado</th>
+                      <th className="pb-2 pr-4">Registrado</th>
+                      <th className="pb-2">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {users.map((u) => (
+                      <tr key={u.id} className="hover:bg-white/5 transition-colors">
+                        <td className="py-2.5 pr-4 text-white font-medium">{u.username}</td>
+                        <td className="py-2.5 pr-4 text-gray-400">{u.email}</td>
+                        <td className="py-2.5 pr-4">
+                          <select
+                            value={u.role?.type || 'researcher'}
+                            onChange={(e) => handleChangeRole(u.id, e.target.value)}
+                            disabled={u.id === user?.id}
+                            className="bg-white/10 border border-white/10 text-white text-xs rounded px-2 py-1 disabled:opacity-50"
+                          >
+                            <option value="researcher">researcher</option>
+                            <option value="developer">developer</option>
+                            <option value="admin">admin</option>
+                            <option value="superadmin">superadmin</option>
+                          </select>
+                        </td>
+                        <td className="py-2.5 pr-4"><StatusBadge status={u.blocked ? 'blocked' : 'active'} /></td>
+                        <td className="py-2.5 pr-4 text-gray-500 text-xs">{new Date(u.createdAt).toLocaleDateString('es-MX')}</td>
+                        <td className="py-2.5">
+                          {u.id !== user?.id && (
+                            <div className="flex gap-1">
+                              <button onClick={() => handleToggleBlock(u.id, !u.blocked)}
+                                className={`px-2 py-1 text-xs rounded ${u.blocked ? 'bg-green-500/20 text-green-300 hover:bg-green-500/30' : 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30'}`}>
+                                {u.blocked ? 'Desbloquear' : 'Bloquear'}
+                              </button>
+                              <button onClick={() => handleDeleteUser(u.id, u.username)}
+                                className="px-2 py-1 text-xs rounded bg-red-500/20 text-red-300 hover:bg-red-500/30">
+                                Eliminar
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-gray-500 text-sm">Cargando usuarios...</p>
+            )}
+          </Section>
+        )}
+      </main>
+    </div>
+  );
+}

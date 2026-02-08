@@ -14,6 +14,7 @@ interface AuthContextType {
   clearError: () => void;
   isAuthenticated: boolean;
   isResearcher: boolean;
+  isDeveloper: boolean;
   isAdmin: boolean;
   isSuperAdmin: boolean;
 }
@@ -86,7 +87,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Role checks
   const roleType = user?.role?.type?.toLowerCase() || '';
   const isAuthenticated = !!user;
-  const isResearcher = ['researcher', 'admin', 'superadmin'].includes(roleType);
+  const isResearcher = ['researcher', 'developer', 'admin', 'superadmin'].includes(roleType);
+  const isDeveloper = ['developer', 'admin', 'superadmin'].includes(roleType);
   const isAdmin = ['admin', 'superadmin'].includes(roleType);
   const isSuperAdmin = roleType === 'superadmin';
 
@@ -102,6 +104,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         clearError,
         isAuthenticated,
         isResearcher,
+        isDeveloper,
         isAdmin,
         isSuperAdmin,
       }}
@@ -125,9 +128,10 @@ export function useAuth() {
       logout: () => {},
       clearError: () => {},
       isAuthenticated: false,
+      isResearcher: false,
+      isDeveloper: false,
       isAdmin: false,
       isSuperAdmin: false,
-      isResearcher: false,
     };
   }
   return context;

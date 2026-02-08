@@ -11,6 +11,9 @@ export interface User {
     name: string;
     type: string;
   };
+  full_name?: string | null;
+  institution?: string | null;
+  bio?: string | null;
   confirmed: boolean;
   blocked: boolean;
   createdAt: string;
@@ -75,12 +78,15 @@ export interface RagSource {
   id: number;
   title: string;
   slug: string;
-  sourceType: 'tainacan' | 'wordpress' | 'imss_guideline' | 'issste_guideline' | 'pubmed' | 'manual_upload' | 'other';
-  status: 'pending' | 'processing' | 'indexed' | 'failed' | 'archived';
+  sourceType: 'tainacan' | 'wordpress' | 'imss_guideline' | 'issste_guideline' | 'pubmed' | 'manual_upload' | 'webpage' | 'text' | 'pdf' | 'docx' | 'txt' | 'html' | 'other';
+  status: 'pending' | 'processing' | 'indexed' | 'failed' | 'archived' | 'active' | 'indexing' | 'error';
   content?: string;
   sourceUrl?: string;
   externalId?: string;
   metadata?: Record<string, unknown>;
+  description?: string;
+  publisher?: string;
+  documentDate?: string;
   chunksCount: number;
   lastIndexedAt?: string;
   indexingError?: string;
@@ -127,4 +133,13 @@ export interface QueryStats {
     query: number;
     'query-gpu': number;
   };
+}
+
+export interface UserUsage {
+  period: string;
+  startDate: string;
+  endDate: string;
+  totalQueries: number;
+  totalTokens: number;
+  totalInvestigations: number;
 }

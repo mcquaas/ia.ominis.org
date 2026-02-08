@@ -5,9 +5,11 @@ Paths match the Strapi-compatible format the frontend expects:
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user, require_role
@@ -22,6 +24,7 @@ from app.auth.schemas import (
     RoleOut,
     UpdateUserRequest,
     UserOut,
+    UserUsageOut,
 )
 from app.auth.service import (
     create_access_token,
@@ -36,7 +39,9 @@ from app.auth.service import (
     update_user,
     verify_password,
 )
+from app.admin.models import QueryLog
 from app.database import get_db
+from app.chat.models import Conversation
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["auth"])
@@ -46,7 +51,15 @@ router = APIRouter(tags=["auth"])
 
 def _role_id(role: RoleEnum) -> int:
     """Map role enum to a numeric ID matching frontend expectations."""
-    return {"researcher": 1, "admin": 2, "superadmin": 3}.get(role.value, 1)
+    return {"researcher": 1, "developer": 2, "admin": 3, "superadmin": 4}.get(role.value, 1)
+
+
+_ROLE_DISPLAY_NAMES = {
+    "researcher": "Investigador/a",
+    "developer": "Desarrollador/a",
+    "admin": "Administrador/a",
+    "superadmin": "Super Admin",
+}
 
 
 def user_to_response(user: User) -> UserOut:
@@ -57,9 +70,12 @@ def user_to_response(user: User) -> UserOut:
         email=user.email,
         role=RoleOut(
             id=_role_id(user.role),
-            name=user.role.value.capitalize(),
+            name=_ROLE_DISPLAY_NAMES.get(user.role.value, user.role.value.capitalize()),
             type=user.role.value,
         ),
+        full_name=user.full_name,
+        institution=user.institution,
+        bio=user.bio,
         confirmed=True,
         blocked=not user.is_active,
         createdAt=user.created_at.isoformat() if user.created_at else "",
@@ -176,6 +192,55 @@ async def get_me(
 ):
     """Get the current user's profile."""
     return user_to_response(current_user)
+
+
+@router.get("/api/users/me/usage", response_model=UserUsageOut)
+async def get_my_usage(
+    period: str = Query("month"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get usage stats for the current user."""
+    now = datetime.now(timezone.utc)
+    period_map = {
+        "day": timedelta(days=1),
+        "week": timedelta(days=7),
+        "month": timedelta(days=30),
+    }
+    delta = period_map.get(period, timedelta(days=30))
+    start_date = now - delta
+
+    total_queries_result = await db.execute(
+        select(func.count())
+        .select_from(QueryLog)
+        .where(QueryLog.user_id == current_user.id)
+        .where(QueryLog.created_at >= start_date)
+    )
+    total_queries = total_queries_result.scalar() or 0
+
+    tokens_result = await db.execute(
+        select(func.sum(QueryLog.tokens_used))
+        .where(QueryLog.user_id == current_user.id)
+        .where(QueryLog.created_at >= start_date)
+    )
+    total_tokens = tokens_result.scalar() or 0
+
+    conv_result = await db.execute(
+        select(func.count())
+        .select_from(Conversation)
+        .where(Conversation.user_id == current_user.id)
+        .where(Conversation.created_at >= start_date)
+    )
+    total_investigations = conv_result.scalar() or 0
+
+    return UserUsageOut(
+        period=period,
+        startDate=start_date.isoformat(),
+        endDate=now.isoformat(),
+        totalQueries=total_queries,
+        totalTokens=total_tokens,
+        totalInvestigations=total_investigations,
+    )
 
 
 @router.put("/api/users/{user_id}", response_model=UserOut)

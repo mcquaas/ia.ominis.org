@@ -5,8 +5,8 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120; // 2 minutes max
 
-// Haystack backend - Streaming endpoint
-const GPU_API = process.env.GPU_API_URL || 'http://localhost:8000/v1/query-stream';
+// Ominis Agent backend - Streaming endpoint
+const GPU_API = (process.env.BACKEND_URL || 'http://localhost:8000') + '/v1/query-stream';
 
 export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
@@ -29,6 +29,7 @@ export async function POST(request: NextRequest) {
         rag_search: body.rag_search !== false,
         web_search: body.web_search !== false,
         pubmed_search: body.pubmed_search !== false,
+        file_context: body.file_context || undefined,
       };
 
       console.log('[query-stream] Request:', apiBody.question?.slice(0, 50), 'model:', apiBody.model || 'default');

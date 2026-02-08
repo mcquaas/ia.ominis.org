@@ -1,14 +1,29 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import Image from "next/image";
-import Link from "next/link";
+import { useAuth } from "@/hooks/useAuth";
+import ChatSidebar from "@/components/ChatSidebar";
+import Footer from "@/components/Footer";
+import * as chatService from "@/services/chat";
+import type { ConversationSummary } from "@/services/chat";
 
 interface Source {
   title: string;
   url: string;
   score?: number;
   type?: "rag" | "web" | "pubmed";
+  authors?: string;
+  year?: string;
+  journal?: string;
+  ref_num?: number;
+}
+
+interface ChartData {
+  id: string;
+  type: string;
+  title: string;
+  image: string;
 }
 
 interface Message {
@@ -17,6 +32,8 @@ interface Message {
   content: string;
   sources?: Source[];
   images?: string[];
+  charts?: ChartData[];
+  isReport?: boolean;
 }
 
 interface ModelOption {
@@ -26,39 +43,198 @@ interface ModelOption {
   isDefault: boolean;
 }
 
+const HISTORY_ENABLED_KEY = "ominis_history_enabled";
+
 // ominis-2.0 (Mexican LLM by FUNSALUD)
 // Data is stored in Mexico (S3 mx-central-1), no 3rd party models
 // Inference runs on GPU for speed via /api/query-stream
 
 export default function MainLayout() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content: "¡Hola! Soy el asistente de OMINIS para la investigación en salud. Puedo responder preguntas sobre el sistema de salud en México, fuentes de datos, estudios y proyectos de investigación. ¿En qué puedo ayudarte?",
-    },
-  ]);
+  const { isAuthenticated, user } = useAuth();
+
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState("");
   const [ragSearchEnabled, setRagSearchEnabled] = useState(true);
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const [pubmedSearchEnabled, setPubmedSearchEnabled] = useState(true);
+  const [researchModeEnabled, setResearchModeEnabled] = useState(false);
   const [uploadedImages, setUploadedImages] = useState<Array<{ data: string; name: string }>>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<Array<{ name: string; ext: string; text: string; extracting: boolean }>>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
+  const [researchSteps, setResearchSteps] = useState<Array<{ action: string; detail: string; url?: string; result?: string; elapsed?: number }>>([]);
+  const [researchProgress, setResearchProgress] = useState<{ found: number; read: number; totalSteps: number; elapsedSeconds: number } | null>(null);
+  const [showResearchPanel, setShowResearchPanel] = useState(false);
+  const [excludedSources, setExcludedSources] = useState<Set<string>>(new Set());
   const [modalImage, setModalImage] = useState<string | null>(null);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([
-    { id: "ominis-2.0", displayName: "Ominis 2.0 (BioMistral)", description: "Medical-specialized LLM", isDefault: true },
+    { id: "ominis-2.0", displayName: "Ominis 2.0", description: "Modelo de IA especializado en salud", isDefault: true },
   ]);
   const [selectedModel, setSelectedModel] = useState<string>("ominis-2.0");
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
 
+  // Chat history state
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
+  const [historyEnabled, setHistoryEnabled] = useState(true);
+
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  // ─── Chat history helpers ───────────────────────────────────────
+
+  // Load history enabled preference from localStorage
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const stored = localStorage.getItem(HISTORY_ENABLED_KEY);
+      if (stored !== null) setHistoryEnabled(stored === "true");
+    }
+  }, []);
+
+  // Fetch conversations when user logs in
+  useEffect(() => {
+    if (isAuthenticated && user) {
+      loadConversations();
+    } else {
+      setConversations([]);
+      setActiveConversationId(null);
+    }
+  }, [isAuthenticated, user]);
+
+  const loadConversations = useCallback(async () => {
+    try {
+      const res = await chatService.listConversations();
+      setConversations(res.data);
+    } catch (err) {
+      console.warn("[Ominis] Failed to load conversations:", err);
+    }
+  }, []);
+
+  const handleNewChat = useCallback(() => {
+    setActiveConversationId(null);
+    activeConversationIdRef.current = null;
+    setMessages([]);
+    inputRef.current?.focus();
+  }, []);
+
+  const handleSelectConversation = useCallback(async (id: number) => {
+    try {
+      const detail = await chatService.getConversation(id);
+      setActiveConversationId(id);
+      // Reconstruct messages from backend data
+      const loaded: Message[] = [];
+      for (const m of detail.messages) {
+        loaded.push({
+          id: String(m.id),
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          sources: m.sources as Source[] | undefined,
+          images: m.has_images ? [] : undefined, // Images are not stored server-side
+        });
+      }
+      setMessages(loaded);
+      setSidebarOpen(false);
+      setTimeout(() => inputRef.current?.focus(), 100);
+    } catch (err) {
+      console.warn("[Ominis] Failed to load conversation:", err);
+    }
+  }, []);
+
+  const handleDeleteConversation = useCallback(async (id: number) => {
+    try {
+      await chatService.deleteConversation(id);
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      if (activeConversationId === id) {
+        setActiveConversationId(null);
+        setMessages([]);
+      }
+    } catch (err) {
+      console.warn("[Ominis] Failed to delete conversation:", err);
+    }
+  }, [activeConversationId]);
+
+  const handleRenameConversation = useCallback(async (id: number, newTitle: string) => {
+    try {
+      const updated = await chatService.updateConversation(id, { title: newTitle });
+      setConversations((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, title: updated.title } : c))
+      );
+    } catch (err) {
+      console.warn("[Ominis] Failed to rename conversation:", err);
+    }
+  }, []);
+
+  const handleRegenerateTitle = useCallback(async (id: number) => {
+    try {
+      const updated = await chatService.regenerateTitle(id);
+      setConversations((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, title: updated.title } : c))
+      );
+    } catch (err) {
+      console.warn("[Ominis] Failed to regenerate title:", err);
+    }
+  }, []);
+
+  const handleToggleHistory = useCallback((enabled: boolean) => {
+    setHistoryEnabled(enabled);
+    localStorage.setItem(HISTORY_ENABLED_KEY, String(enabled));
+  }, []);
+
+  /**
+   * Persist a pair of messages (user + assistant) to the backend.
+   * Creates a new conversation if none is active.
+   */
+  // Use a ref to always have the latest activeConversationId inside async callbacks
+  const activeConversationIdRef = useRef(activeConversationId);
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  const persistMessages = useCallback(
+    async (
+      userContent: string,
+      assistantContent: string,
+      sources?: Source[],
+      hasImages: boolean = false,
+    ) => {
+      if (!isAuthenticated || !historyEnabled) return;
+
+      try {
+        let convId = activeConversationIdRef.current;
+
+        // Create conversation if needed
+        if (!convId) {
+          const conv = await chatService.createConversation();
+          convId = conv.id;
+          setActiveConversationId(convId);
+          activeConversationIdRef.current = convId;
+        }
+
+        // Add both messages
+        await chatService.addMessages(convId, [
+          { role: "user", content: userContent, has_images: hasImages },
+          {
+            role: "assistant",
+            content: assistantContent,
+            sources: sources as Array<Record<string, unknown>> | undefined,
+          },
+        ]);
+
+        // Refresh conversation list to show new/updated titles
+        await loadConversations();
+      } catch (err) {
+        console.warn("[Ominis] Failed to persist chat:", err);
+      }
+    },
+    [isAuthenticated, historyEnabled, loadConversations],
+  );
 
   const scrollToBottom = () => {
     if (messagesContainerRef.current) {
@@ -120,12 +296,17 @@ export default function MainLayout() {
     return sources;
   };
 
-  // Merge existing sources with any URLs found in content that aren't already covered
-  // Extracted URL sources go FIRST since the LLM references them as [1], [2], etc.
+  // Merge existing sources with any URLs found in content that aren't already covered.
+  // IMPORTANT: Only extract inline URLs when the backend already provided sources
+  // (from RAG/web/PubMed). If no backend sources exist, the LLM answered from
+  // general knowledge and any URLs in the text are likely hallucinated.
   const getEffectiveSources = (content: string, existingSources?: Source[]): Source[] | undefined => {
+    // No backend sources → don't trust any URLs in the LLM text
+    if (!existingSources || existingSources.length === 0) return undefined;
+
     const extracted = extractSourcesFromContent(content);
     if (extracted.length === 0) return existingSources;
-    if (!existingSources || existingSources.length === 0) return extracted.length > 0 ? extracted : undefined;
+
     // Extracted URL sources first (match LLM's in-text [1], [2], etc.)
     // Then add existing (RAG/backend) sources that aren't duplicates
     const result = [...extracted];
@@ -325,113 +506,299 @@ export default function MainLayout() {
     });
   };
 
-  // Render content with clickable citation links, preserving paragraphs and formatting
-  const renderContentWithCitations = (content: string, sources?: Source[]) => {
-    const formattedContent = formatContentWithCitations(content, sources);
-    
-    if (!sources || sources.length === 0) {
-      // Still render paragraphs and basic markdown even without sources
-      const paragraphs = formattedContent.split(/\n{2,}/);
-      if (paragraphs.length <= 1) {
-        // Single paragraph - render with line breaks
-        const lines = formattedContent.split("\n");
-        return (
-          <span>
-            {lines.map((line, i) => (
-              <span key={i}>
-                {line}
-                {i < lines.length - 1 && <br />}
-              </span>
-            ))}
-          </span>
-        );
-      }
+  // Render a single line with full markdown: headers, bullets, numbered lists, inline formatting
+  const renderLine = (line: string, sources: Source[], lIdx: number, pIdx: number, totalLines: number) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) return null;
+
+    // Check for markdown headers (### Header, ## Header, # Header)
+    const headerMatch = trimmedLine.match(/^(#{1,3})\s+(.+)$/);
+    if (headerMatch) {
+      const level = headerMatch[1].length;
+      const headerText = headerMatch[2];
+      const cls = level === 1
+        ? "text-base font-bold text-white mt-2"
+        : level === 2
+          ? "text-sm font-semibold text-white mt-1"
+          : "text-sm font-medium text-gray-200 mt-1";
       return (
-        <div className="space-y-3">
-          {paragraphs.map((para, i) => {
-            const trimmed = para.trim();
-            if (!trimmed) return null;
-            const lines = trimmed.split("\n");
-            return (
-              <p key={i}>
-                {lines.map((line, j) => (
-                  <span key={j}>
-                    {line}
-                    {j < lines.length - 1 && <br />}
-                  </span>
-                ))}
-              </p>
-            );
-          })}
+        <div key={lIdx} className={cls}>
+          {renderInlineContent(headerText, sources, `p${pIdx}-l${lIdx}`)}
         </div>
       );
     }
 
-    // Split into paragraphs (double newline)
-    const paragraphs = formattedContent.split(/\n{2,}/);
+    // Check for bullet points (- item or * item or • item)
+    const bulletMatch = trimmedLine.match(/^[-*•]\s+(.+)$/);
+    if (bulletMatch) {
+      return (
+        <span key={lIdx} className="block ml-3 relative">
+          <span className="absolute -left-3 text-gray-500">•</span>
+          {renderInlineContent(bulletMatch[1], sources, `p${pIdx}-l${lIdx}`)}
+          {lIdx < totalLines - 1 && <br />}
+        </span>
+      );
+    }
+
+    // Check for numbered list (1. item, 2. item)
+    const numberedMatch = trimmedLine.match(/^(\d+)\.\s+(.+)$/);
+    if (numberedMatch) {
+      return (
+        <span key={lIdx} className="block ml-4 relative">
+          <span className="absolute -left-4 text-gray-400 text-xs">{numberedMatch[1]}.</span>
+          {renderInlineContent(numberedMatch[2], sources, `p${pIdx}-l${lIdx}`)}
+          {lIdx < totalLines - 1 && <br />}
+        </span>
+      );
+    }
 
     return (
-      <div className="space-y-3">
+      <span key={lIdx}>
+        {renderInlineContent(trimmedLine, sources, `p${pIdx}-l${lIdx}`)}
+        {lIdx < totalLines - 1 && <br />}
+      </span>
+    );
+  };
+
+  // ─── Table parsing & rendering ────────────────────────────────────
+
+  /** Parse a markdown row like "| a | b | c |" into ["a","b","c"] */
+  const parseTableRow = (line: string): string[] =>
+    line.split("|").slice(1, -1).map((c) => c.trim());
+
+  /** Check if a line is a table separator (|---|---|) */
+  const isTableSeparator = (line: string): boolean =>
+    /^\|[\s\-:| ]+\|$/.test(line.trim());
+
+  /** Check if a line looks like a table row */
+  const isTableRow = (line: string): boolean => {
+    const t = line.trim();
+    return t.startsWith("|") && t.endsWith("|") && t.split("|").length >= 3;
+  };
+
+  /** Segment content into text blocks and table blocks */
+  const segmentContent = (text: string): Array<{ type: "text" | "table"; content: string }> => {
+    const lines = text.split("\n");
+    const segments: Array<{ type: "text" | "table"; content: string }> = [];
+    let textBuf: string[] = [];
+    let tableBuf: string[] = [];
+
+    const flushText = () => {
+      if (textBuf.length > 0) {
+        segments.push({ type: "text", content: textBuf.join("\n") });
+        textBuf = [];
+      }
+    };
+    const flushTable = () => {
+      if (tableBuf.length >= 2) {
+        segments.push({ type: "table", content: tableBuf.join("\n") });
+      } else if (tableBuf.length > 0) {
+        // Not enough lines to be a table, treat as text
+        textBuf.push(...tableBuf);
+      }
+      tableBuf = [];
+    };
+
+    for (const line of lines) {
+      if (isTableRow(line) || isTableSeparator(line)) {
+        flushText();
+        tableBuf.push(line);
+      } else {
+        flushTable();
+        textBuf.push(line);
+      }
+    }
+    flushTable();
+    flushText();
+    return segments;
+  };
+
+  /** Parse table block into headers + rows */
+  const parseTable = (tableContent: string): { headers: string[]; rows: string[][] } | null => {
+    const lines = tableContent.trim().split("\n").filter((l) => l.trim());
+    if (lines.length < 2) return null;
+
+    const headers = parseTableRow(lines[0]);
+    // Find separator index (usually line 1)
+    const sepIdx = lines.findIndex((l) => isTableSeparator(l));
+    const dataStart = sepIdx >= 0 ? sepIdx + 1 : 1;
+    const rows = lines
+      .slice(dataStart)
+      .filter((l) => !isTableSeparator(l))
+      .map(parseTableRow);
+
+    if (headers.length === 0) return null;
+    return { headers, rows };
+  };
+
+  /** Convert table to TSV for clipboard */
+  const tableToTSV = (headers: string[], rows: string[][]): string => {
+    const h = headers.join("\t");
+    const r = rows.map((row) => row.join("\t")).join("\n");
+    return `${h}\n${r}`;
+  };
+
+  /** Convert table to CSV for download */
+  const tableToCSV = (headers: string[], rows: string[][]): string => {
+    const escape = (v: string) => {
+      if (v.includes(",") || v.includes('"') || v.includes("\n")) {
+        return `"${v.replace(/"/g, '""')}"`;
+      }
+      return v;
+    };
+    const h = headers.map(escape).join(",");
+    const r = rows.map((row) => row.map(escape).join(",")).join("\n");
+    return `${h}\n${r}`;
+  };
+
+  /** Download a string as a file */
+  const downloadFile = (content: string, filename: string, mimeType: string) => {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  /** Render a parsed table with copy/download actions */
+  const renderTable = (
+    headers: string[],
+    rows: string[][],
+    sources: Source[],
+    key: string | number,
+  ) => {
+    const handleCopy = async () => {
+      try {
+        await navigator.clipboard.writeText(tableToTSV(headers, rows));
+        // Brief visual feedback handled by button text swap in component
+      } catch {
+        // Fallback
+        const ta = document.createElement("textarea");
+        ta.value = tableToTSV(headers, rows);
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+    };
+
+    const handleDownload = () => {
+      downloadFile(tableToCSV(headers, rows), "ominis-tabla.csv", "text/csv;charset=utf-8;");
+    };
+
+    return (
+      <div key={key} className="my-3 rounded-xl border border-white/10 overflow-hidden bg-white/5">
+        {/* Action bar */}
+        <div className="flex items-center justify-end gap-1 px-3 py-1.5 bg-white/5 border-b border-white/10">
+          <button
+            onClick={handleCopy}
+            className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-white/10 transition-colors"
+            title="Copiar tabla (para pegar en Excel)"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+            Copiar
+          </button>
+          <button
+            onClick={handleDownload}
+            className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-white/10 transition-colors"
+            title="Descargar como CSV"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            CSV
+          </button>
+        </div>
+        {/* Scrollable table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-white/5">
+                {headers.map((h, hIdx) => (
+                  <th
+                    key={hIdx}
+                    className="px-3 py-2 text-left text-gray-300 font-semibold border-b border-white/10"
+                  >
+                    {renderInlineContent(h, sources, `th-${key}-${hIdx}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rIdx) => (
+                <tr
+                  key={rIdx}
+                  className={`${rIdx % 2 === 0 ? "" : "bg-white/[0.02]"} hover:bg-white/5 transition-colors`}
+                >
+                  {row.map((cell, cIdx) => (
+                    <td
+                      key={cIdx}
+                      className="px-3 py-2 text-gray-300 border-b border-white/5"
+                    >
+                      {renderInlineContent(cell, sources, `td-${key}-${rIdx}-${cIdx}`)}
+                    </td>
+                  ))}
+                  {/* Fill missing cells if row is shorter than headers */}
+                  {row.length < headers.length &&
+                    Array.from({ length: headers.length - row.length }).map((_, cIdx) => (
+                      <td key={`empty-${cIdx}`} className="px-3 py-2 border-b border-white/5" />
+                    ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-3 py-1 text-[10px] text-gray-500 bg-white/[0.02]">
+          {rows.length} fila{rows.length !== 1 ? "s" : ""} × {headers.length} columna{headers.length !== 1 ? "s" : ""}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── End table helpers ───────────────────────────────────────────
+
+  // Render content with clickable citation links, preserving paragraphs and formatting
+  // Always renders full markdown (bold, italic, headers, bullets) regardless of whether
+  // sources are present, so formatting works during streaming too.
+  /** Render a text block (non-table) with paragraphs and markdown */
+  const renderTextBlock = (text: string, sources: Source[], keyOffset: string) => {
+    const paragraphs = text.split(/\n{2,}/);
+
+    if (paragraphs.length <= 1) {
+      const lines = text.split("\n");
+      if (lines.length <= 1) {
+        return <span key={keyOffset}>{renderInlineContent(text, sources, `${keyOffset}-s`)}</span>;
+      }
+      return (
+        <span key={keyOffset}>
+          {lines.map((line, i) => renderLine(line, sources, i, 0, lines.length))}
+        </span>
+      );
+    }
+
+    return (
+      <div key={keyOffset} className="space-y-3">
         {paragraphs.map((para, pIdx) => {
           const trimmed = para.trim();
           if (!trimmed) return null;
 
-          // Check for markdown headers (### Header, ## Header, # Header)
-          const headerMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
-          if (headerMatch) {
-            const level = headerMatch[1].length;
-            const headerText = headerMatch[2];
-            const className = level === 1
-              ? "text-base font-bold text-white mt-2"
-              : level === 2
-                ? "text-sm font-semibold text-white mt-1"
-                : "text-sm font-medium text-gray-200 mt-1";
-            return (
-              <div key={pIdx} className={className}>
-                {renderInlineContent(headerText, sources, `h-${pIdx}`)}
-              </div>
-            );
+          if (!trimmed.includes("\n")) {
+            const headerMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
+            if (headerMatch) {
+              return renderLine(trimmed, sources, 0, pIdx, 1);
+            }
           }
 
-          // Handle lines within a paragraph (single newlines = line breaks)
           const lines = trimmed.split("\n");
           return (
             <p key={pIdx}>
-              {lines.map((line, lIdx) => {
-                const trimmedLine = line.trim();
-                if (!trimmedLine) return null;
-
-                // Check for bullet points (- item or * item or • item)
-                const bulletMatch = trimmedLine.match(/^[-*•]\s+(.+)$/);
-                if (bulletMatch) {
-                  return (
-                    <span key={lIdx} className="block ml-3 relative">
-                      <span className="absolute -left-3 text-gray-500">•</span>
-                      {renderInlineContent(bulletMatch[1], sources, `p${pIdx}-l${lIdx}`)}
-                      {lIdx < lines.length - 1 && <br />}
-                    </span>
-                  );
-                }
-
-                // Check for numbered list (1. item, 2. item)
-                const numberedMatch = trimmedLine.match(/^(\d+)\.\s+(.+)$/);
-                if (numberedMatch) {
-                  return (
-                    <span key={lIdx} className="block ml-4 relative">
-                      <span className="absolute -left-4 text-gray-400 text-xs">{numberedMatch[1]}.</span>
-                      {renderInlineContent(numberedMatch[2], sources, `p${pIdx}-l${lIdx}`)}
-                      {lIdx < lines.length - 1 && <br />}
-                    </span>
-                  );
-                }
-
-                return (
-                  <span key={lIdx}>
-                    {renderInlineContent(trimmedLine, sources, `p${pIdx}-l${lIdx}`)}
-                    {lIdx < lines.length - 1 && <br />}
-                  </span>
-                );
-              })}
+              {lines.map((line, lIdx) => renderLine(line, sources, lIdx, pIdx, lines.length))}
             </p>
           );
         })}
@@ -439,22 +806,87 @@ export default function MainLayout() {
     );
   };
 
+  const renderContentWithCitations = (content: string, sources?: Source[]) => {
+    const effectiveSrc = sources || [];
+    const formattedContent = formatContentWithCitations(content, effectiveSrc.length > 0 ? effectiveSrc : undefined);
+
+    // Segment into text and table blocks
+    const segments = segmentContent(formattedContent);
+
+    // No tables found - fast path
+    if (segments.every((s) => s.type === "text")) {
+      return renderTextBlock(formattedContent, effectiveSrc, "root");
+    }
+
+    // Mixed content with tables
+    return (
+      <div className="space-y-3">
+        {segments.map((seg, idx) => {
+          if (seg.type === "table") {
+            const parsed = parseTable(seg.content);
+            if (parsed) {
+              return renderTable(parsed.headers, parsed.rows, effectiveSrc, `tbl-${idx}`);
+            }
+            // Failed to parse, render as text
+            return renderTextBlock(seg.content, effectiveSrc, `seg-${idx}`);
+          }
+          return renderTextBlock(seg.content, effectiveSrc, `seg-${idx}`);
+        })}
+      </div>
+    );
+  };
+
   // Handle image upload (multiple files)
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const ALLOWED_DOC_EXTENSIONS = [".pdf", ".csv", ".xls", ".xlsx", ".doc", ".docx"];
+  const ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+  const processFile = (file: File) => {
+    const ext = "." + file.name.split(".").pop()?.toLowerCase();
+
+    if (ALLOWED_IMAGE_TYPES.includes(file.type) || file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setUploadedImages((prev) => [
+          ...prev,
+          { data: event.target?.result as string, name: file.name },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    } else if (ALLOWED_DOC_EXTENSIONS.includes(ext)) {
+      // Add placeholder while extracting
+      const idx = Date.now();
+      setUploadedFiles((prev) => [...prev, { name: file.name, ext, text: "", extracting: true }]);
+
+      // Send to backend for text extraction
+      const formData = new FormData();
+      formData.append("file", file);
+      fetch("/api/extract-file", { method: "POST", body: formData })
+        .then((res) => res.json())
+        .then((data) => {
+          setUploadedFiles((prev) =>
+            prev.map((f) =>
+              f.name === file.name && f.extracting
+                ? { ...f, text: data.text || "", extracting: false }
+                : f
+            )
+          );
+        })
+        .catch(() => {
+          setUploadedFiles((prev) =>
+            prev.map((f) =>
+              f.name === file.name && f.extracting
+                ? { ...f, text: "[Error al extraer contenido]", extracting: false }
+                : f
+            )
+          );
+        });
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files) {
-      Array.from(files).forEach((file) => {
-        if (file.type.startsWith("image/")) {
-          const reader = new FileReader();
-          reader.onload = (event) => {
-            setUploadedImages((prev) => [
-              ...prev,
-              { data: event.target?.result as string, name: file.name },
-            ]);
-          };
-          reader.readAsDataURL(file);
-        }
-      });
+      Array.from(files).forEach(processFile);
     }
     setShowPlusMenu(false);
     if (fileInputRef.current) {
@@ -467,20 +899,35 @@ export default function MainLayout() {
     const items = e.clipboardData?.items;
     if (items) {
       for (let i = 0; i < items.length; i++) {
-        if (items[i].type.startsWith("image/")) {
-          const file = items[i].getAsFile();
-          if (file) {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-              setUploadedImages((prev) => [
-                ...prev,
-                { data: event.target?.result as string, name: "Imagen pegada" },
-              ]);
-            };
-            reader.readAsDataURL(file);
-          }
+        const item = items[i];
+        if (item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (file) processFile(file);
         }
       }
+    }
+  };
+
+  // Drag and drop handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    const files = e.dataTransfer.files;
+    if (files) {
+      Array.from(files).forEach(processFile);
     }
   };
 
@@ -489,9 +936,15 @@ export default function MainLayout() {
     setUploadedImages((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // Clear all images
+  // Remove uploaded file by index
+  const removeFile = (index: number) => {
+    setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // Clear all attachments
   const clearAllImages = () => {
     setUploadedImages([]);
+    setUploadedFiles([]);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -532,12 +985,21 @@ export default function MainLayout() {
 
   const sendMessage = async () => {
     const question = input.trim();
-    if ((!question && uploadedImages.length === 0) || isLoading) return;
+    const hasAttachments = uploadedImages.length > 0 || uploadedFiles.length > 0;
+    if ((!question && !hasAttachments) || isLoading) return;
 
-    // Build user message content (with image indicator if present)
-    const imageNames = uploadedImages.map((img) => img.name).join(", ");
-    const messageContent = uploadedImages.length > 0
-      ? `${question}${question ? "\n" : ""}[${uploadedImages.length} imagen${uploadedImages.length > 1 ? "es" : ""} adjunta${uploadedImages.length > 1 ? "s" : ""}: ${imageNames}]`
+    // Build user message content with attachment indicators
+    const attachmentParts: string[] = [];
+    if (uploadedImages.length > 0) {
+      const imageNames = uploadedImages.map((img) => img.name).join(", ");
+      attachmentParts.push(`${uploadedImages.length} imagen${uploadedImages.length > 1 ? "es" : ""}: ${imageNames}`);
+    }
+    if (uploadedFiles.length > 0) {
+      const fileNames = uploadedFiles.map((f) => f.name).join(", ");
+      attachmentParts.push(`${uploadedFiles.length} archivo${uploadedFiles.length > 1 ? "s" : ""}: ${fileNames}`);
+    }
+    const messageContent = attachmentParts.length > 0
+      ? `${question}${question ? "\n" : ""}[${attachmentParts.join("; ")}]`
       : question;
 
     const userMessage: Message = {
@@ -550,40 +1012,57 @@ export default function MainLayout() {
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     const currentImages = uploadedImages.map((img) => img.data);
+    const hadImages = uploadedImages.length > 0;
+    const currentFileContext = uploadedFiles
+      .filter((f) => f.text && !f.extracting)
+      .map((f) => `--- ${f.name} ---\n${f.text}`)
+      .join("\n\n");
     const currentRagSearch = ragSearchEnabled;
     const currentWebSearch = webSearchEnabled;
     const currentPubmedSearch = pubmedSearchEnabled;
-    clearAllImages(); // Clear images after capturing
+    clearAllImages(); // Clear all attachments after capturing
     setIsLoading(true);
     setLoadingStatus("Analizando...");
+    if (researchModeEnabled) {
+      setResearchSteps([]);
+      setResearchProgress(null);
+      setShowResearchPanel(true);
+    }
 
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => {
         controller.abort();
-      }, 120000); // 120s timeout for streaming
+      }, researchModeEnabled ? 300000 : 120000); // 5min for research, 2min for normal
 
-      // Build chat history for context
+      // Build chat history for context — include ALL previous messages
+      // (messages is the state before setMessages runs, so it has the full prior history)
       const history = messages
-        .filter(m => m.id !== "welcome")
-        .slice(-6)
+        .slice(-20)
         .map(m => ({ role: m.role, content: m.content }));
 
       // Use streaming endpoint
-      
-      const response = await fetch("/api/query-stream", {
+      const endpoint = researchModeEnabled ? "/api/query-research-stream" : "/api/query-stream";
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          question: question || "Describe esta imagen",
+          question: question || (currentFileContext ? "Analiza el archivo adjunto" : "Describe esta imagen"),
           history: history,
           images: currentImages.length > 0 ? currentImages : undefined,
           model: selectedModel,
           rag_search: currentRagSearch,
           web_search: currentWebSearch,
           pubmed_search: currentPubmedSearch,
+          file_context: currentFileContext || undefined,
+          iterations: researchModeEnabled ? 5 : undefined,
+          max_total_sources: researchModeEnabled ? 25 : undefined,
+          max_follow_links: researchModeEnabled ? 10 : undefined,
+          max_trusted_sources: researchModeEnabled ? 10 : undefined,
+          time_budget_seconds: researchModeEnabled ? 240 : undefined,
+          excluded_sources: researchModeEnabled && excludedSources.size > 0 ? Array.from(excludedSources) : undefined,
         }),
         signal: controller.signal,
       });
@@ -634,6 +1113,17 @@ export default function MainLayout() {
                 if (eventData.type === "status") {
                   setLoadingStatus(eventData.message);
 
+                } else if (eventData.type === "research_step") {
+                  if (eventData.step) {
+                    setResearchSteps((prev) => {
+                      if (prev.length === 0) setShowResearchPanel(true);
+                      return [...prev, eventData.step];
+                    });
+                  }
+                  if (eventData.progress) {
+                    setResearchProgress(eventData.progress);
+                  }
+
                 } else if (eventData.type === "chunk") {
                   // Token-by-token streaming: append text as it arrives
                   streamedContent += eventData.text || "";
@@ -672,33 +1162,48 @@ export default function MainLayout() {
                     );
                   }
 
-                } else if (eventData.type === "done") {
-                  // Final event: ensure message is complete
-                  const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
-                  const finalSources = eventData.sources?.length > 0 ? eventData.sources : streamedSources;
-
-                  if (!messageAdded) {
-                    // Fallback: no chunks were sent (legacy protocol)
-                    const assistantMessage: Message = {
-                      id: assistantId,
-                      role: "assistant",
-                      content: finalContent,
-                      sources: finalSources.length > 0 ? finalSources : undefined,
-                    };
-                    setMessages((prev) => [...prev, assistantMessage]);
-                  } else {
-                    // Update with final content and sources
+                } else if (eventData.type === "charts") {
+                  // Chart images generated by backend
+                  if (eventData.charts && eventData.charts.length > 0) {
                     setMessages((prev) =>
                       prev.map((m) =>
                         m.id === assistantId
-                          ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : m.sources }
+                          ? { ...m, charts: eventData.charts }
                           : m
                       )
                     );
                   }
 
+                } else if (eventData.type === "done") {
+                  const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
+                  const finalSources = Array.isArray(eventData.sources) ? eventData.sources : [];
+                  const finalCharts = eventData.charts || undefined;
+                  const isReport = !!eventData.is_report;
+
+                  if (!messageAdded) {
+                    setMessages((prev) => [...prev, {
+                      id: assistantId, role: "assistant", content: finalContent,
+                      sources: finalSources.length > 0 ? finalSources : undefined,
+                      charts: finalCharts, isReport,
+                    }]);
+                  } else {
+                    setMessages((prev) =>
+                      prev.map((m) =>
+                        m.id === assistantId
+                          ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : undefined, charts: finalCharts || m.charts, isReport: isReport || m.isReport }
+                          : m
+                      )
+                    );
+                  }
+
+                  persistMessages(messageContent, finalContent, finalSources.length > 0 ? finalSources : undefined, hadImages);
+
                   setIsLoading(false);
                   setLoadingStatus("");
+                  // Auto-disable research mode only after a report (flagged by backend)
+                  if (researchModeEnabled && isReport) {
+                    setResearchModeEnabled(false);
+                  }
                   inputRef.current?.focus();
                   return;
 
@@ -725,6 +1230,16 @@ export default function MainLayout() {
           };
           setMessages((prev) => [...prev, assistantMessage]);
         }
+
+        // Persist even if no done event
+        if (streamedContent) {
+          persistMessages(
+            messageContent,
+            streamedContent,
+            streamedSources.length > 0 ? streamedSources : undefined,
+            hadImages,
+          );
+        }
       } finally {
         clearTimeout(timeoutId);
       }
@@ -748,6 +1263,125 @@ export default function MainLayout() {
       setIsLoading(false);
       inputRef.current?.focus();
     }
+  };
+
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const handleCopyContent = async (id: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((prev) => prev === id ? null : prev), 2000);
+    } catch { /* ignore */ }
+  };
+
+  const handleDownloadPdf = async (content: string, title: string) => {
+    const win = window.open("", "_blank");
+    if (!win) return;
+
+    // Convert markdown to HTML
+    let html = content
+      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+      .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+      .replace(/^\- (.+)$/gm, '<li>$1</li>')
+      .replace(/^\* (.+)$/gm, '<li>$1</li>')
+      .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .replace(/\[(\d+)\]/g, '<sup class="ref">[$1]</sup>')
+      .replace(/\n\n/g, '</p><p>')
+      .replace(/\n/g, '<br>');
+    html = '<p>' + html + '</p>';
+    html = html.replace(/<p><h/g, '<h').replace(/<\/h(\d)><\/p>/g, '</h$1>');
+    html = html.replace(/<p><li>/g, '<ul><li>').replace(/<\/li><\/p>/g, '</li></ul>');
+
+    const logoUrl = window.location.origin + '/logo.png';
+
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+<style>
+  @page {
+    margin: 25mm 20mm 20mm 20mm;
+    @top-right { content: ""; }
+  }
+  body {
+    font-family: Helvetica, Arial, sans-serif;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 20px;
+    color: #1a1a1a;
+    font-size: 11pt;
+    line-height: 1.55;
+  }
+  .header {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 8px 0 12px;
+    border-bottom: 1px solid #ddd;
+    margin-bottom: 16px;
+  }
+  .header img { height: 28px; }
+  h1 {
+    font-size: 20pt;
+    color: #111;
+    border-bottom: 2px solid #222;
+    padding-bottom: 6px;
+    margin: 0 0 12px 0;
+    line-height: 1.3;
+  }
+  h2 {
+    font-size: 14pt;
+    color: #333;
+    margin: 16px 0 6px 0;
+    padding-bottom: 3px;
+    border-bottom: 1px solid #eee;
+  }
+  h3 {
+    font-size: 12pt;
+    color: #444;
+    margin: 12px 0 4px 0;
+  }
+  p {
+    margin: 0 0 8px 0;
+  }
+  ul {
+    margin: 4px 0 8px 20px;
+    padding: 0;
+  }
+  li {
+    margin: 2px 0;
+  }
+  sup.ref {
+    color: #1a5fb4;
+    font-size: 8pt;
+    font-weight: 600;
+  }
+  strong { color: #111; }
+  a { color: #1a5fb4; text-decoration: none; }
+  .footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 8pt;
+    color: #999;
+    padding: 6px 0;
+    border-top: 1px solid #eee;
+  }
+  @media print {
+    .footer { position: fixed; bottom: 0; }
+    body { padding-bottom: 30px; }
+  }
+</style>
+</head><body>
+<div class="header"><img src="${logoUrl}" alt="OMINIS" /></div>
+${html}
+<div class="footer">con apoyo de ia.ominis.org</div>
+</body></html>`);
+    win.document.close();
+    setTimeout(() => { win.print(); }, 600);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -783,6 +1417,7 @@ export default function MainLayout() {
 
     // Get the original message to preserve images if any
     const originalMessage = messages[messageIndex];
+    const hadImages = !!(originalMessage.images && originalMessage.images.length > 0);
 
     // Remove this message and all messages after it
     const newMessages = messages.slice(0, messageIndex);
@@ -792,12 +1427,14 @@ export default function MainLayout() {
     setEditingText("");
 
     // Create the new user message
+    const userMessageContent = hadImages
+      ? `${question}\n[${originalMessage.images!.length} imagen${originalMessage.images!.length > 1 ? "es" : ""} adjunta${originalMessage.images!.length > 1 ? "s" : ""}]`
+      : question;
+
     const userMessage: Message = {
       id: generateId(),
       role: "user",
-      content: originalMessage.images && originalMessage.images.length > 0
-        ? `${question}\n[${originalMessage.images.length} imagen${originalMessage.images.length > 1 ? "es" : ""} adjunta${originalMessage.images.length > 1 ? "s" : ""}]`
-        : question,
+      content: userMessageContent,
       images: originalMessage.images,
     };
 
@@ -810,12 +1447,12 @@ export default function MainLayout() {
       const timeoutId = setTimeout(() => controller.abort(), 120000);
 
       const history = newMessages
-        .filter(m => m.id !== "welcome")
-        .slice(-6)
+        .slice(-20)
         .map(m => ({ role: m.role, content: m.content }));
 
       // Use streaming endpoint
-      const response = await fetch("/api/query-stream", {
+      const endpoint = researchModeEnabled ? "/api/query-research-stream" : "/api/query-stream";
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -826,6 +1463,11 @@ export default function MainLayout() {
           rag_search: ragSearchEnabled,
           web_search: webSearchEnabled,
           pubmed_search: pubmedSearchEnabled,
+          iterations: researchModeEnabled ? 5 : undefined,
+          max_total_sources: researchModeEnabled ? 25 : undefined,
+          max_follow_links: researchModeEnabled ? 10 : undefined,
+          max_trusted_sources: researchModeEnabled ? 10 : undefined,
+          time_budget_seconds: researchModeEnabled ? 240 : undefined,
         }),
         signal: controller.signal,
       });
@@ -913,6 +1555,15 @@ export default function MainLayout() {
                         : m)
                     );
                   }
+
+                  // Persist to backend
+                  persistMessages(
+                    userMessageContent,
+                    finalContent,
+                    finalSources.length > 0 ? finalSources : undefined,
+                    hadImages,
+                  );
+
                   setIsLoading(false);
                   setLoadingStatus("");
                   inputRef.current?.focus();
@@ -928,6 +1579,16 @@ export default function MainLayout() {
               }
             }
           }
+        }
+
+        // Persist even if no done event
+        if (streamedContent) {
+          persistMessages(
+            userMessageContent,
+            streamedContent,
+            streamedSources.length > 0 ? streamedSources : undefined,
+            hadImages,
+          );
         }
       } finally {
         clearTimeout(timeoutId);
@@ -968,13 +1629,57 @@ export default function MainLayout() {
   const lastUserMessageId = [...messages].reverse().find(m => m.role === "user")?.id;
 
   const suggestedQuestions = [
-    "¿Cuál es la diferencia entre diabetes tipo 1 y tipo 2?",
-    "¿Cuáles son las principales causas de muerte en México?",
-    "¿Qué fuentes de datos de salud hay en México?",
+    "Principales causas de muerte en México",
+    "Fuentes de datos de salud en México",
+    "Diferencia entre diabetes tipo 1 y tipo 2",
+    "Guías clínicas recientes para hipertensión",
   ];
 
+  const hasMessages = messages.length > 0;
+  const [footerExpanded, setFooterExpanded] = useState(false);
+
+  const renderPlusMenu = () => (
+    <div className="absolute bottom-full left-0 mb-2 bg-[#1a2744] border border-white/10 rounded-xl shadow-xl py-2 min-w-[200px] z-50">
+      <button onClick={() => fileInputRef.current?.click()} className="w-full flex items-center gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+        Adjuntar archivos
+      </button>
+      <div className="border-t border-white/10 my-1" />
+      <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modelo</div>
+      {availableModels.map((m) => (
+        <button key={m.id} onClick={() => setSelectedModel(m.id)} className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedModel === m.id ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"}`}>
+          <div className="flex items-center gap-3 min-w-0">
+            <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+            <span className="truncate">{m.displayName}</span>
+          </div>
+          {selectedModel === m.id && <svg className="w-4 h-4 text-cyan-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+        </button>
+      ))}
+      <div className="border-t border-white/10 my-1" />
+      <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modo</div>
+      <button onClick={() => setResearchModeEnabled(!researchModeEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>Investigación</div>
+        <div className={`w-8 h-5 rounded-full transition-colors ${researchModeEnabled ? "bg-emerald-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${researchModeEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+      </button>
+      <div className="border-t border-white/10 my-1" />
+      <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Buscar en fuentes</div>
+      <button onClick={() => setRagSearchEnabled(!ragSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>Ominis</div>
+        <div className={`w-8 h-5 rounded-full transition-colors ${ragSearchEnabled ? "bg-cyan-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${ragSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+      </button>
+      <button onClick={() => setWebSearchEnabled(!webSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>Web</div>
+        <div className={`w-8 h-5 rounded-full transition-colors ${webSearchEnabled ? "bg-blue-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${webSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+      </button>
+      <button onClick={() => setPubmedSearchEnabled(!pubmedSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>PubMed</div>
+        <div className={`w-8 h-5 rounded-full transition-colors ${pubmedSearchEnabled ? "bg-purple-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${pubmedSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+      </button>
+    </div>
+  );
+
   return (
-    <section className="min-h-screen pt-16 relative">
+    <section className="h-screen pt-16 relative flex flex-col overflow-hidden">
       {/* Background */}
       <div className="absolute inset-0 z-0">
         <Image
@@ -987,37 +1692,171 @@ export default function MainLayout() {
         <div className="absolute inset-0 bg-[#0a1628]/70"></div>
       </div>
 
+      {/* Chat History Sidebar */}
+      {/* Note: renderPlusMenu is defined below as a local function */}
+      <ChatSidebar
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        onOpen={() => setSidebarOpen(true)}
+        isAuthenticated={isAuthenticated}
+        conversations={conversations}
+        activeConversationId={activeConversationId}
+        onSelectConversation={handleSelectConversation}
+        onNewChat={handleNewChat}
+        onDeleteConversation={handleDeleteConversation}
+        onRenameConversation={handleRenameConversation}
+        onRegenerateTitle={handleRegenerateTitle}
+        historyEnabled={historyEnabled}
+        onToggleHistory={handleToggleHistory}
+      />
+
       {/* Content */}
-      <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-        {/* Main Grid: Chat Left, Info Right */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Left Column: Chat */}
-          <div className="lg:col-span-7 order-1 lg:order-1 flex flex-col" style={{ height: "calc(100vh - 7rem)" }}>
-            <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden flex flex-col h-full">
-              {/* Chat Header */}
-              <div className="bg-white/5 border-b border-white/10 px-4 py-3 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <Image
-                    src="/icon.png"
-                    alt="OMINIS AI"
-                    width={32}
-                    height={32}
-                    className="rounded-lg"
-                  />
-                  <div>
-                    <h2 className="text-white font-semibold text-sm">OMINIS AI</h2>
-                    <p className="text-gray-400 text-xs">Asistente para la Investigación en Salud</p>
+      <div className={`relative z-10 flex-1 flex flex-col min-h-0 transition-all duration-300 ${sidebarOpen ? "lg:pl-72" : "lg:pl-10"}`}>
+        <div className="flex-1 flex flex-col max-w-4xl w-full mx-auto px-4 sm:px-6 min-h-0">
+              {/* Minimal spacer when messages exist (sidebar handles its own toggle) */}
+              {hasMessages && <div className="h-2 flex-shrink-0" />}
+
+              {/* Empty State - centered prompt + input */}
+              {!hasMessages && (
+                <div className="flex-1 flex flex-col items-center justify-center px-4">
+                  <h1 className="text-white text-2xl sm:text-3xl font-semibold mb-8 text-center">
+                    ¿En qué puedo ayudarte?
+                  </h1>
+
+                  {/* Centered input for empty state */}
+                  <div className="w-full max-w-2xl">
+                    {/* Capsules */}
+                    {(ragSearchEnabled || webSearchEnabled || pubmedSearchEnabled || researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
+                      <div className="flex items-center justify-center gap-1.5 mb-3 text-xs flex-wrap">
+                        {selectedModel !== "ominis-2.0" && (
+                          <span className="flex items-center gap-1 text-amber-400 bg-amber-500/15 backdrop-blur-sm border border-amber-400/20 px-2 py-1 rounded-full">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+                            {availableModels.find(m => m.id === selectedModel)?.displayName || selectedModel}
+                          </span>
+                        )}
+                        {researchModeEnabled && (
+                          <span className="flex items-center gap-1 text-emerald-400 bg-emerald-500/15 backdrop-blur-sm border border-emerald-400/20 pl-2 pr-1 py-1 rounded-full">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>
+                            Investigación
+                            <button onClick={() => setResearchModeEnabled(false)} className="ml-0.5 hover:text-emerald-200 transition-colors" title="Desactivar">
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                          </span>
+                        )}
+                        {ragSearchEnabled && (
+                          <span className="flex items-center gap-1 text-cyan-400 bg-cyan-500/15 backdrop-blur-sm border border-cyan-400/20 pl-2 pr-1 py-1 rounded-full">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>
+                            Ominis
+                            <button onClick={() => setRagSearchEnabled(false)} className="ml-0.5 hover:text-cyan-200 transition-colors" title="Desactivar">
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                          </span>
+                        )}
+                        {webSearchEnabled && (
+                          <span className="flex items-center gap-1 text-blue-400 bg-blue-500/15 backdrop-blur-sm border border-blue-400/20 pl-2 pr-1 py-1 rounded-full">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>
+                            Web
+                            <button onClick={() => setWebSearchEnabled(false)} className="ml-0.5 hover:text-blue-200 transition-colors" title="Desactivar">
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                          </span>
+                        )}
+                        {pubmedSearchEnabled && (
+                          <span className="flex items-center gap-1 text-purple-400 bg-purple-500/15 backdrop-blur-sm border border-purple-400/20 pl-2 pr-1 py-1 rounded-full">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                            PubMed
+                            <button onClick={() => setPubmedSearchEnabled(false)} className="ml-0.5 hover:text-purple-200 transition-colors" title="Desactivar">
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Input row */}
+                    <div
+                      className={`relative ${isDragOver ? "ring-2 ring-cyan-400/50 bg-cyan-500/5 rounded-xl" : ""}`}
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleDrop}
+                    >
+                      {isDragOver && (
+                        <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#0a1628]/80 rounded-xl border-2 border-dashed border-cyan-400/50 pointer-events-none">
+                          <p className="text-cyan-300 text-sm font-medium">Suelta archivos aquí</p>
+                        </div>
+                      )}
+
+                      {/* Attachments Preview */}
+                      {(uploadedImages.length > 0 || uploadedFiles.length > 0) && (
+                        <div className="mb-2 flex flex-wrap gap-2 justify-center">
+                          {uploadedImages.map((img, index) => (
+                            <div key={`img-${index}`} className="relative group">
+                              <img src={img.data} alt={img.name} className="h-12 w-12 object-cover rounded" />
+                              <button onClick={() => removeImage(index)} className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity" title="Eliminar">
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                              </button>
+                            </div>
+                          ))}
+                          {uploadedFiles.map((file, index) => (
+                            <div key={`file-${index}`} className="relative group flex items-center gap-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2">
+                              <svg className="w-5 h-5 text-orange-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                              <p className="text-white text-xs truncate max-w-[120px]">{file.name}</p>
+                              <button onClick={() => removeFile(index)} className="text-gray-400 hover:text-red-400 transition-colors ml-1" title="Eliminar">
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="flex items-center gap-2 bg-white/[0.07] backdrop-blur-md border border-white/15 rounded-2xl px-2 py-1.5 shadow-lg shadow-black/10">
+                        <input ref={fileInputRef} type="file" accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx" multiple onChange={handleFileUpload} className="hidden" />
+                        <div className="relative" ref={plusMenuRef}>
+                          <button
+                            onClick={() => setShowPlusMenu(!showPlusMenu)}
+                            className={`text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-full transition-colors ${showPlusMenu ? "bg-white/10 text-white" : ""}`}
+                            title="Opciones" disabled={isLoading}
+                          >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                          </button>
+                          {/* Dropdown Menu (empty state) */}
+                          {showPlusMenu && renderPlusMenu()}
+                        </div>
+                        <textarea
+                          ref={inputRef}
+                          value={input}
+                          onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 150) + "px"; }}
+                          onKeyDown={handleKeyDown} onPaste={handlePaste}
+                          placeholder="Escribe tu pregunta sobre salud en México..."
+                          className="flex-1 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
+                          style={{ minHeight: "36px", maxHeight: "150px" }}
+                          rows={1}
+                          disabled={isLoading}
+                        />
+                        <button
+                          onClick={sendMessage}
+                          disabled={isLoading || (!input.trim() && uploadedImages.length === 0 && uploadedFiles.length === 0)}
+                          className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Suggestions */}
+                    <div className="flex flex-wrap justify-center gap-2 mt-4">
+                      {suggestedQuestions.map((q, i) => (
+                        <button key={i} onClick={() => { setInput(q); inputRef.current?.focus(); }}
+                          className="text-xs text-gray-400 hover:text-gray-200 bg-white/[0.06] hover:bg-white/[0.12] backdrop-blur-sm border border-white/10 hover:border-white/25 rounded-full px-3 py-1.5 transition-all"
+                        >{q}</button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-                
-                {/* Privacy Badge */}
-                <div className="flex items-center gap-2 bg-green-900/30 border border-green-500/30 rounded-full px-3 py-1">
-                  <span className="text-green-400 text-xs">🇲🇽</span>
-                  <span className="text-green-300 text-xs hidden sm:inline">ominis-2.0</span>
-                </div>
-              </div>
+              )}
 
               {/* Messages Area */}
+              {hasMessages && (
               <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
                 {messages.map((message) => {
                   // Compute effective sources: merge backend sources with any URLs found in content
@@ -1045,8 +1884,8 @@ export default function MainLayout() {
                     <div
                       className={`max-w-[85%] ${
                         message.role === "user"
-                          ? "bg-blue-600 text-white rounded-2xl rounded-br-sm"
-                          : "bg-white/10 text-gray-100 rounded-2xl rounded-bl-sm"
+                          ? "bg-blue-500/30 backdrop-blur-md border border-blue-400/20 text-white rounded-2xl rounded-br-sm"
+                          : "bg-white/10 backdrop-blur-md border border-white/10 text-gray-100 rounded-2xl rounded-bl-sm"
                       } p-3`}
                     >
                       {/* User message images */}
@@ -1095,36 +1934,108 @@ export default function MainLayout() {
                             }
                           </div>
 
-                          {/* Sources - show all sources with backend ref numbers */}
+                          {/* Action buttons for assistant messages */}
+                          {message.role === "assistant" && message.content.length > 100 && (
+                            <div className="flex items-center gap-1.5 mt-2 pt-1">
+                              {message.isReport && (
+                                <span className="text-[9px] text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 rounded px-1.5 py-0.5 mr-1">REPORTE</span>
+                              )}
+                              <button
+                                onClick={() => handleCopyContent(message.id, message.content)}
+                                className="text-gray-500 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
+                                title="Copiar contenido"
+                              >
+                                {copiedId === message.id ? (
+                                  <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                                ) : (
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                                )}
+                              </button>
+                              {message.isReport && (
+                                <button
+                                  onClick={() => handleDownloadPdf(message.content, message.content.split("\n")[0]?.replace(/^#+ /, "") || "Reporte")}
+                                  className="text-gray-500 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
+                                  title="Descargar PDF"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                </button>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Charts */}
+                          {message.charts && message.charts.length > 0 && (
+                            <div className="mt-3 space-y-3">
+                              {message.charts.map((chart) => (
+                                <div key={chart.id} className="bg-white rounded-lg p-2 overflow-hidden">
+                                  <img
+                                    src={chart.image}
+                                    alt={chart.title || "Gráfica"}
+                                    className="w-full h-auto rounded cursor-pointer"
+                                    onClick={() => setModalImage(chart.image)}
+                                  />
+                                  {chart.title && (
+                                    <p className="text-gray-700 text-xs text-center mt-1 font-medium">{chart.title}</p>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Sources list */}
                           {effectiveSources && effectiveSources.length > 0 && (() => {
-                            // Use ref_num from backend (Perplexity-style) or fallback to index
                             const displaySources = effectiveSources
-                              .map((source: any, i: number) => ({
-                                ...source,
-                                displayNum: source.ref_num || (i + 1),
-                              }))
+                              .map((source: any, i: number) => ({ ...source, displayNum: source.ref_num || (i + 1) }))
                               .filter((s: any) => s.url && s.url.length > 0);
-                            
                             if (displaySources.length === 0) return null;
-                            
+
+                            // Show checkboxes if research mode is on and this is a plan message (has "?")
+                            const showCheckboxes = researchModeEnabled && message.content.includes("?") && !isLoading;
+
                             return (
                               <div className="mt-3 pt-3 border-t border-white/10">
-                                <p className="text-xs text-gray-400 mb-1">📚 Fuentes consultadas:</p>
-                                <ul className="space-y-1">
-                                  {displaySources.map((source: any) => (
-                                    <li key={source.displayNum} className="text-xs">
-                                      <a
-                                        href={source.url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-blue-400 hover:text-blue-300 transition-colors hover:underline"
-                                      >
-                                        [{source.displayNum}] {source.title}
-                                        {source.type === "pubmed" && " 🔬"}
-                                        {source.type === "web" && " 🌐"}
-                                      </a>
-                                    </li>
-                                  ))}
+                                {showCheckboxes && (
+                                  <p className="text-[10px] text-gray-500 mb-1.5">Desmarca las fuentes que no deseas incluir en la investigación:</p>
+                                )}
+                                <ul className="space-y-1.5">
+                                  {displaySources.map((source: any) => {
+                                    const isExcluded = excludedSources.has(source.url);
+                                    const originLabel = source.type === "pubmed" ? "PubMed" : source.type === "rag" ? "Ominis" : "Web";
+                                    const originIcon = source.type === "pubmed" ? "🔬" : source.type === "rag" ? "📚" : "🌐";
+                                    return (
+                                      <li key={source.displayNum} className={`text-xs ${isExcluded ? "opacity-40" : ""}`}>
+                                        <div className="flex items-start gap-1.5">
+                                          {showCheckboxes && (
+                                            <input
+                                              type="checkbox"
+                                              checked={!isExcluded}
+                                              onChange={() => {
+                                                setExcludedSources(prev => {
+                                                  const next = new Set(prev);
+                                                  if (next.has(source.url)) next.delete(source.url);
+                                                  else next.add(source.url);
+                                                  return next;
+                                                });
+                                              }}
+                                              className="mt-0.5 rounded border-gray-500 bg-white/10 text-cyan-500 focus:ring-cyan-500/30 flex-shrink-0"
+                                            />
+                                          )}
+                                          <div className="min-w-0">
+                                            <a href={source.url} target="_blank" rel="noopener noreferrer"
+                                              className="text-blue-400 hover:text-blue-300 transition-colors hover:underline">
+                                              [{source.displayNum}] {source.title}
+                                            </a>
+                                            <div className="text-[10px] text-gray-500 mt-0.5">
+                                              <span className="mr-2">{originIcon} {originLabel}</span>
+                                              {source.authors && <span className="mr-2">· {source.authors.split(",").slice(0, 2).join(", ")}{source.authors.split(",").length > 2 ? " et al." : ""}</span>}
+                                              {source.year && <span className="mr-2">· {source.year}</span>}
+                                              {source.journal && <span>· {source.journal}</span>}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </li>
+                                    );
+                                  })}
                                 </ul>
                               </div>
                             );
@@ -1136,50 +2047,67 @@ export default function MainLayout() {
                   );
                 })}
 
-                {/* Loading indicator */}
+                {/* Loading indicator / Research progress */}
                 {isLoading && (
                   <div className="flex justify-start">
-                    <div className="bg-white/10 text-gray-100 rounded-2xl rounded-bl-sm p-3">
+                    <div className="bg-white/10 backdrop-blur-md border border-white/10 text-gray-100 rounded-2xl rounded-bl-sm p-3 max-w-[85%]">
                       <div className="flex items-center gap-3">
                         <div className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
                         {loadingStatus && (
                           <span className="text-gray-300 text-sm animate-pulse">{loadingStatus}</span>
                         )}
                       </div>
+                      {/* Research progress bar */}
+                      {researchProgress && researchSteps.length > 0 && (
+                        <div className="mt-3">
+                          <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
+                            <span>{researchProgress.found} fuentes · {researchProgress.read} leídas</span>
+                            <span>{researchProgress.elapsedSeconds}s</span>
+                          </div>
+                          <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                            <div className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, researchProgress.elapsedSeconds / 2.4)}%` }} />
+                          </div>
+                          <button
+                            onClick={() => setShowResearchPanel(!showResearchPanel)}
+                            className="mt-2 text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors"
+                          >
+                            {showResearchPanel ? "Ocultar actividad" : `Ver actividad (${researchSteps.length} pasos)`}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
 
                 <div ref={messagesEndRef} />
               </div>
-
-              {/* Suggested Questions */}
-              {messages.length === 1 && (
-                <div className="px-4 pb-2">
-                  <div className="flex flex-wrap gap-2">
-                    {suggestedQuestions.map((q, i) => (
-                      <button
-                        key={i}
-                        onClick={() => {
-                          setInput(q);
-                          inputRef.current?.focus();
-                        }}
-                        className="text-xs bg-white/5 hover:bg-white/10 text-gray-300 px-3 py-1.5 rounded-full transition-colors border border-white/10"
-                      >
-                        {q}
-                      </button>
-                    ))}
-                  </div>
-                </div>
               )}
 
-              {/* Input Area */}
-              <div className="p-3 border-t border-white/10 bg-black/20">
-                {/* Images Preview */}
-                {uploadedImages.length > 0 && (
+              {/* Input Area (bottom — only when chat has messages) */}
+              {hasMessages && <div
+                className={`p-3 flex-shrink-0 border-t border-white/10 relative ${isDragOver ? "ring-2 ring-cyan-400/50 bg-cyan-500/5 rounded-xl" : ""}`}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+              >
+                {/* Drag overlay */}
+                {isDragOver && (
+                  <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#0a1628]/80 rounded-xl border-2 border-dashed border-cyan-400/50 pointer-events-none">
+                    <div className="text-center">
+                      <svg className="w-8 h-8 text-cyan-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                      <p className="text-cyan-300 text-sm font-medium">Suelta archivos aquí</p>
+                      <p className="text-gray-400 text-xs mt-1">Imágenes, PDF, CSV, XLS, DOC</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Attachments Preview */}
+                {(uploadedImages.length > 0 || uploadedFiles.length > 0) && (
                   <div className="mb-2 flex flex-wrap gap-2">
                     {uploadedImages.map((img, index) => (
-                      <div key={index} className="relative group">
+                      <div key={`img-${index}`} className="relative group">
                         <img 
                           src={img.data} 
                           alt={img.name} 
@@ -1196,11 +2124,35 @@ export default function MainLayout() {
                         </button>
                       </div>
                     ))}
+                    {uploadedFiles.map((file, index) => (
+                      <div key={`file-${index}`} className="relative group flex items-center gap-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2">
+                        <svg className="w-5 h-5 text-orange-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        <div className="min-w-0">
+                          <p className="text-white text-xs truncate max-w-[120px]">{file.name}</p>
+                          {file.extracting ? (
+                            <p className="text-cyan-400 text-[10px] animate-pulse">Extrayendo...</p>
+                          ) : (
+                            <p className="text-gray-500 text-[10px]">{file.text ? `${file.text.length.toLocaleString()} chars` : "Listo"}</p>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => removeFile(index)}
+                          className="text-gray-400 hover:text-red-400 transition-colors ml-1"
+                          title="Eliminar"
+                        >
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 )}
 
                 {/* Active features indicator */}
-                {(ragSearchEnabled || webSearchEnabled || pubmedSearchEnabled || uploadedImages.length > 0 || selectedModel !== "ominis-2.0") && (
+                {(ragSearchEnabled || webSearchEnabled || pubmedSearchEnabled || researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
                   <div className="flex items-center gap-1.5 mb-2 text-xs flex-wrap">
                     {/* Model badge (shown when non-default model selected) */}
                     {selectedModel !== "ominis-2.0" && (
@@ -1209,6 +2161,17 @@ export default function MainLayout() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                         </svg>
                         {availableModels.find(m => m.id === selectedModel)?.displayName || selectedModel}
+                      </span>
+                    )}
+                    {researchModeEnabled && (
+                      <span className="flex items-center gap-1 text-emerald-400 bg-emerald-500/10 pl-2 pr-1 py-1 rounded-full">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
+                        </svg>
+                        Investigación
+                        <button onClick={() => setResearchModeEnabled(false)} className="ml-0.5 hover:text-emerald-200 transition-colors" title="Desactivar">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
                       </span>
                     )}
                     {ragSearchEnabled && (
@@ -1244,12 +2207,12 @@ export default function MainLayout() {
                         </button>
                       </span>
                     )}
-                    {uploadedImages.length > 0 && (
-                      <span className="flex items-center gap-1 text-green-400 bg-green-500/10 px-2 py-1 rounded-full">
+                    {(uploadedImages.length > 0 || uploadedFiles.length > 0) && (
+                      <span className="flex items-center gap-1 text-orange-400 bg-orange-500/10 px-2 py-1 rounded-full">
                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                         </svg>
-                        {uploadedImages.length} imagen{uploadedImages.length > 1 ? "es" : ""}
+                        {uploadedImages.length + uploadedFiles.length} adjunto{(uploadedImages.length + uploadedFiles.length) > 1 ? "s" : ""}
                       </span>
                     )}
                   </div>
@@ -1261,9 +2224,9 @@ export default function MainLayout() {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx"
                     multiple
-                    onChange={handleImageUpload}
+                    onChange={handleFileUpload}
                     className="hidden"
                   />
 
@@ -1280,113 +2243,20 @@ export default function MainLayout() {
                       </svg>
                     </button>
 
-                    {/* Dropdown Menu */}
-                    {showPlusMenu && (
-                      <div className="absolute bottom-full left-0 mb-2 bg-[#1a2744] border border-white/10 rounded-xl shadow-xl py-2 min-w-[200px] z-50">
-                        {/* Add files option */}
-                        <button
-                          onClick={() => fileInputRef.current?.click()}
-                          className="w-full flex items-center gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                          </svg>
-                          Agregar imágenes
-                        </button>
-
-                        <div className="border-t border-white/10 my-1"></div>
-
-                        {/* Model selector section */}
-                        <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modelo</div>
-                        {availableModels.map((m) => (
-                          <button
-                            key={m.id}
-                            onClick={() => setSelectedModel(m.id)}
-                            className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${
-                              selectedModel === m.id
-                                ? "text-white bg-white/10"
-                                : "text-gray-300 hover:bg-white/10 hover:text-white"
-                            }`}
-                          >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                              </svg>
-                              <span className="truncate">{m.displayName}</span>
-                            </div>
-                            {selectedModel === m.id && (
-                              <svg className="w-4 h-4 text-cyan-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                              </svg>
-                            )}
-                          </button>
-                        ))}
-
-                        <div className="border-t border-white/10 my-1"></div>
-
-                        {/* Section header */}
-                        <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Buscar en fuentes</div>
-
-                        {/* Ominis RAG toggle */}
-                        <button
-                          onClick={() => setRagSearchEnabled(!ragSearchEnabled)}
-                          className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
-                        >
-                          <div className="flex items-center gap-3">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-                            </svg>
-                            Ominis
-                          </div>
-                          <div className={`w-8 h-5 rounded-full transition-colors ${ragSearchEnabled ? "bg-cyan-500" : "bg-gray-600"} relative`}>
-                            <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${ragSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`}></div>
-                          </div>
-                        </button>
-
-                        {/* Web search toggle */}
-                        <button
-                          onClick={() => setWebSearchEnabled(!webSearchEnabled)}
-                          className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
-                        >
-                          <div className="flex items-center gap-3">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
-                            </svg>
-                            Web
-                          </div>
-                          <div className={`w-8 h-5 rounded-full transition-colors ${webSearchEnabled ? "bg-blue-500" : "bg-gray-600"} relative`}>
-                            <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${webSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`}></div>
-                          </div>
-                        </button>
-
-                        {/* PubMed search toggle */}
-                        <button
-                          onClick={() => setPubmedSearchEnabled(!pubmedSearchEnabled)}
-                          className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm"
-                        >
-                          <div className="flex items-center gap-3">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                            </svg>
-                            PubMed
-                          </div>
-                          <div className={`w-8 h-5 rounded-full transition-colors ${pubmedSearchEnabled ? "bg-purple-500" : "bg-gray-600"} relative`}>
-                            <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${pubmedSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`}></div>
-                          </div>
-                        </button>
-                      </div>
-                    )}
+                    {/* Dropdown Menu (chat mode) */}
+                    {showPlusMenu && renderPlusMenu()}
                   </div>
 
-                  <input
+                  <textarea
                     ref={inputRef}
-                    type="text"
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
+                    onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 150) + "px"; }}
                     onKeyDown={handleKeyDown}
                     onPaste={handlePaste}
-                    placeholder="Escribe tu pregunta..."
-                    className="flex-1 bg-white/5 border border-white/10 rounded-full px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-all"
+                    placeholder="Escribe tu pregunta sobre salud en México..."
+                    className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-white/30 transition-all resize-none overflow-y-auto"
+                    style={{ minHeight: "40px", maxHeight: "150px" }}
+                    rows={1}
                     disabled={isLoading}
                   />
                   <button
@@ -1399,145 +2269,43 @@ export default function MainLayout() {
                     </svg>
                   </button>
                 </div>
-              </div>
-            </div>
+              </div>}
 
-            {/* Disclaimer under chat */}
-            <p className="text-gray-500 text-xs text-center mt-3">
-              ⚠️ Herramienta de apoyo para investigadores. Verifica siempre la información con las fuentes originales.
-            </p>
-          </div>
-
-          {/* Right Column: Info Cards */}
-          <div className="lg:col-span-5 order-2 lg:order-2 space-y-4 flex flex-col">
-            {/* FUNSALUD - Top */}
-            <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl p-4">
-              <div className="flex items-center gap-4 mb-3">
-                <Image
-                  src="/funsalud-logo.png"
-                  alt="FUNSALUD"
-                  width={100}
-                  height={40}
-                  className="h-10 w-auto flex-shrink-0"
-                />
-                <div>
-                  <p className="text-gray-400 text-xs mb-0.5">Una iniciativa de</p>
-                  <Link
-                    href="https://funsalud.org.mx"
-                    target="_blank"
-                    className="text-white font-medium text-sm hover:text-blue-400 transition-colors"
-                  >
-                    Fundación Mexicana para la Salud A.C.
-                  </Link>
-                </div>
-              </div>
-              <p className="text-gray-400 text-xs">
-                OMINIS es una iniciativa sin fines de lucro para facilitar la investigación en salud 
-                apoyada por inteligencia artificial y respaldada por miles de fuentes de información 
-                curadas por un equipo humano.
-              </p>
-            </div>
-
-            {/* Technology & Contact Card */}
-            <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl p-4">
-              <div className="flex items-start gap-2 mb-3">
-                <span className="text-green-400 text-lg">🇲🇽</span>
-                <div>
-                  <h3 className="text-white font-semibold text-sm">
-                    Potenciado por{" "}
-                    <Link href="/modelo" className="text-blue-400 hover:underline">ominis-2.0</Link>
-                  </h3>
-                  <p className="text-gray-400 text-xs mt-1">
-                    Modelo de IA mexicano especializado en salud. Entrenado con protocolos, datos y artículos hospedados exclusivamente en México (S3 mx-central-1).{" "}
-                    <strong className="text-green-400">No usamos modelos de terceros (OpenAI, Google, Anthropic, Meta).</strong>{" "}
-                    Tus consultas son completamente efímeras: no almacenamos tus interacciones ni usamos tus datos para entrenar el modelo.{" "}
-                    Infraestructura 100% administrada por FUNSALUD.{" "}
-                    <Link href="/modelo" className="text-blue-400 hover:underline">Ver más →</Link>
-                  </p>
-                </div>
-              </div>
-              <div className="border-t border-white/10 pt-3 mt-3">
-                <h4 className="text-white font-medium text-xs mb-1">¿Tienes comentarios?</h4>
-                <p className="text-gray-400 text-xs mb-2">
-                  Estamos mejorando OMINIS constantemente. Ayúdanos a perfeccionarlo compartiéndonos 
-                  cualquier comportamiento inesperado o ideas de mejora.
-                </p>
-                <a
-                  href="mailto:ominis@funsalud.org.mx"
-                  className="text-blue-400 hover:text-blue-300 text-xs transition-colors"
+            {/* Bottom info line */}
+            <div className="flex-shrink-0 text-center py-1.5">
+              <span className="text-gray-500 text-[11px]">
+                ⚠️ Siempre verifica con las fuentes originales · Una iniciativa de{" "}
+                <a href="https://www.funsalud.org.mx" target="_blank" rel="noopener noreferrer" className="text-gray-400 hover:text-white transition-colors">FUNSALUD</a>
+                {" · IA hecha en México · modelo LLM: "}
+                <a href="/modelo" className="text-gray-400 hover:text-white transition-colors">ominis-2.0</a>
+                {" · "}
+                <button
+                  onClick={() => setFooterExpanded(true)}
+                  className="text-gray-400 hover:text-white transition-colors underline underline-offset-2 decoration-gray-600 hover:decoration-white"
                 >
-                  ominis@funsalud.org.mx
-                </a>
-              </div>
-              <div className="border-t border-white/10 pt-3 mt-3">
-                <h4 className="text-white font-medium text-xs mb-1">¿Quieres usar ominis-2.0?</h4>
-                <p className="text-gray-400 text-xs mb-2">
-                  Si deseas integrar el modelo ominis-2.0 en una aplicación de salud en México, 
-                  contáctanos para solicitar acceso.
-                </p>
-                <a
-                  href="mailto:ominis@funsalud.org.mx"
-                  className="text-blue-400 hover:text-blue-300 text-xs transition-colors"
-                >
-                  ominis@funsalud.org.mx
-                </a>
-              </div>
+                  Más información
+                </button>
+              </span>
             </div>
-
-            {/* ROCLab Card - Bottom, smaller */}
-            <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden hover:bg-white/10 transition-all">
-              <div className="flex gap-4 p-4">
-                <div className="relative w-24 h-20 flex-shrink-0 rounded-lg overflow-hidden">
-                  <Image
-                    src="/roclab-preview.png"
-                    alt="ROCLab"
-                    fill
-                    className="object-cover"
-                  />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-white font-semibold text-sm mb-1">ROCLab: Machine learning sin código</h3>
-                  <p className="text-gray-400 text-xs mb-2 line-clamp-2">
-                    Análisis de datasets y optimización de curvas ROC con IA.
-                  </p>
-                  <Link
-                    href="https://roclab.ominis.org"
-                    target="_blank"
-                    className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300 text-xs font-medium transition-colors"
-                  >
-                    Probar ahora
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
-                  </Link>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Feature badges - below columns */}
-        <div className="flex flex-wrap justify-center gap-3 mt-8">
-          <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-3 py-1.5">
-            <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-            </svg>
-            <span className="text-gray-300 text-xs">100% Datos en México</span>
-          </div>
-          <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-3 py-1.5">
-            <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-            </svg>
-            <span className="text-gray-300 text-xs">Fuentes Verificadas</span>
-          </div>
-          <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-3 py-1.5">
-            <svg className="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-            </svg>
-            <span className="text-gray-300 text-xs">Sin almacenamiento de consultas</span>
-          </div>
         </div>
       </div>
+
+      {/* Expandable footer overlay */}
+      {footerExpanded && (
+        <div className={`fixed inset-x-0 bottom-0 z-40 max-h-[70vh] overflow-y-auto transition-all duration-300 ${sidebarOpen ? "lg:pl-72" : "lg:pl-10"}`}>
+          <div className="bg-[#060e1a]/95 backdrop-blur-md border-t border-white/10">
+            <Footer />
+            <div className="text-center pb-3">
+              <button
+                onClick={() => setFooterExpanded(false)}
+                className="text-gray-500 hover:text-gray-300 text-[11px] transition-colors"
+              >
+                Ocultar ▲
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Image Modal */}
       {modalImage && (
@@ -1562,6 +2330,63 @@ export default function MainLayout() {
             />
           </div>
         </div>
+      )}
+      {/* Research panel reopen button (floating, shown when panel is closed but has data) */}
+      {!showResearchPanel && researchSteps.length > 0 && (
+        <button
+          onClick={() => setShowResearchPanel(true)}
+          className="fixed top-20 right-4 z-30 bg-[#1a2744]/90 backdrop-blur-sm border border-white/10 rounded-full p-2.5 text-gray-400 hover:text-white hover:bg-white/10 transition-colors shadow-lg"
+          title="Ver actividad de investigación"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+        </button>
+      )}
+
+      {/* Research Activity Panel (right sidebar) */}
+      {showResearchPanel && researchSteps.length > 0 && (
+        <aside className="fixed top-16 right-0 bottom-0 z-40 w-80 bg-[#0b1426]/95 backdrop-blur-md border-l border-white/10 flex flex-col transition-transform duration-300">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+            <h3 className="text-sm font-semibold text-white">Actividad de investigación</h3>
+            <button onClick={() => setShowResearchPanel(false)} className="text-gray-400 hover:text-white p-1 transition-colors">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
+          {researchProgress && (
+            <div className="px-4 py-2 border-b border-white/10 bg-white/5">
+              <div className="flex justify-between text-[10px] text-gray-400">
+                <span>{researchProgress.found} encontradas</span>
+                <span>{researchProgress.read} leídas</span>
+                <span>{researchProgress.elapsedSeconds}s</span>
+              </div>
+              <div className="w-full h-1 bg-white/10 rounded-full mt-1 overflow-hidden">
+                <div className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full transition-all" style={{ width: `${Math.min(100, researchProgress.elapsedSeconds / 2.4)}%` }} />
+              </div>
+            </div>
+          )}
+          <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
+            {researchSteps.map((step, i) => {
+              const iconMap: Record<string, string> = { plan: "📋", search: "🔍", search_result: "📄", refine: "🎯", filter: "⚙️", read: "📖", read_done: "✅", read_fail: "❌", follow: "🔗", complete: "🏁", sources: "📊" };
+              const icon = iconMap[step.action] || "•";
+              return (
+                <div key={i} className="text-[11px] leading-relaxed">
+                  <div className="flex items-start gap-1.5">
+                    <span className="flex-shrink-0 mt-0.5">{icon}</span>
+                    <div className="min-w-0">
+                      <p className="text-gray-300">{step.detail}</p>
+                      {step.result && <p className="text-gray-500">{step.result}</p>}
+                      {step.url && (
+                        <a href={step.url} target="_blank" rel="noopener noreferrer" className="text-cyan-500 hover:text-cyan-400 truncate block">{step.url.replace(/^https?:\/\//, '').substring(0, 50)}</a>
+                      )}
+                    </div>
+                    <span className="text-gray-600 flex-shrink-0 ml-auto">{step.elapsed}s</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </aside>
       )}
     </section>
   );

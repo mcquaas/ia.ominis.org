@@ -56,7 +56,10 @@ for i in {1..30}; do
 done
 
 # Strapi API URL (v1 prefix for Strapi endpoints)
-STRAPI_URL="${STRAPI_URL:-https://api.ominis.org/v1}"
+STRAPI_URL="${STRAPI_URL:-https://api.ominis.org}"
+
+# Backend URL for server-side API routes (Haystack backend)
+BACKEND_URL="${BACKEND_URL:-https://api.ominis.org}"
 
 # Create .env.local with correct API endpoint
 echo ""
@@ -64,9 +67,13 @@ echo "Creating environment configuration..."
 cat << EOF > "$FRONTEND_DIR/.env.local"
 NEXT_PUBLIC_API_ENDPOINT=$API_URL
 NEXT_PUBLIC_STRAPI_URL=$STRAPI_URL
+
+# Backend base URL for server-side API routes
+BACKEND_URL=$BACKEND_URL
 EOF
 echo "  ✓ .env.local created with API_ENDPOINT=$API_URL"
 echo "  ✓ .env.local created with STRAPI_URL=$STRAPI_URL"
+echo "  ✓ .env.local created with BACKEND_URL=$BACKEND_URL"
 
 # Build the frontend locally first
 echo ""

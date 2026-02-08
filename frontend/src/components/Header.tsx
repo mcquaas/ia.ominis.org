@@ -9,7 +9,7 @@ export default function Header() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
-  const { user, isAuthenticated, logout, loading } = useAuth();
+  const { user, isAuthenticated, isAdmin, isDeveloper, logout, loading } = useAuth();
 
   // Close user menu when clicking outside
   useEffect(() => {
@@ -30,7 +30,7 @@ export default function Header() {
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 bg-[#0a1628]/90 backdrop-blur-sm border-b border-white/10">
-      <nav className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <nav className="px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           {/* Logo + Title */}
           <Link href="/" className="flex items-center gap-3">
@@ -49,30 +49,17 @@ export default function Header() {
 
           {/* Desktop Navigation */}
           <div className="hidden md:flex items-center gap-6">
-            <Link 
-              href="https://ominis.org" 
-              target="_blank"
-              className="text-gray-300 hover:text-white transition-colors text-sm"
-            >
-              Observatorio
-            </Link>
-            <Link 
-              href="https://roclab.ominis.org" 
-              target="_blank"
-              className="text-gray-300 hover:text-white transition-colors text-sm"
-            >
-              ROCLab
-            </Link>
-            <Link 
-              href="https://funsalud.org.mx" 
-              target="_blank"
-              className="text-gray-300 hover:text-white transition-colors text-sm"
-            >
-              FUNSALUD
-            </Link>
 
-            {/* Separator */}
-            <div className="w-px h-6 bg-white/20" />
+            {/* Main nav links */}
+            <Link
+              href="/sinba"
+              className="text-gray-400 hover:text-cyan-300 transition-colors text-sm flex items-center gap-1.5"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+              </svg>
+              Cubos SINBA
+            </Link>
 
             {/* Auth Section */}
             {loading ? (
@@ -99,7 +86,7 @@ export default function Header() {
 
                 {/* User Dropdown Menu */}
                 {isUserMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-56 glass rounded-xl py-2 shadow-xl animate-fade-in">
+                  <div className="absolute right-0 mt-2 w-56 bg-[#0f1d32]/95 backdrop-blur-md border border-white/15 rounded-xl py-2 shadow-2xl animate-fade-in">
                     <div className="px-4 py-2 border-b border-white/10">
                       <p className="text-white font-medium truncate">{user.username}</p>
                       <p className="text-gray-400 text-xs truncate">{user.email}</p>
@@ -134,6 +121,48 @@ export default function Header() {
                           API Keys
                         </span>
                       </Link>
+                      <Link
+                        href="/profile/api-docs"
+                        onClick={() => setIsUserMenuOpen(false)}
+                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
+                      >
+                        <span className="flex items-center gap-2">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                          Documentación API
+                        </span>
+                      </Link>
+                      {isDeveloper && (
+                        <a
+                          href={`${process.env.NEXT_PUBLIC_STRAPI_URL || 'https://api.ominis.org'}/docs`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => setIsUserMenuOpen(false)}
+                          className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
+                        >
+                          <span className="flex items-center gap-2">
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                            </svg>
+                            API Docs
+                          </span>
+                        </a>
+                      )}
+                      {isAdmin && (
+                        <Link
+                          href="/dashboard"
+                          onClick={() => setIsUserMenuOpen(false)}
+                          className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
+                        >
+                          <span className="flex items-center gap-2">
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
+                            </svg>
+                            Dashboard
+                          </span>
+                        </Link>
+                      )}
                     </div>
                     <div className="border-t border-white/10 py-1">
                       <button
@@ -258,6 +287,33 @@ export default function Header() {
                     >
                       API Keys
                     </Link>
+                    <Link 
+                      href="/profile/api-docs"
+                      className="block text-gray-300 hover:text-white transition-colors"
+                      onClick={() => setIsMenuOpen(false)}
+                    >
+                      Documentación API
+                    </Link>
+                    {isDeveloper && (
+                      <a
+                        href={`${process.env.NEXT_PUBLIC_STRAPI_URL || 'https://api.ominis.org'}/docs`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block text-gray-300 hover:text-white transition-colors"
+                        onClick={() => setIsMenuOpen(false)}
+                      >
+                        API Docs
+                      </a>
+                    )}
+                    {isAdmin && (
+                      <Link 
+                        href="/dashboard"
+                        className="block text-gray-300 hover:text-white transition-colors"
+                        onClick={() => setIsMenuOpen(false)}
+                      >
+                        Dashboard
+                      </Link>
+                    )}
                     <button
                       onClick={handleLogout}
                       className="text-red-400 hover:text-red-300 transition-colors"

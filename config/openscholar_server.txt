@@ -1,0 +1,23 @@
+# OMINIS Health - OpenScholar Server Configuration
+# Academic Research LLM (Apache 2.0 License)
+# Deployed: 2026-02-08
+
+OPENSCHOLAR_INSTANCE_ID=i-0bf5937dec0d1298f
+OPENSCHOLAR_INSTANCE_TYPE=g5.2xlarge
+OPENSCHOLAR_ELASTIC_IP=44.217.135.115
+OPENSCHOLAR_REGION=us-east-1
+OPENSCHOLAR_MODEL=OpenSciLM/Llama-3.1_OpenScholar-8B
+OPENSCHOLAR_MODEL_ALIAS=openscholar
+
+# API Endpoints (OpenAI-compatible)
+OPENSCHOLAR_API_URL=http://44.217.135.115:8000
+OPENSCHOLAR_MODELS_ENDPOINT=http://44.217.135.115:8000/v1/models
+OPENSCHOLAR_CHAT_ENDPOINT=http://44.217.135.115:8000/v1/chat/completions
+OPENSCHOLAR_COMPLETIONS_ENDPOINT=http://44.217.135.115:8000/v1/completions
+
+# Security (restricted access)
+# Only Haystack backend (78.12.33.205) and old RAG API (78.13.254.66) can access port 8000
+
+# Cost: ~$1.60/hour (~$1,150/month)
+# Stop when not in use:
+# aws ec2 stop-instances --region us-east-1 --instance-ids i-0bf5937dec0d1298f

@@ -21,6 +21,9 @@ class RAGSourceOut(BaseModel):
     sourceUrl: Optional[str] = None
     category: Optional[str] = None
     language: Optional[str] = "es"
+    description: Optional[str] = None
+    publisher: Optional[str] = None
+    documentDate: Optional[str] = None
     chunksCount: int = 0
     lastIndexedAt: Optional[str] = None
     indexingError: Optional[str] = None
@@ -48,6 +51,75 @@ class RAGSourceUpdate(BaseModel):
     content: Optional[str] = None
     category: Optional[str] = None
     language: Optional[str] = None
+
+
+# --- File Upload schemas ---
+
+class FileUploadResponse(BaseModel):
+    message: str
+    sourceId: int
+    chunksCount: int
+    status: str
+
+
+# --- Scrape schemas ---
+
+class ScrapeUrlRequest(BaseModel):
+    url: str
+    category: str = ""
+    language: str = "es"
+
+
+class ScrapedPdfItem(BaseModel):
+    title: str
+    pdfUrl: str
+    sourcePage: str
+
+
+class ScrapePreviewResponse(BaseModel):
+    url: str
+    totalPdfs: int
+    pdfs: list[ScrapedPdfItem]
+
+
+class ScrapeIndexRequest(BaseModel):
+    url: str
+    category: str = ""
+    language: str = "es"
+    pdfs: list[ScrapedPdfItem] | None = None  # None = all from the page
+
+
+class ScrapeIndexResponse(BaseModel):
+    message: str
+    totalQueued: int
+    sources: list[dict]
+
+
+# --- Document/Chunk schemas ---
+
+class ChunkOut(BaseModel):
+    id: str
+    contentPreview: str
+    title: Optional[str] = None
+    url: Optional[str] = None
+    sourceType: Optional[str] = None
+    sourceId: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ChunkListResponse(BaseModel):
+    data: list[ChunkOut]
+    meta: dict
+
+
+# --- Store Stats schemas ---
+
+class StoreStatsOut(BaseModel):
+    totalDocuments: int = 0
+    embeddingModel: str = ""
+    embeddingDimension: int = 0
+    storageType: str = "pgvector (PostgreSQL)"
 
 
 # --- System Stats schemas ---
@@ -88,6 +160,65 @@ class SourceStatsOut(BaseModel):
     total: int = 0
     byStatus: dict = {"indexed": 0, "pending": 0, "processing": 0, "failed": 0}
     totalChunks: int = 0
+
+
+# --- Dataset Scrape schemas ---
+
+class DatasetPreviewRequest(BaseModel):
+    url: str
+
+
+class DatasetResourceItem(BaseModel):
+    title: str
+    description: str = ""
+    url: str
+    format: str = ""
+    resourceId: str = ""
+    sourcePage: str = ""
+
+
+class DatasetPreviewResponse(BaseModel):
+    pageTitle: str = ""
+    pageMetadata: dict = {}
+    totalResources: int = 0
+    resources: list[DatasetResourceItem] = []
+
+
+class DatasetIndexRequest(BaseModel):
+    url: str
+    category: str = ""
+    language: str = "es"
+    pageTitle: str = ""
+    pageMetadata: dict = {}
+    resources: list[DatasetResourceItem] | None = None
+
+
+class DatasetIndexResponse(BaseModel):
+    message: str
+    totalQueued: int = 0
+    sources: list[dict] = []
+
+
+# --- Tainacan Import schemas ---
+
+class TainacanPreviewResponse(BaseModel):
+    totalItems: int = 0
+    indexableFiles: int = 0
+    metadataOnly: int = 0
+    byExtension: dict = {}
+
+
+class TainacanImportRequest(BaseModel):
+    category: str = "tainacan"
+    language: str = "es"
+    maxItems: Optional[int] = None
+    skipExisting: bool = True
+
+
+class TainacanImportResponse(BaseModel):
+    message: str
+    totalQueued: int = 0
+    skipped: int = 0
 
 
 # --- Pagination ---

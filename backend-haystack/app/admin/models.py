@@ -39,6 +39,11 @@ class RAGSource(Base):
     category = Column(String(100), nullable=True)
     language = Column(String(10), nullable=True, default="es")
 
+    # LLM-generated metadata
+    description = Column(Text, nullable=True)  # One-sentence description
+    publisher = Column(String(255), nullable=True)  # Publishing organization
+    document_date = Column(String(100), nullable=True)  # Date found on document
+
     chunks_count = Column(Integer, default=0, nullable=False)
     last_indexed_at = Column(DateTime(timezone=True), nullable=True)
     indexing_error = Column(Text, nullable=True)

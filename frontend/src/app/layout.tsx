@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import Script from "next/script";
+import Providers from "@/components/Providers";
 import "./globals.css";
 
 const GA_MEASUREMENT_ID = "G-4WG5KD81EQ";
@@ -47,7 +48,7 @@ export default function RootLayout({
         </Script>
       </head>
       <body className={`${inter.variable} antialiased`}>
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

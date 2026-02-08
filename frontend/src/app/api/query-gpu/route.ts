@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Haystack backend - Non-streaming query endpoint
-const GPU_API = process.env.GPU_API_URL || 'http://localhost:8000/v1/query';
+// Ominis Agent backend - Non-streaming query endpoint
+const GPU_API = (process.env.BACKEND_URL || 'http://localhost:8000') + '/v1/query';
 
 export async function POST(request: NextRequest) {
   try {

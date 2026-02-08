@@ -25,6 +25,9 @@ class UserOut(BaseModel):
     username: str
     email: str
     role: RoleOut
+    full_name: Optional[str] = None
+    institution: Optional[str] = None
+    bio: Optional[str] = None
     confirmed: bool = True
     blocked: bool = False
     createdAt: str
@@ -78,3 +81,12 @@ class UpdateUserRequest(BaseModel):
     bio: Optional[str] = None
     blocked: Optional[bool] = None
     role: Optional[str] = None  # superadmin only
+
+
+class UserUsageOut(BaseModel):
+    period: str
+    startDate: str
+    endDate: str
+    totalQueries: int
+    totalTokens: int
+    totalInvestigations: int

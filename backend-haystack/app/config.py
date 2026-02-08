@@ -12,14 +12,16 @@ from pydantic_settings import BaseSettings
 @dataclass
 class ModelConfig:
     """Configuration for a single LLM model available via Ollama."""
-    id: str                      # Unique identifier used in API requests
-    ollama_model: str            # Model name in Ollama
-    display_name: str            # Human-readable name for the UI
-    description: str = ""        # Short description of the model
-    ollama_url: str = ""         # Ollama server URL (empty = use default from Settings)
+    id: str                      # Internal identifier (never exposed publicly)
+    ollama_model: str            # Model name in Ollama (never exposed publicly)
+    display_name: str            # Human-readable name for the UI (public)
+    public_id: str = "ominis-2.0"  # Public model ID returned in API responses
+    description: str = ""        # Short description (public)
+    ollama_url: str = ""         # Ollama server URL (never exposed publicly)
     temperature: float = 0.3     # Default generation temperature
     num_predict: int = 1024      # Max tokens to generate
     context_window: int = 4096   # Context window size
+    num_gpu: int = 50            # Number of GPU layers (reduce if VRAM is tight)
     is_default: bool = False     # Whether this is the default model
 
 
@@ -34,24 +36,15 @@ def _build_model_registry() -> dict[str, ModelConfig]:
         "ominis-2.0": ModelConfig(
             id="ominis-2.0",
             ollama_model="ominis-2.0",
-            display_name="Ominis 2.0 (BioMistral)",
-            description="Medical-specialized LLM based on BioMistral-7B, fine-tuned for health research in Spanish.",
-            ollama_url=settings.ollama_url,  # Default Ollama server (g4dn.xlarge / T4)
+            public_id="ominis-2.0",
+            display_name="Ominis 2.0",
+            description="Modelo de IA especializado en salud, desarrollado por FUNSALUD.",
+            ollama_url=settings.ollama_url,
             temperature=0.3,
-            num_predict=1024,
+            num_predict=2048,
             context_window=4096,
+            num_gpu=-1,  # All layers on GPU (14B fits entirely in A10G 24GB)
             is_default=True,
-        ),
-        "falcon-40b-instruct": ModelConfig(
-            id="falcon-40b-instruct",
-            ollama_model="falcon-40b-instruct",
-            display_name="Falcon 40B Instruct",
-            description="Large-scale instruction-tuned model by TII (40B parameters). Strong general reasoning and multilingual capabilities.",
-            ollama_url=settings.falcon_ollama_url,  # Separate GPU server (g5.2xlarge / A10G)
-            temperature=0.3,
-            num_predict=1024,
-            context_window=2048,
-            is_default=False,
         ),
     }
 
@@ -98,6 +91,7 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"           # Default server (ominis-2.0 / BioMistral)
     falcon_ollama_url: str = "http://localhost:11434"    # Falcon-40B server (separate GPU)
     ollama_model: str = "ominis-2.0"                     # Default model ID
+    vision_model: str = "minicpm-v"                      # Vision model for image analysis
 
     # Embeddings
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -107,6 +101,9 @@ class Settings(BaseSettings):
     aws_region: str = "mx-central-1"
     embeddings_bucket: str = "ominis-health-embeddings-mx"
     vector_prefix: str = "vectors"
+
+    # SINBA OLAP Cubes
+    sinba_xmla_url: str = ""  # XMLA endpoint URL (e.g., http://server/olap/msmdpump.dll)
 
     # CORS
     frontend_url: str = "http://localhost:3000"

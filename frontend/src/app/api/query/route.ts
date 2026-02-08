@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Haystack backend - Non-streaming query (can also use MEXICO_API_URL for legacy)
-const MEXICO_API = process.env.MEXICO_API_URL || 'http://localhost:8000/v1/query';
+// Ominis Agent backend - Non-streaming query (can also use MEXICO_API_URL for legacy)
+const MEXICO_API = process.env.MEXICO_API_URL || (process.env.BACKEND_URL || 'http://localhost:8000') + '/v1/query';
 
 export async function POST(request: NextRequest) {
   try {

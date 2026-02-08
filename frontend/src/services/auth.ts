@@ -14,6 +14,7 @@ import type {
   RagSource,
   SystemStats,
   QueryStats,
+  UserUsage,
 } from '@/types/auth';
 
 // Configuration - Backend API URL
@@ -73,14 +74,17 @@ export function isAuthenticated(): boolean {
 /**
  * Check if user has a specific role
  */
-export function hasRole(role: 'researcher' | 'admin' | 'superadmin'): boolean {
+export function hasRole(role: 'researcher' | 'developer' | 'admin' | 'superadmin'): boolean {
   const user = getUser();
   if (!user) return false;
   
   const userRole = user.role?.type?.toLowerCase();
   
   if (role === 'researcher') {
-    return ['researcher', 'admin', 'superadmin'].includes(userRole);
+    return ['researcher', 'developer', 'admin', 'superadmin'].includes(userRole);
+  }
+  if (role === 'developer') {
+    return ['developer', 'admin', 'superadmin'].includes(userRole);
   }
   if (role === 'admin') {
     return ['admin', 'superadmin'].includes(userRole);
@@ -176,10 +180,17 @@ export async function updateProfile(data: Partial<User>): Promise<User> {
   const user = getUser();
   if (!user) throw new Error('Not authenticated');
   
-  return fetchStrapi<User>(`/api/users/${user.id}`, {
+  const updated = await fetchStrapi<User>(`/api/users/${user.id}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   });
+  
+  const token = getToken();
+  if (token) {
+    storeAuth(token, updated);
+  }
+  
+  return updated;
 }
 
 /**
@@ -356,6 +367,206 @@ export async function getSourceStats(): Promise<{
   return fetchStrapi('/api/rag-sources/stats');
 }
 
+/**
+ * Upload a file as a RAG source
+ */
+export async function uploadRagFile(
+  file: File,
+  metadata: { title: string; category?: string; language?: string }
+): Promise<{ message: string; sourceId: number; chunksCount: number; status: string }> {
+  const token = getToken();
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('title', metadata.title);
+  if (metadata.category) formData.append('category', metadata.category);
+  formData.append('language', metadata.language || 'es');
+
+  const response = await fetch(`${STRAPI_URL}${API_PREFIX}/api/rag-sources/upload`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Upload failed' }));
+    throw new Error(err.detail || `Upload failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Get chunks belonging to a specific source
+ */
+export async function getSourceChunks(
+  sourceId: number,
+  page: number = 1,
+  pageSize: number = 20
+): Promise<{
+  data: Array<{
+    id: string;
+    contentPreview: string;
+    title?: string;
+    url?: string;
+    sourceType?: string;
+    sourceId?: number;
+  }>;
+  meta: { pagination: { total: number; page: number; pageSize: number } };
+}> {
+  return fetchStrapi(`/api/rag-sources/${sourceId}/chunks?page=${page}&page_size=${pageSize}`);
+}
+
+/**
+ * Get document store statistics
+ */
+export async function getStoreStats(): Promise<{
+  totalDocuments: number;
+  embeddingModel: string;
+  embeddingDimension: number;
+  storageType: string;
+}> {
+  return fetchStrapi('/api/rag-sources/store-stats');
+}
+
+/**
+ * Preview: scrape a URL for PDF links without indexing
+ */
+export async function scrapePreview(url: string): Promise<{
+  url: string;
+  totalPdfs: number;
+  pdfs: Array<{ title: string; pdfUrl: string; sourcePage: string }>;
+}> {
+  return fetchStrapi('/api/rag-sources/scrape-preview', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  });
+}
+
+/**
+ * Scrape PDFs from a URL and index them all
+ */
+export async function scrapeAndIndex(
+  url: string,
+  options?: {
+    category?: string;
+    language?: string;
+    pdfs?: Array<{ title: string; pdfUrl: string; sourcePage: string }>;
+  }
+): Promise<{
+  message: string;
+  totalQueued: number;
+  sources: Array<{ sourceId: number; title: string; pdfUrl: string; status: string }>;
+}> {
+  return fetchStrapi('/api/rag-sources/scrape-index', {
+    method: 'POST',
+    body: JSON.stringify({
+      url,
+      category: options?.category || '',
+      language: options?.language || 'es',
+      pdfs: options?.pdfs || null,
+    }),
+  });
+}
+
+// ==================== Dataset Import (Admin+) ====================
+
+/**
+ * Preview dataset page resources (CSV, XLS, PDF from data portals)
+ */
+export async function datasetPreview(url: string): Promise<{
+  pageTitle: string;
+  pageMetadata: Record<string, string>;
+  totalResources: number;
+  resources: Array<{
+    title: string;
+    description: string;
+    url: string;
+    format: string;
+    resourceId: string;
+    sourcePage: string;
+  }>;
+}> {
+  return fetchStrapi('/api/rag-sources/dataset-preview', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  });
+}
+
+/**
+ * Index resources from a dataset page
+ */
+export async function datasetIndex(
+  url: string,
+  options?: {
+    category?: string;
+    language?: string;
+    pageTitle?: string;
+    pageMetadata?: Record<string, string>;
+    resources?: Array<{
+      title: string;
+      description: string;
+      url: string;
+      format: string;
+      resourceId: string;
+      sourcePage: string;
+    }>;
+  }
+): Promise<{
+  message: string;
+  totalQueued: number;
+  sources: Array<{ sourceId: number; title: string; url: string; format: string; status: string }>;
+}> {
+  return fetchStrapi('/api/rag-sources/dataset-index', {
+    method: 'POST',
+    body: JSON.stringify({
+      url,
+      category: options?.category || '',
+      language: options?.language || 'es',
+      pageTitle: options?.pageTitle || '',
+      pageMetadata: options?.pageMetadata || {},
+      resources: options?.resources || null,
+    }),
+  });
+}
+
+// ==================== Tainacan Import (Admin+) ====================
+
+/**
+ * Preview Tainacan collection items
+ */
+export async function tainacanPreview(): Promise<{
+  totalItems: number;
+  indexableFiles: number;
+  metadataOnly: number;
+  byExtension: Record<string, number>;
+}> {
+  return fetchStrapi('/api/rag-sources/tainacan-preview');
+}
+
+/**
+ * Import all items from Tainacan collection
+ */
+export async function tainacanImport(options?: {
+  category?: string;
+  language?: string;
+  maxItems?: number;
+  skipExisting?: boolean;
+}): Promise<{
+  message: string;
+  totalQueued: number;
+  skipped: number;
+}> {
+  return fetchStrapi('/api/rag-sources/tainacan-import', {
+    method: 'POST',
+    body: JSON.stringify({
+      category: options?.category || 'tainacan',
+      language: options?.language || 'es',
+      maxItems: options?.maxItems || null,
+      skipExisting: options?.skipExisting !== false,
+    }),
+  });
+}
+
 // ==================== System Stats (Admin+) ====================
 
 /**
@@ -372,6 +583,37 @@ export async function refreshSystemStats(): Promise<{ message: string; stats: Sy
   return fetchStrapi('/api/system-stats/refresh', {
     method: 'POST',
   });
+}
+
+/**
+ * Get server performance metrics (CPU, memory, GPU, workers)
+ */
+export async function getServerPerformance(): Promise<{
+  cpu?: { cores: number; loadAvg1m: number; loadAvg5m: number; loadAvg15m: number; usagePercent: number };
+  memory?: { totalMB: number; usedMB: number; availableMB: number; usagePercent: number };
+  disk?: { totalGB: number; usedGB: number; freeGB: number; usagePercent: number };
+  gpu?: { name: string; memoryTotalMB: number; memoryUsedMB: number; memoryFreeMB: number; utilizationPercent: number; temperatureC: number } | null;
+  workers?: Array<{ pid: number; cpuPercent: number; memPercent: number; memMB: number }>;
+  database?: { activeConnections: number; idleConnections: number; totalConnections: number } | null;
+  uptimeHours?: number;
+}> {
+  return fetchStrapi('/api/system-stats/server-performance');
+}
+
+/**
+ * Get GPU/LLM server performance metrics
+ */
+export async function getGpuServerPerformance(): Promise<{
+  status: string;
+  ollamaUrl?: string;
+  ollamaVersion?: string;
+  gpuServerIp?: string;
+  models?: Array<{ name: string; sizeGB: number; parameterSize: string; quantization: string }>;
+  runningModels?: Array<{ name: string; sizeVramGB: number }>;
+  inference?: { latencyMs: number; tokensPerSecond: number; evalCount: number; evalDurationMs: number; loadDurationMs: number };
+  error?: string;
+}> {
+  return fetchStrapi('/api/system-stats/gpu-server');
 }
 
 /**
@@ -399,6 +641,13 @@ export async function getHealth(): Promise<{
  */
 export async function getQueryStats(period: 'hour' | 'day' | 'week' | 'month' = 'day'): Promise<QueryStats> {
   return fetchStrapi(`/api/query-logs/aggregated?period=${period}`);
+}
+
+/**
+ * Get usage stats for the current user
+ */
+export async function getUserUsage(period: 'day' | 'week' | 'month' = 'month'): Promise<UserUsage> {
+  return fetchStrapi(`/api/users/me/usage?period=${period}`);
 }
 
 // ==================== User Management (SuperAdmin) ====================
