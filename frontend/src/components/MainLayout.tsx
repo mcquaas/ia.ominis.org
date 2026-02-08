@@ -826,9 +826,34 @@ export default function MainLayout() {
     );
   };
 
+  // Strip LLM-generated "Referencias" / "Fuentes" block (redundant with inline citations + sources list)
+  const stripReferenciasBlock = (text: string): string => {
+    const lines = text.split("\n");
+    const result: string[] = [];
+    let stripMode = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      // Start of referencias block
+      if (/^(Referencias?|Fuentes?|Bibliograf[ií]a|Sources?):\s*$/i.test(trimmed)) {
+        stripMode = true;
+        continue;
+      }
+      // Lines that look like "[N] Title" or "N. Title" when in strip mode
+      if (stripMode) {
+        if (/^\[\d+\]\s*.+/.test(trimmed) || /^\d+\.\s+.+/.test(trimmed)) continue;
+        if (trimmed === "" || /^[-*]\s*/.test(trimmed)) continue;
+        stripMode = false;
+      }
+      result.push(line);
+    }
+    return result.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  };
+
   const renderContentWithCitations = (content: string, sources?: Source[]) => {
     const effectiveSrc = sources || [];
-    const formattedContent = formatContentWithCitations(content, effectiveSrc.length > 0 ? effectiveSrc : undefined);
+    const contentWithoutReferencias = stripReferenciasBlock(content);
+    const formattedContent = formatContentWithCitations(contentWithoutReferencias, effectiveSrc.length > 0 ? effectiveSrc : undefined);
 
     // Segment into text and table blocks
     const segments = segmentContent(formattedContent);
@@ -2042,19 +2067,19 @@ ${html}
                               )}
                               <button
                                 onClick={() => handleThumbsUp(message)}
-                                className={`p-1 rounded transition-colors ${feedbackByMessageId[message.id] === "positive" ? "text-green-400" : "text-gray-500 hover:text-white hover:bg-white/10"}`}
+                                className={`p-1 rounded transition-colors flex-shrink-0 ${feedbackByMessageId[message.id] === "positive" ? "text-green-400" : "text-gray-400 hover:text-white hover:bg-white/10"} ${feedbackByMessageId[message.id] ? "cursor-default pointer-events-none" : ""}`}
                                 title="Útil"
                                 disabled={!!feedbackByMessageId[message.id]}
                               >
-                                <svg className="w-3.5 h-3.5" fill={feedbackByMessageId[message.id] === "positive" ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" /></svg>
+                                <svg className="w-4 h-4" fill={feedbackByMessageId[message.id] === "positive" ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" /></svg>
                               </button>
                               <button
                                 onClick={() => handleThumbsDown(message)}
-                                className={`p-1 rounded transition-colors ${feedbackByMessageId[message.id] === "negative" ? "text-red-400" : "text-gray-500 hover:text-white hover:bg-white/10"}`}
+                                className={`p-1 rounded transition-colors flex-shrink-0 ${feedbackByMessageId[message.id] === "negative" ? "text-red-400" : "text-gray-400 hover:text-white hover:bg-white/10"} ${feedbackByMessageId[message.id] ? "cursor-default pointer-events-none" : ""}`}
                                 title="No útil"
                                 disabled={!!feedbackByMessageId[message.id]}
                               >
-                                <svg className="w-3.5 h-3.5" fill={feedbackByMessageId[message.id] === "negative" ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-4h-2a2 2 0 00-2 2v4a2 2 0 002 2h2a2 2 0 002-2v-4a2 2 0 00-2-2h-2z" /></svg>
+                                <svg className="w-4 h-4" fill={feedbackByMessageId[message.id] === "negative" ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-4h-2a2 2 0 00-2 2v4a2 2 0 002 2h2a2 2 0 002-2v-4a2 2 0 00-2-2h-2z" /></svg>
                               </button>
                             </div>
                           )}
