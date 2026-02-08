@@ -1327,7 +1327,6 @@ export default function MainLayout() {
   };
 
   const handleThumbsUp = async (message: Message) => {
-    if (feedbackByMessageId[message.id]) return;
     try {
       await feedbackService.submitFeedback({
         message_id: message.dbMessageId,
@@ -2067,19 +2066,25 @@ ${html}
                               )}
                               <button
                                 onClick={() => handleThumbsUp(message)}
-                                className={`p-1 rounded transition-colors flex-shrink-0 ${feedbackByMessageId[message.id] === "positive" ? "text-green-400" : "text-gray-400 hover:text-white hover:bg-white/10"} ${feedbackByMessageId[message.id] ? "cursor-default pointer-events-none" : ""}`}
+                                className={`p-1 rounded transition-colors flex-shrink-0 ${feedbackByMessageId[message.id] === "positive" ? "text-green-400" : "text-gray-400 hover:text-white hover:bg-white/10"}`}
                                 title="Útil"
-                                disabled={!!feedbackByMessageId[message.id]}
+                                aria-label="Útil"
                               >
-                                <svg className="w-4 h-4" fill={feedbackByMessageId[message.id] === "positive" ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" /></svg>
+                                <svg className="w-4 h-4" fill={feedbackByMessageId[message.id] === "positive" ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                                  <path d="M15 5.88 14 10h5.83a2 2 0 011.92 2.56l-2.33 8A2 2 0 0117.5 22H4a2 2 0 01-2-2v-8a2 2 0 012-2h2.76a2 2 0 001.79-1.11L12 2a3.13 3.13 0 011 3.88Z" />
+                                  <path d="M7 10v12" />
+                                </svg>
                               </button>
                               <button
                                 onClick={() => handleThumbsDown(message)}
-                                className={`p-1 rounded transition-colors flex-shrink-0 ${feedbackByMessageId[message.id] === "negative" ? "text-red-400" : "text-gray-400 hover:text-white hover:bg-white/10"} ${feedbackByMessageId[message.id] ? "cursor-default pointer-events-none" : ""}`}
+                                className={`p-1 rounded transition-colors flex-shrink-0 ${feedbackByMessageId[message.id] === "negative" ? "text-red-400" : "text-gray-400 hover:text-white hover:bg-white/10"}`}
                                 title="No útil"
-                                disabled={!!feedbackByMessageId[message.id]}
+                                aria-label="No útil"
                               >
-                                <svg className="w-4 h-4" fill={feedbackByMessageId[message.id] === "negative" ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-4h-2a2 2 0 00-2 2v4a2 2 0 002 2h2a2 2 0 002-2v-4a2 2 0 00-2-2h-2z" /></svg>
+                                <svg className="w-4 h-4" fill={feedbackByMessageId[message.id] === "negative" ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                                  <path d="M9 18.12 10 14H4.17a2 2 0 01-1.92-2.56l2.33-8A2 2 0 016.5 2H20a2 2 0 012 2v8a2 2 0 01-2 2h-2.76a2 2 0 00-1.79 1.11L12 22a3.13 3.13 0 01-3-3.88Z" />
+                                  <path d="M17 14V2" />
+                                </svg>
                               </button>
                             </div>
                           )}
@@ -2122,7 +2127,13 @@ ${html}
                                   {displaySources.map((source: any) => {
                                     const isExcluded = excludedSources.has(source.url);
                                     const originLabel = source.type === "pubmed" ? "PubMed" : source.type === "rag" ? "Ominis" : "Web";
-                                    const originIcon = source.type === "pubmed" ? "🔬" : source.type === "rag" ? "📚" : "🌐";
+                                    const originIcon = source.type === "pubmed" ? (
+                                      <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
+                                    ) : source.type === "rag" ? (
+                                      <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>
+                                    ) : (
+                                      <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>
+                                    );
                                     return (
                                       <li key={source.displayNum} className={`text-xs ${isExcluded ? "opacity-40" : ""}`}>
                                         <div className="flex items-start gap-1.5">
@@ -2146,8 +2157,8 @@ ${html}
                                               className="text-blue-400 hover:text-blue-300 transition-colors hover:underline">
                                               [{source.displayNum}] {source.title}
                                             </a>
-                                            <div className="text-[10px] text-gray-500 mt-0.5">
-                                              <span className="mr-2">{originIcon} {originLabel}</span>
+                                            <div className="text-[10px] text-gray-500 mt-0.5 flex items-center gap-1">
+                                              <span className="inline-flex items-center">{originIcon}{originLabel}</span>
                                               {source.authors && <span className="mr-2">· {source.authors.split(",").slice(0, 2).join(", ")}{source.authors.split(",").length > 2 ? " et al." : ""}</span>}
                                               {source.year && <span className="mr-2">· {source.year}</span>}
                                               {source.journal && <span>· {source.journal}</span>}
