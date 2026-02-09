@@ -8,8 +8,17 @@ import { useAuth } from "@/hooks/useAuth";
 export default function Header() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const [photoUrl, setPhotoUrl] = useState<string>("");
   const userMenuRef = useRef<HTMLDivElement>(null);
   const { user, isAuthenticated, isAdmin, logout, loading } = useAuth();
+
+  const displayName = user?.full_name?.trim() || user?.username || "";
+
+  useEffect(() => {
+    if (user?.id && typeof window !== "undefined") {
+      setPhotoUrl(localStorage.getItem(`ominis_profile_photo_url:${user.id}`) || "");
+    }
+  }, [user?.id]);
 
   // Close user menu when clicking outside
   useEffect(() => {
@@ -70,10 +79,14 @@ export default function Header() {
                   onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
                   className="flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
                 >
-                  <div className="w-8 h-8 rounded-full bg-accent/30 flex items-center justify-center text-white text-sm font-medium">
-                    {user.username.charAt(0).toUpperCase()}
+                  <div className="w-8 h-8 rounded-full bg-accent/30 flex items-center justify-center text-white text-sm font-medium overflow-hidden">
+                    {photoUrl ? (
+                      <img src={photoUrl} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      user.username.charAt(0).toUpperCase()
+                    )}
                   </div>
-                  <span className="text-sm hidden lg:inline">{user.username}</span>
+                  <span className="text-sm hidden lg:inline">{displayName || user.username}</span>
                   <svg 
                     className={`w-4 h-4 transition-transform ${isUserMenuOpen ? 'rotate-180' : ''}`} 
                     fill="none" 
@@ -88,7 +101,7 @@ export default function Header() {
                 {isUserMenuOpen && (
                   <div className="absolute right-0 mt-2 w-56 bg-[#0f1d32]/95 backdrop-blur-md border border-white/15 rounded-xl py-2 shadow-2xl animate-fade-in">
                     <div className="px-4 py-2 border-b border-white/10">
-                      <p className="text-white font-medium truncate">{user.username}</p>
+                      <p className="text-white font-medium truncate">{displayName || user.username}</p>
                       <p className="text-gray-400 text-xs truncate">{user.email}</p>
                       {user.role && (
                         <span className="inline-block mt-1 px-2 py-0.5 bg-accent/20 text-accent-light text-xs rounded-full">
@@ -133,19 +146,45 @@ export default function Header() {
                           Documentación API
                         </span>
                       </Link>
+                      <Link
+                        href="/c"
+                        onClick={() => setIsUserMenuOpen(false)}
+                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
+                      >
+                        <span className="flex items-center gap-2">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                          </svg>
+                          Ir al Chat
+                        </span>
+                      </Link>
                       {isAdmin && (
-                        <Link
-                          href="/dashboard"
-                          onClick={() => setIsUserMenuOpen(false)}
-                          className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
-                        >
-                          <span className="flex items-center gap-2">
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
-                            </svg>
-                            Dashboard
-                          </span>
-                        </Link>
+                        <>
+                          <Link
+                            href="/dashboard"
+                            onClick={() => setIsUserMenuOpen(false)}
+                            className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
+                          >
+                            <span className="flex items-center gap-2">
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
+                              </svg>
+                              Dashboard
+                            </span>
+                          </Link>
+                          <Link
+                            href="/rag"
+                            onClick={() => setIsUserMenuOpen(false)}
+                            className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
+                          >
+                            <span className="flex items-center gap-2">
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                              </svg>
+                              RAG
+                            </span>
+                          </Link>
+                        </>
                       )}
                     </div>
                     <div className="border-t border-white/10 py-1">
@@ -217,31 +256,6 @@ export default function Header() {
         {isMenuOpen && (
           <div className="md:hidden py-4 border-t border-white/10">
             <div className="flex flex-col gap-4">
-              <Link 
-                href="https://ominis.org" 
-                target="_blank"
-                className="text-gray-300 hover:text-white transition-colors"
-                onClick={() => setIsMenuOpen(false)}
-              >
-                Observatorio
-              </Link>
-              <Link 
-                href="https://roclab.ominis.org" 
-                target="_blank"
-                className="text-gray-300 hover:text-white transition-colors"
-                onClick={() => setIsMenuOpen(false)}
-              >
-                ROCLab
-              </Link>
-              <Link 
-                href="https://funsalud.org.mx" 
-                target="_blank"
-                className="text-gray-300 hover:text-white transition-colors"
-                onClick={() => setIsMenuOpen(false)}
-              >
-                FUNSALUD
-              </Link>
-
               {/* Mobile Auth Section */}
               <div className="border-t border-white/10 pt-4 mt-2">
                 {loading ? (
@@ -249,11 +263,15 @@ export default function Header() {
                 ) : isAuthenticated && user ? (
                   <div className="space-y-3">
                     <div className="flex items-center gap-3 pb-3 border-b border-white/10">
-                      <div className="w-10 h-10 rounded-full bg-accent/30 flex items-center justify-center text-white font-medium">
-                        {user.username.charAt(0).toUpperCase()}
+                      <div className="w-10 h-10 rounded-full bg-accent/30 flex items-center justify-center text-white font-medium overflow-hidden">
+                        {photoUrl ? (
+                          <img src={photoUrl} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                          user.username.charAt(0).toUpperCase()
+                        )}
                       </div>
                       <div>
-                        <p className="text-white font-medium">{user.username}</p>
+                        <p className="text-white font-medium">{displayName || user.username}</p>
                         <p className="text-gray-400 text-xs">{user.email}</p>
                       </div>
                     </div>
@@ -278,14 +296,30 @@ export default function Header() {
                     >
                       Documentación API
                     </Link>
+                    <Link 
+                      href="/c"
+                      className="block text-gray-300 hover:text-white transition-colors"
+                      onClick={() => setIsMenuOpen(false)}
+                    >
+                      Ir al Chat
+                    </Link>
                     {isAdmin && (
-                      <Link 
-                        href="/dashboard"
-                        className="block text-gray-300 hover:text-white transition-colors"
-                        onClick={() => setIsMenuOpen(false)}
-                      >
-                        Dashboard
-                      </Link>
+                      <>
+                        <Link 
+                          href="/dashboard"
+                          className="block text-gray-300 hover:text-white transition-colors"
+                          onClick={() => setIsMenuOpen(false)}
+                        >
+                          Dashboard
+                        </Link>
+                        <Link 
+                          href="/rag"
+                          className="block text-gray-300 hover:text-white transition-colors"
+                          onClick={() => setIsMenuOpen(false)}
+                        >
+                          RAG
+                        </Link>
+                      </>
                     )}
                     <button
                       onClick={handleLogout}

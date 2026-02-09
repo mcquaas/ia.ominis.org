@@ -15,6 +15,7 @@ import type {
   SystemStats,
   QueryStats,
   UserUsage,
+  TaxonomyDict,
 } from '@/types/auth';
 
 // Configuration - Backend API URL
@@ -309,21 +310,65 @@ export async function getApiKeyUsage(id: number): Promise<{
 // ==================== RAG Sources (Admin+) ====================
 
 /**
- * Get all RAG sources
+ * Get all RAG sources with optional filters
  */
 export async function getRagSources(params?: {
   page?: number;
   pageSize?: number;
   status?: string;
   sourceType?: string;
-}): Promise<{ data: RagSource[]; meta: { pagination: { total: number } } }> {
+  search?: string;
+  taxonomy?: TaxonomyDict;
+}): Promise<{ data: RagSource[]; meta: { pagination: { total: number; page: number; pageSize: number } } }> {
   const query = new URLSearchParams();
   if (params?.page) query.set('pagination[page]', String(params.page));
   if (params?.pageSize) query.set('pagination[pageSize]', String(params.pageSize));
   if (params?.status) query.set('filters[status]', params.status);
   if (params?.sourceType) query.set('filters[sourceType]', params.sourceType);
-  
+  if (params?.search?.trim()) query.set('filters[search]', params.search.trim());
+  if (params?.taxonomy && Object.keys(params.taxonomy).length > 0) {
+    query.set('filters[taxonomy]', JSON.stringify(params.taxonomy));
+  }
   return fetchStrapi(`/api/rag-sources?${query.toString()}`);
+}
+
+/**
+ * Get taxonomy schema (dimensions and valid values)
+ */
+export async function getTaxonomySchema(): Promise<{ taxonomy: Record<string, string[]> }> {
+  return fetchStrapi('/api/rag-sources/taxonomy-schema');
+}
+
+/**
+ * Get taxonomy stats (counts by institucion, tipo_documento)
+ */
+export async function getTaxonomyStats(): Promise<{
+  taxonomyStats: Record<string, Record<string, number>>;
+}> {
+  return fetchStrapi('/api/rag-sources/taxonomy-stats');
+}
+
+/**
+ * Run LLM classification for a single source
+ */
+export async function classifySource(id: number): Promise<{ data: RagSource; message: string }> {
+  return fetchStrapi(`/api/rag-sources/${id}/classify`, { method: 'POST' });
+}
+
+/**
+ * Batch reindex sources (optionally only those with taxonomy)
+ */
+export async function batchReindex(options?: {
+  onlyWithTaxonomy?: boolean;
+  maxConcurrent?: number;
+}): Promise<{ message: string; totalQueued: number }> {
+  return fetchStrapi('/api/rag-sources/batch-reindex', {
+    method: 'POST',
+    body: JSON.stringify({
+      onlyWithTaxonomy: options?.onlyWithTaxonomy ?? true,
+      maxConcurrent: options?.maxConcurrent ?? 2,
+    }),
+  });
 }
 
 /**

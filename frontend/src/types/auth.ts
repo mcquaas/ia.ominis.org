@@ -78,6 +78,9 @@ export interface CreateApiKeyResponse {
   message: string;
 }
 
+/** Taxonomy dimension values (e.g. institucion: ["SSA"], tipo_documento: ["guia_clinica"]) */
+export type TaxonomyDict = Record<string, string[]>;
+
 export interface RagSource {
   id: number;
   title: string;
@@ -91,6 +94,7 @@ export interface RagSource {
   description?: string;
   publisher?: string;
   documentDate?: string;
+  taxonomy?: TaxonomyDict;
   chunksCount: number;
   lastIndexedAt?: string;
   indexingError?: string;
