@@ -361,7 +361,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const resizeInputTextarea = useCallback(() => {
     const el = inputRef.current;
     if (!el) return;
-    el.style.height = "auto";
+    el.style.height = "1px"; // force recalculation of scrollHeight (0 can cause flash)
     el.style.height = Math.min(Math.max(el.scrollHeight, 40), 300) + "px";
   }, []);
   useEffect(() => {
@@ -1970,7 +1970,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         </div>
                       )}
 
-                      <div className="flex items-center gap-2 bg-white/[0.07] backdrop-blur-md border border-white/15 rounded-2xl px-2 py-1.5 shadow-lg shadow-black/10">
+                      <div className="flex items-end gap-2 bg-white/[0.07] backdrop-blur-md border border-white/15 rounded-2xl px-2 py-1.5 shadow-lg shadow-black/10">
                         <input ref={fileInputRef} type="file" accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx" multiple onChange={handleFileUpload} className="hidden" />
                         <div className="relative" ref={plusMenuRef}>
                           <button
@@ -1986,7 +1986,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           <textarea
                             ref={inputRef}
                             value={input}
-                            onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
+                            onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
                             onKeyDown={handleKeyDown} onPaste={handlePaste}
                             placeholder="Pregunta sobre salud en México..."
                             className="flex-1 min-w-0 min-h-[2.5rem] flex-shrink-0 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
@@ -2317,12 +2317,12 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
               </div>
               )}
 
-              {/* Scroll-to-top — above input, outline arrow with line above */}
+              {/* Scroll-to-top — transparent over content */}
               {hasMessages && showScrollTop && (
-                <div className="flex-shrink-0 flex justify-end items-center border-t border-white/10 px-4 py-2">
+                <div className="flex-shrink-0 flex justify-end items-center px-4 py-1">
                   <button
                     onClick={() => messagesContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })}
-                    className="p-2 rounded-full border border-white/30 text-white/80 hover:text-white hover:border-white/50 hover:bg-white/5 transition-colors"
+                    className="p-1.5 text-white/70 hover:text-white transition-colors"
                     title="Volver arriba"
                     aria-label="Volver arriba"
                   >
@@ -2434,8 +2434,8 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   </div>
                 )}
 
-                {/* Input Row — tags Ominis/Web/PubMed inside field on the right */}
-                <div className="flex items-center gap-2">
+                {/* Input Row — full width including + and send */}
+                <div className="flex items-end gap-2 bg-white/5 border border-white/10 rounded-2xl px-2 py-2.5 focus-within:border-white/30 transition-all">
                   <input ref={fileInputRef} type="file" accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx" multiple onChange={handleFileUpload} className="hidden" />
                   <div className="relative" ref={plusMenuRef}>
                     <button
@@ -2451,15 +2451,15 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                     {showPlusMenu && renderPlusMenu()}
                   </div>
 
-                  <div className="flex-1 flex flex-col md:flex-row md:items-end gap-2 min-w-0 bg-white/5 border border-white/10 rounded-2xl px-4 py-2.5 focus-within:border-white/30 transition-all">
+                  <div className="flex-1 flex flex-col md:flex-row md:items-end gap-2 min-w-0">
                     <textarea
                       ref={inputRef}
                       value={input}
-                      onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
+                      onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
                       onKeyDown={handleKeyDown}
                       onPaste={handlePaste}
                       placeholder="Pregunta sobre salud en México..."
-                      className="flex-1 min-w-0 min-h-[2.5rem] flex-shrink-0 bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0"
+                      className="flex-1 min-w-0 min-h-[2.5rem] flex-shrink-0 bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0 px-2"
                       style={{ maxHeight: "300px" }}
                       rows={1}
                       disabled={isLoading}
@@ -2493,7 +2493,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   </div>
                   <button
                     onClick={sendMessage}
-                    disabled={isLoading || (!input.trim() && uploadedImages.length === 0)}
+                    disabled={isLoading || (!input.trim() && uploadedImages.length === 0 && uploadedFiles.length === 0)}
                     className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
