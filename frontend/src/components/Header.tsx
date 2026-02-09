@@ -9,7 +9,7 @@ export default function Header() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
-  const { user, isAuthenticated, isAdmin, isDeveloper, logout, loading } = useAuth();
+  const { user, isAuthenticated, isAdmin, logout, loading } = useAuth();
 
   // Close user menu when clicking outside
   useEffect(() => {
@@ -133,22 +133,6 @@ export default function Header() {
                           Documentación API
                         </span>
                       </Link>
-                      {isDeveloper && (
-                        <a
-                          href={`${process.env.NEXT_PUBLIC_STRAPI_URL || 'https://api.ominis.org'}/docs`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={() => setIsUserMenuOpen(false)}
-                          className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
-                        >
-                          <span className="flex items-center gap-2">
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            API Docs
-                          </span>
-                        </a>
-                      )}
                       {isAdmin && (
                         <Link
                           href="/dashboard"
@@ -294,17 +278,6 @@ export default function Header() {
                     >
                       Documentación API
                     </Link>
-                    {isDeveloper && (
-                      <a
-                        href={`${process.env.NEXT_PUBLIC_STRAPI_URL || 'https://api.ominis.org'}/docs`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block text-gray-300 hover:text-white transition-colors"
-                        onClick={() => setIsMenuOpen(false)}
-                      >
-                        API Docs
-                      </a>
-                    )}
                     {isAdmin && (
                       <Link 
                         href="/dashboard"

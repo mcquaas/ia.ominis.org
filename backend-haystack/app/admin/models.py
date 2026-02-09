@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 from app.database import Base
 
@@ -43,6 +44,9 @@ class RAGSource(Base):
     description = Column(Text, nullable=True)  # One-sentence description
     publisher = Column(String(255), nullable=True)  # Publishing organization
     document_date = Column(String(100), nullable=True)  # Date found on document
+
+    # Researcher-oriented taxonomy (institucion, tipo_documento, dominio_salud, etc.)
+    taxonomy = Column(JSONB, nullable=True)
 
     chunks_count = Column(Integer, default=0, nullable=False)
     last_indexed_at = Column(DateTime(timezone=True), nullable=True)

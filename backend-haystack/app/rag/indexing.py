@@ -408,13 +408,16 @@ def index_file_with_meta(file_path: str | Path, source_id: int, meta: dict | Non
     cleaned = cleaner.run(documents=raw_docs)["documents"]
     chunks = splitter.run(documents=cleaned)["documents"]
 
-    # Step 3: Tag all chunks with source metadata
+    # Step 3: Tag all chunks with source metadata (including taxonomy)
     default_meta = {
         "source_id": source_id,
         "source_type": "rag",
     }
     if meta:
         default_meta.update(meta)
+        # Taxonomy is stored as JSON; pass through for chunk metadata
+        if "taxonomy" in meta and meta["taxonomy"]:
+            default_meta["taxonomy"] = meta["taxonomy"]
 
     for chunk in chunks:
         chunk.meta.update(default_meta)
@@ -438,6 +441,7 @@ def index_raw_text(
     source_type: str = "rag",
     category: str = "",
     language: str = "es",
+    taxonomy: dict | None = None,
 ) -> int:
     """
     Index raw text content through the simple pipeline.
@@ -446,17 +450,17 @@ def index_raw_text(
     if not content or not content.strip():
         return 0
 
-    doc = Document(
-        content=content,
-        meta={
-            "source_id": source_id,
-            "title": title,
-            "url": url,
-            "source_type": source_type,
-            "category": category,
-            "language": language,
-        },
-    )
+    meta: dict = {
+        "source_id": source_id,
+        "title": title,
+        "url": url,
+        "source_type": source_type,
+        "category": category,
+        "language": language,
+    }
+    if taxonomy:
+        meta["taxonomy"] = taxonomy
+    doc = Document(content=content, meta=meta)
 
     pipeline = get_simple_indexing_pipeline()
     result = pipeline.run({"cleaner": {"documents": [doc]}})
@@ -471,6 +475,7 @@ async def index_from_url(
     title: str = "",
     category: str = "",
     language: str = "es",
+    taxonomy: dict | None = None,
 ) -> int:
     """
     Fetch content from a URL and index it.
@@ -508,6 +513,8 @@ async def index_from_url(
             "category": category,
             "language": language,
         }
+        if taxonomy:
+            meta["taxonomy"] = taxonomy
 
         chunks_written = index_file_with_meta(tmp_path, source_id=source_id, meta=meta)
 

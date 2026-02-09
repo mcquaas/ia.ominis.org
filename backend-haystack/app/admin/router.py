@@ -16,11 +16,13 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.models import QueryLog, RAGSource, SourceStatus, SystemStat
 from app.admin.schemas import (
+    BatchReindexRequest,
+    BatchReindexResponse,
     ChunkListResponse,
     ChunkOut,
     DatasetIndexRequest,
@@ -77,6 +79,7 @@ def _source_to_out(source: RAGSource) -> RAGSourceOut:
         description=source.description,
         publisher=source.publisher,
         documentDate=source.document_date,
+        taxonomy=source.taxonomy,
         chunksCount=source.chunks_count,
         lastIndexedAt=source.last_indexed_at.isoformat() if source.last_indexed_at else None,
         indexingError=source.indexing_error,
@@ -152,19 +155,36 @@ async def _extract_and_save_metadata(source_id: int, kwargs: dict):
             generator=generator,
         )
 
-        if meta:
+        # Also extract taxonomy (researcher classification)
+        from app.rag.metadata_extractor import extract_taxonomy
+
+        taxonomy = {}
+        try:
+            taxonomy = await extract_taxonomy(
+                content_snippet=content_snippet,
+                url=url,
+                title=meta.get("title", ""),
+                generator=generator,
+            )
+        except Exception as e:
+            logger.warning(f"Taxonomy extraction failed for source {source_id}: {e}")
+
+        if meta or taxonomy:
             async with async_session() as db:
                 result = await db.execute(select(RAGSource).where(RAGSource.id == source_id))
                 source = result.scalar_one_or_none()
                 if source:
-                    if meta.get("title") and (not source.title or len(source.title) < 5):
-                        source.title = _safe_title(meta["title"])
-                    if meta.get("publisher") and not source.publisher:
-                        source.publisher = meta["publisher"][:250]
-                    if meta.get("document_date") and not source.document_date:
-                        source.document_date = meta["document_date"][:100]
-                    if meta.get("description") and not source.description:
-                        source.description = meta["description"][:500]
+                    if meta:
+                        if meta.get("title") and (not source.title or len(source.title) < 5):
+                            source.title = _safe_title(meta["title"])
+                        if meta.get("publisher") and not source.publisher:
+                            source.publisher = meta["publisher"][:250]
+                        if meta.get("document_date") and not source.document_date:
+                            source.document_date = meta["document_date"][:100]
+                        if meta.get("description") and not source.description:
+                            source.description = meta["description"][:500]
+                    if taxonomy:
+                        source.taxonomy = taxonomy
                     await db.commit()
                     logger.info(f"Metadata saved for source {source_id}: {meta.get('title', '')[:40]}")
 
@@ -180,13 +200,18 @@ async def _run_indexing_in_background(source_id: int, method: str, **kwargs):
     from app.database import async_session
 
     try:
+        meta = kwargs.get("meta", {})
+        taxonomy = kwargs.get("taxonomy") or meta.get("taxonomy")
+
         if method == "file":
             from app.rag.indexing import index_file_with_meta
+            if taxonomy:
+                meta = {**meta, "taxonomy": taxonomy}
             chunks = await asyncio.to_thread(
                 index_file_with_meta,
                 file_path=kwargs["file_path"],
                 source_id=source_id,
-                meta=kwargs.get("meta", {}),
+                meta=meta,
             )
         elif method == "text":
             from app.rag.indexing import index_raw_text
@@ -199,6 +224,7 @@ async def _run_indexing_in_background(source_id: int, method: str, **kwargs):
                 source_type="rag",
                 category=kwargs.get("category", ""),
                 language=kwargs.get("language", "es"),
+                taxonomy=taxonomy,
             )
         elif method == "url":
             from app.rag.indexing import index_from_url
@@ -208,6 +234,7 @@ async def _run_indexing_in_background(source_id: int, method: str, **kwargs):
                 title=kwargs.get("title", ""),
                 category=kwargs.get("category", ""),
                 language=kwargs.get("language", "es"),
+                taxonomy=taxonomy,
             )
         else:
             raise ValueError(f"Unknown indexing method: {method}")
@@ -284,6 +311,15 @@ async def list_rag_sources(
         data=[_source_to_out(s) for s in sources],
         meta={"pagination": {"total": total, "page": page, "pageSize": page_size}},
     )
+
+
+@router.get("/api/rag-sources/taxonomy-schema")
+async def get_taxonomy_schema(
+    _: User = Depends(require_role(RoleEnum.admin)),
+):
+    """Return the taxonomy dimensions and valid values for researcher classification."""
+    from app.rag.taxonomy import RAG_TAXONOMY
+    return {"taxonomy": RAG_TAXONOMY}
 
 
 @router.get("/api/rag-sources/stats", response_model=SourceStatsOut)
@@ -591,6 +627,7 @@ async def _run_pdf_download_and_index(
     title: str,
     category: str,
     language: str,
+    taxonomy: dict | None = None,
 ):
     """Download a PDF from URL and index it, updating the RAG source record."""
     from app.database import async_session
@@ -611,6 +648,8 @@ async def _run_pdf_download_and_index(
             "category": category,
             "language": language,
         }
+        if taxonomy:
+            meta["taxonomy"] = taxonomy
         chunks = await asyncio.to_thread(
             index_file_with_meta,
             file_path=str(tmp_path),
@@ -956,6 +995,11 @@ async def create_rag_source(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="A source with this slug already exists")
 
+    taxonomy = None
+    if create_data.taxonomy:
+        from app.rag.taxonomy import sanitize_taxonomy
+        taxonomy = sanitize_taxonomy(create_data.taxonomy)
+
     source = RAGSource(
         title=safe_t,
         slug=slug,
@@ -964,6 +1008,7 @@ async def create_rag_source(
         content=create_data.content,
         category=create_data.category,
         language=create_data.language,
+        taxonomy=taxonomy,
     )
 
     # Determine if we should auto-index
@@ -986,6 +1031,7 @@ async def create_rag_source(
                 url=create_data.sourceUrl or "",
                 category=create_data.category or "",
                 language=create_data.language,
+                taxonomy=taxonomy,
             ))
         elif create_data.sourceUrl:
             asyncio.create_task(_run_indexing_in_background(
@@ -995,6 +1041,7 @@ async def create_rag_source(
                 title=create_data.title,
                 category=create_data.category or "",
                 language=create_data.language,
+                taxonomy=taxonomy,
             ))
 
     return {"data": _source_to_out(source)}
@@ -1099,6 +1146,9 @@ async def update_rag_source(
             "sourceUrl": "source_url",
         }.get(field, field)
         if value is not None and hasattr(source, db_field):
+            if field == "taxonomy" and isinstance(value, dict):
+                from app.rag.taxonomy import sanitize_taxonomy
+                value = sanitize_taxonomy(value)
             setattr(source, db_field, value)
 
     await db.commit()
@@ -1132,6 +1182,55 @@ async def delete_rag_source(
     await db.commit()
 
 
+@router.post("/api/rag-sources/{source_id}/classify")
+async def classify_source_taxonomy(
+    source_id: int,
+    _: User = Depends(require_role(RoleEnum.admin)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Run LLM taxonomy classification for a single source and save to DB.
+    Does not reindex; use reindex to propagate taxonomy to chunks.
+    """
+    result = await db.execute(select(RAGSource).where(RAGSource.id == source_id))
+    source = result.scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Source not found")
+
+    # Get content snippet
+    content_snippet = ""
+    if source.content:
+        content_snippet = source.content[:2500]
+    else:
+        from app.rag.indexing import get_source_chunks
+        chunks = await asyncio.to_thread(get_source_chunks, source_id, limit=5, offset=0)
+        if chunks:
+            content_snippet = "\n\n".join((c.content or "")[:500] for c in chunks)
+
+    if not content_snippet.strip():
+        raise HTTPException(status_code=400, detail="No content to classify")
+
+    from app.rag.metadata_extractor import extract_taxonomy
+    from app.rag.pipeline import get_pipeline_manager
+
+    manager = get_pipeline_manager()
+    generator = manager.get_generator()
+
+    taxonomy = await extract_taxonomy(
+        content_snippet=content_snippet,
+        url=source.source_url or "",
+        title=source.title,
+        generator=generator,
+    )
+
+    if taxonomy:
+        source.taxonomy = taxonomy
+        await db.commit()
+        await db.refresh(source)
+        return {"data": _source_to_out(source), "message": "Taxonomy classified"}
+    return {"data": _source_to_out(source), "message": "No taxonomy extracted"}
+
+
 @router.post("/api/rag-sources/{source_id}/reindex")
 async def reindex_source(
     source_id: int,
@@ -1144,67 +1243,138 @@ async def reindex_source(
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
 
-    # Mark as indexing
     source.status = SourceStatus.indexing
     source.indexing_error = None
     await db.commit()
 
-    # Delete old chunks first, then re-index
-    async def _reindex():
-        from app.rag.indexing import delete_source_chunks
-        try:
-            await asyncio.to_thread(delete_source_chunks, source_id)
-        except Exception as e:
-            logger.error(f"Failed to delete old chunks for reindex: {e}")
-
-        # Determine indexing method
-        if source.content:
-            await _run_indexing_in_background(
-                source_id=source.id,
-                method="text",
-                content=source.content,
-                title=source.title,
-                url=source.source_url or "",
-                category=source.category or "",
-                language=source.language or "es",
-            )
-        elif source.source_url:
-            # For PDF sources, use the PDF download+index path (proper timeout)
-            if source.source_type == "pdf" or source.source_url.lower().endswith(".pdf"):
-                await _run_pdf_download_and_index(
-                    source_id=source.id,
-                    pdf_url=source.source_url,
-                    title=source.title,
-                    category=source.category or "",
-                    language=source.language or "es",
-                )
-            else:
-                await _run_indexing_in_background(
-                    source_id=source.id,
-                    method="url",
-                    url=source.source_url,
-                    title=source.title,
-                    category=source.category or "",
-                    language=source.language or "es",
-                )
-        else:
-            # No content to re-index
-            from app.database import async_session
-            async with async_session() as db2:
-                result2 = await db2.execute(select(RAGSource).where(RAGSource.id == source_id))
-                src = result2.scalar_one_or_none()
-                if src:
-                    src.status = SourceStatus.active
-                    src.indexing_error = "No content or URL to index"
-                    await db2.commit()
-
-    asyncio.create_task(_reindex())
+    asyncio.create_task(_run_single_reindex(source))
 
     return {
         "message": f"Re-indexing started for source '{source.title}'",
         "sourceId": source.id,
         "status": "indexing",
     }
+
+
+@router.post("/api/rag-sources/batch-reindex", response_model=BatchReindexResponse)
+async def batch_reindex(
+    body: BatchReindexRequest | None = None,
+    _: User = Depends(require_role(RoleEnum.admin)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Reindex multiple sources in background to propagate taxonomy to chunks.
+    By default only reindexes sources that have taxonomy.
+    Uses limited concurrency to avoid overload.
+    """
+    opts = body or BatchReindexRequest()
+    query = select(RAGSource).where(RAGSource.status == SourceStatus.active)
+    if opts.onlyWithTaxonomy:
+        query = query.where(RAGSource.taxonomy.isnot(None))
+    # Only sources with content or URL to reindex
+    query = query.where(
+        or_(
+            RAGSource.content.isnot(None),
+            RAGSource.source_url.isnot(None),
+        )
+    )
+    result = await db.execute(query)
+    sources = list(result.scalars().all())
+
+    if not sources:
+        return BatchReindexResponse(
+            message="No sources to reindex",
+            queued=0,
+            skipped=0,
+        )
+
+    sem = asyncio.Semaphore(opts.maxConcurrent)
+
+    async def _reindex_with_semaphore(src: RAGSource):
+        async with sem:
+            await _run_single_reindex(src)
+
+    for src in sources:
+        src.status = SourceStatus.indexing
+        src.indexing_error = None
+    await db.commit()
+
+    for src in sources:
+        asyncio.create_task(_reindex_with_semaphore(src))
+
+    logger.info(f"Batch reindex: queued {len(sources)} sources (maxConcurrent={opts.maxConcurrent})")
+    return BatchReindexResponse(
+        message=f"Re-indexing queued for {len(sources)} sources",
+        queued=len(sources),
+        skipped=0,
+    )
+
+
+async def _run_single_reindex(source: RAGSource):
+    """Run full reindex for one source (delete chunks + re-index with taxonomy)."""
+    from app.database import async_session
+    from app.rag.indexing import delete_source_chunks
+
+    source_id = source.id
+    taxonomy = source.taxonomy if source.taxonomy else None
+
+    try:
+        await asyncio.to_thread(delete_source_chunks, source_id)
+    except Exception as e:
+        logger.error(f"Failed to delete chunks for source {source_id}: {e}")
+
+    try:
+        if source.content:
+            await _run_indexing_in_background(
+                source_id=source_id,
+                method="text",
+                content=source.content,
+                title=source.title,
+                url=source.source_url or "",
+                category=source.category or "",
+                language=source.language or "es",
+                taxonomy=taxonomy,
+            )
+        elif source.source_url:
+            if source.source_type == "pdf" or (source.source_url or "").lower().endswith(".pdf"):
+                await _run_pdf_download_and_index(
+                    source_id=source_id,
+                    pdf_url=source.source_url,
+                    title=source.title,
+                    category=source.category or "",
+                    language=source.language or "es",
+                    taxonomy=taxonomy,
+                )
+            else:
+                await _run_indexing_in_background(
+                    source_id=source_id,
+                    method="url",
+                    url=source.source_url,
+                    title=source.title,
+                    category=source.category or "",
+                    language=source.language or "es",
+                    taxonomy=taxonomy,
+                )
+        else:
+            async with async_session() as db:
+                result = await db.execute(select(RAGSource).where(RAGSource.id == source_id))
+                src = result.scalar_one_or_none()
+                if src:
+                    src.status = SourceStatus.active
+                    src.indexing_error = "No content or URL to index"
+                    await db.commit()
+    except Exception as e:
+        logger.error(f"Reindex failed for source {source_id}: {e}", exc_info=True)
+        try:
+            async with async_session() as db:
+                result = await db.execute(select(RAGSource).where(RAGSource.id == source_id))
+                src = result.scalar_one_or_none()
+                if src:
+                    src.status = SourceStatus.error
+                    src.indexing_error = str(e)[:500]
+                    await db.commit()
+        except Exception as db_err:
+            logger.error(f"Failed to update source status: {db_err}")
 
 
 # ==================== System Stats ====================

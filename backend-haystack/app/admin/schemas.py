@@ -9,6 +9,10 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+# --- Taxonomía para investigadores ---
+TaxonomyDict = dict[str, list[str]]
+
+
 # --- RAG Source schemas ---
 
 class RAGSourceOut(BaseModel):
@@ -24,6 +28,7 @@ class RAGSourceOut(BaseModel):
     description: Optional[str] = None
     publisher: Optional[str] = None
     documentDate: Optional[str] = None
+    taxonomy: Optional[TaxonomyDict] = None
     chunksCount: int = 0
     lastIndexedAt: Optional[str] = None
     indexingError: Optional[str] = None
@@ -41,6 +46,7 @@ class RAGSourceCreate(BaseModel):
     content: Optional[str] = None
     category: Optional[str] = None
     language: str = "es"
+    taxonomy: Optional[TaxonomyDict] = None
 
 
 class RAGSourceUpdate(BaseModel):
@@ -51,6 +57,7 @@ class RAGSourceUpdate(BaseModel):
     content: Optional[str] = None
     category: Optional[str] = None
     language: Optional[str] = None
+    taxonomy: Optional[TaxonomyDict] = None
 
 
 # --- File Upload schemas ---
@@ -218,6 +225,17 @@ class TainacanImportRequest(BaseModel):
 class TainacanImportResponse(BaseModel):
     message: str
     totalQueued: int = 0
+    skipped: int = 0
+
+
+class BatchReindexRequest(BaseModel):
+    onlyWithTaxonomy: bool = True  # Only reindex sources that have taxonomy (to propagate to chunks)
+    maxConcurrent: int = 3
+
+
+class BatchReindexResponse(BaseModel):
+    message: str
+    queued: int
     skipped: int = 0
 
 

@@ -36,7 +36,7 @@ interface Message {
   images?: string[];
   charts?: ChartData[];
   isReport?: boolean;
-  model?: string;  // e.g. "openscholar" from done event
+  model?: string;  // e.g. "openscholar" from done event (shown as Investigación)
   dbMessageId?: number;  // DB id when persisted (for feedback)
 }
 
@@ -1868,7 +1868,6 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           <span className="flex items-center gap-1 text-emerald-400 bg-emerald-500/15 backdrop-blur-sm border border-emerald-400/20 pl-2 pr-1 py-1 rounded-full">
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>
                             Investigación
-                            <span className="text-amber-300/90 text-[10px]" title="Usa OpenScholar">(OpenScholar)</span>
                             <button onClick={() => setResearchModeEnabled(false)} className="ml-0.5 hover:text-emerald-200 transition-colors" title="Desactivar">
                               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                             </button>
@@ -2069,7 +2068,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           {message.role === "assistant" && (
                             <div className="flex items-center gap-1.5 mt-2 pt-1">
                               {message.model === "openscholar" && (
-                                <span className="text-[9px] text-amber-300 bg-amber-500/15 border border-amber-400/30 rounded px-1.5 py-0.5 mr-1" title="Generado con OpenScholar">OpenScholar</span>
+                                <span className="text-[9px] text-amber-300 bg-amber-500/15 border border-amber-400/30 rounded px-1.5 py-0.5 mr-1" title="Generado con motor Investigación">Investigación</span>
                               )}
                               {message.isReport && (
                                 <span className="text-[9px] text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 rounded px-1.5 py-0.5 mr-1">REPORTE</span>
@@ -2226,7 +2225,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           )}
                           {researchModeEnabled && (
                             <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 bg-amber-500/20 border border-amber-400/30 rounded" title="Motor académico exclusivo">
-                              OpenScholar
+                              Investigación
                             </span>
                           )}
                         </div>
@@ -2346,7 +2345,6 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
                         </svg>
                         Investigación
-                        <span className="text-amber-300/90 text-[10px]" title="Usa OpenScholar">(OpenScholar)</span>
                         <button onClick={() => setResearchModeEnabled(false)} className="ml-0.5 hover:text-emerald-200 transition-colors" title="Desactivar">
                           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
@@ -2578,14 +2576,14 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
         </button>
       )}
 
-      {/* Research Activity Panel (right sidebar) — OpenScholar */}
+      {/* Research Activity Panel (right sidebar) */}
       {showResearchPanel && researchSteps.length > 0 && (
         <aside className="fixed top-16 right-0 bottom-0 z-40 w-80 bg-[#0b1426]/95 backdrop-blur-md border-l border-white/10 flex flex-col transition-transform duration-300">
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
             <div className="flex items-center gap-2 min-w-0">
               <h3 className="text-sm font-semibold text-white">Actividad de investigación</h3>
               <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 bg-amber-500/20 border border-amber-400/30 rounded" title="Motor académico exclusivo">
-                OpenScholar
+                Investigación
               </span>
             </div>
             <button onClick={() => setShowResearchPanel(false)} className="text-gray-400 hover:text-white p-1 transition-colors">
