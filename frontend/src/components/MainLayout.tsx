@@ -94,13 +94,19 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
 
-  // Chat history state
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Chat history state — closed by default on mobile so it doesn't take space
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches) {
+      setSidebarOpen(true);
+    }
+  }, []);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
   const [historyEnabled, setHistoryEnabled] = useState(true);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const [showScrollTop, setShowScrollTop] = useState(false);
 
   // ─── Chat history helpers ───────────────────────────────────────
 
@@ -340,6 +346,16 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   useEffect(() => {
     if (isLoading) scrollToBottom();
   }, [isLoading, loadingStatus]);
+
+  // Scroll-to-top button visibility (re-run when messages appear so ref is attached)
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const onScroll = () => setShowScrollTop(el.scrollTop > 200);
+    el.addEventListener("scroll", onScroll);
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [messages.length]);
 
   const generateId = () => Math.random().toString(36).substring(2, 9);
 
@@ -1809,7 +1825,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
   );
 
   return (
-    <section className="h-screen pt-16 relative flex flex-col overflow-hidden">
+    <section className="h-screen pt-16 relative flex flex-col overflow-hidden overflow-x-hidden max-w-[100vw]">
       {/* Background */}
       <div className="absolute inset-0 z-0">
         <Image
@@ -1841,8 +1857,33 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
       />
 
       {/* Content */}
-      <div className={`relative z-10 flex-1 flex flex-col min-h-0 transition-all duration-300 ${sidebarOpen ? "lg:pl-72" : "lg:pl-10"}`}>
-        <div className="flex-1 flex flex-col max-w-4xl w-full mx-auto px-4 sm:px-6 min-h-0">
+      <div className={`relative z-10 flex-1 flex flex-col min-h-0 transition-all duration-300 overflow-x-hidden max-w-full ${sidebarOpen ? "lg:pl-72" : "lg:pl-10"}`}>
+        <div className="flex-1 flex flex-col max-w-4xl w-full mx-auto px-4 sm:px-6 min-h-0 max-w-full">
+              {/* Mobile toolbar - hamburger (history) and + (new job) at top left */}
+              <div className="lg:hidden flex items-center gap-2 py-2 flex-shrink-0 -mx-4 sm:-mx-6 px-4 sm:px-6 border-b border-white/10 mb-1">
+                <button
+                  onClick={() => setSidebarOpen(true)}
+                  className="text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-lg transition-colors"
+                  title="Historial de trabajos"
+                  aria-label="Abrir historial"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                  </svg>
+                </button>
+                {isAuthenticated && (
+                  <button
+                    onClick={handleNewChat}
+                    className="text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-lg transition-colors"
+                    title="Nuevo trabajo"
+                    aria-label="Nuevo trabajo"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                  </button>
+                )}
+              </div>
               {/* Minimal spacer when messages exist (sidebar handles its own toggle) */}
               {hasMessages && <div className="h-2 flex-shrink-0" />}
 
@@ -1930,7 +1971,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           </button>
                           {showPlusMenu && renderPlusMenu()}
                         </div>
-                        <div className="flex-1 flex items-end gap-2 min-w-0">
+                        <div className="flex-1 flex flex-col md:flex-row md:items-end gap-2 min-w-0">
                           <textarea
                             ref={inputRef}
                             value={input}
@@ -1942,7 +1983,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                             rows={1}
                             disabled={isLoading}
                           />
-                          <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end self-end">
+                          <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-start md:justify-end w-full md:w-auto">
                             {ragSearchEnabled && (
                               <span className="inline-flex items-center gap-0.5 text-cyan-400 bg-cyan-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
                                 Ominis
@@ -2383,7 +2424,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                     {showPlusMenu && renderPlusMenu()}
                   </div>
 
-                  <div className="flex-1 flex items-end gap-2 min-w-0 bg-white/5 border border-white/10 rounded-2xl px-4 py-2.5 focus-within:border-white/30 transition-all">
+                  <div className="flex-1 flex flex-col md:flex-row md:items-end gap-2 min-w-0 bg-white/5 border border-white/10 rounded-2xl px-4 py-2.5 focus-within:border-white/30 transition-all">
                     <textarea
                       ref={inputRef}
                       value={input}
@@ -2396,7 +2437,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                       rows={1}
                       disabled={isLoading}
                     />
-                    <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end self-end">
+                    <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-start md:justify-end w-full md:w-auto">
                       {ragSearchEnabled && (
                         <span className="inline-flex items-center gap-0.5 text-cyan-400 bg-cyan-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
                           Ominis
@@ -2434,6 +2475,20 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   </button>
                 </div>
               </div>}
+
+            {/* Scroll-to-top button - bottom right on canvas */}
+            {hasMessages && showScrollTop && (
+              <button
+                onClick={() => messagesContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })}
+                className="fixed bottom-24 right-6 z-30 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white border border-white/20 shadow-lg transition-colors backdrop-blur-sm"
+                title="Volver arriba"
+                aria-label="Volver arriba"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                </svg>
+              </button>
+            )}
 
             {/* Bottom info line */}
             <div className="flex-shrink-0 text-center py-1.5">
