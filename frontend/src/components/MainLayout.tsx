@@ -1978,7 +1978,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                             onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px"; }}
                             onKeyDown={handleKeyDown} onPaste={handlePaste}
                             placeholder="Pregunta sobre salud en México..."
-                            className="flex-1 min-w-0 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 placeholder:whitespace-nowrap focus:outline-none resize-none overflow-y-auto"
+                            className="flex-1 min-w-0 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
                             style={{ minHeight: "24px", maxHeight: "200px" }}
                             rows={1}
                             disabled={isLoading}
@@ -2432,7 +2432,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                       onKeyDown={handleKeyDown}
                       onPaste={handlePaste}
                       placeholder="Pregunta sobre salud en México..."
-                      className="flex-1 min-w-0 bg-transparent border-none text-sm text-white placeholder-gray-500 placeholder:whitespace-nowrap focus:outline-none resize-none overflow-y-auto py-0"
+                      className="flex-1 min-w-0 bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0"
                       style={{ minHeight: "24px", maxHeight: "200px" }}
                       rows={1}
                       disabled={isLoading}
@@ -2513,15 +2513,15 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
       {footerExpanded && (
         <div className={`fixed inset-x-0 bottom-0 z-40 max-h-[70vh] overflow-y-auto transition-all duration-300 ${sidebarOpen ? "lg:pl-72" : "lg:pl-10"}`}>
           <div className="bg-[#060e1a]/95 backdrop-blur-md border-t border-white/10">
-            <Footer />
-            <div className="text-center pb-3">
+            <div className="text-center pt-2 pb-2">
               <button
                 onClick={() => setFooterExpanded(false)}
                 className="text-gray-500 hover:text-gray-300 text-[11px] transition-colors"
               >
-                Ocultar ▲
+                Ocultar ▼
               </button>
             </div>
+            <Footer />
           </div>
         </div>
       )}
