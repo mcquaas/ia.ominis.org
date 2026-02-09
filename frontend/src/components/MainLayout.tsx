@@ -1855,8 +1855,8 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
 
                   {/* Centered input for empty state */}
                   <div className="w-full max-w-2xl">
-                    {/* Capsules */}
-                    {(ragSearchEnabled || webSearchEnabled || pubmedSearchEnabled || researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
+                    {/* Capsules (research, model, attachments — Ominis/Web/PubMed inside input) */}
+                    {(researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
                       <div className="flex items-center justify-center gap-1.5 mb-3 text-xs flex-wrap">
                         {selectedModel !== "ominis-2.0" && (
                           <span className="flex items-center gap-1 text-amber-400 bg-amber-500/15 backdrop-blur-sm border border-amber-400/20 px-2 py-1 rounded-full">
@@ -1873,31 +1873,10 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                             </button>
                           </span>
                         )}
-                        {ragSearchEnabled && (
-                          <span className="flex items-center gap-1 text-cyan-400 bg-cyan-500/15 backdrop-blur-sm border border-cyan-400/20 pl-2 pr-1 py-1 rounded-full">
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>
-                            Ominis
-                            <button onClick={() => setRagSearchEnabled(false)} className="ml-0.5 hover:text-cyan-200 transition-colors" title="Desactivar">
-                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                            </button>
-                          </span>
-                        )}
-                        {webSearchEnabled && (
-                          <span className="flex items-center gap-1 text-blue-400 bg-blue-500/15 backdrop-blur-sm border border-blue-400/20 pl-2 pr-1 py-1 rounded-full">
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>
-                            Web
-                            <button onClick={() => setWebSearchEnabled(false)} className="ml-0.5 hover:text-blue-200 transition-colors" title="Desactivar">
-                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                            </button>
-                          </span>
-                        )}
-                        {pubmedSearchEnabled && (
-                          <span className="flex items-center gap-1 text-purple-400 bg-purple-500/15 backdrop-blur-sm border border-purple-400/20 pl-2 pr-1 py-1 rounded-full">
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
-                            PubMed
-                            <button onClick={() => setPubmedSearchEnabled(false)} className="ml-0.5 hover:text-purple-200 transition-colors" title="Desactivar">
-                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                            </button>
+                        {(uploadedImages.length > 0 || uploadedFiles.length > 0) && (
+                          <span className="flex items-center gap-1 text-orange-400 bg-orange-500/10 px-2 py-1 rounded-full">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                            {uploadedImages.length + uploadedFiles.length} adjunto{(uploadedImages.length + uploadedFiles.length) > 1 ? "s" : ""}
                           </span>
                         )}
                       </div>
@@ -1949,24 +1928,51 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           >
                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
                           </button>
-                          {/* Dropdown Menu (empty state) */}
                           {showPlusMenu && renderPlusMenu()}
                         </div>
-                        <textarea
-                          ref={inputRef}
-                          value={input}
-                          onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 150) + "px"; }}
-                          onKeyDown={handleKeyDown} onPaste={handlePaste}
-                          placeholder="Escribe tu pregunta sobre salud en México..."
-                          className="flex-1 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
-                          style={{ minHeight: "36px", maxHeight: "150px" }}
-                          rows={1}
-                          disabled={isLoading}
-                        />
+                        <div className="flex-1 flex items-end gap-2 min-w-0">
+                          <textarea
+                            ref={inputRef}
+                            value={input}
+                            onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px"; }}
+                            onKeyDown={handleKeyDown} onPaste={handlePaste}
+                            placeholder="Escribe tu pregunta sobre salud en México..."
+                            className="flex-1 min-w-0 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
+                            style={{ minHeight: "24px", maxHeight: "200px" }}
+                            rows={1}
+                            disabled={isLoading}
+                          />
+                          <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end self-end">
+                            {ragSearchEnabled && (
+                              <span className="inline-flex items-center gap-0.5 text-cyan-400 bg-cyan-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                                Ominis
+                                <button onClick={() => setRagSearchEnabled(false)} className="hover:text-cyan-200 transition-colors p-0.5" title="Desactivar">
+                                  <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
+                              </span>
+                            )}
+                            {webSearchEnabled && (
+                              <span className="inline-flex items-center gap-0.5 text-blue-400 bg-blue-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                                Web
+                                <button onClick={() => setWebSearchEnabled(false)} className="hover:text-blue-200 transition-colors p-0.5" title="Desactivar">
+                                  <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
+                              </span>
+                            )}
+                            {pubmedSearchEnabled && (
+                              <span className="inline-flex items-center gap-0.5 text-purple-400 bg-purple-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                                PubMed
+                                <button onClick={() => setPubmedSearchEnabled(false)} className="hover:text-purple-200 transition-colors p-0.5" title="Desactivar">
+                                  <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
+                              </span>
+                            )}
+                          </div>
+                        </div>
                         <button
                           onClick={sendMessage}
                           disabled={isLoading || (!input.trim() && uploadedImages.length === 0 && uploadedFiles.length === 0)}
-                          className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
                         >
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
                         </button>
@@ -2327,10 +2333,9 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   </div>
                 )}
 
-                {/* Active features indicator */}
-                {(ragSearchEnabled || webSearchEnabled || pubmedSearchEnabled || researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
+                {/* Active features indicator (research, model, attachments — Ominis/Web/PubMed inside input) */}
+                {(researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
                   <div className="flex items-center gap-1.5 mb-2 text-xs flex-wrap">
-                    {/* Model badge (shown when non-default model selected) */}
                     {selectedModel !== "ominis-2.0" && (
                       <span className="flex items-center gap-1 text-amber-400 bg-amber-500/10 px-2 py-1 rounded-full">
                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2350,39 +2355,6 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         </button>
                       </span>
                     )}
-                    {ragSearchEnabled && (
-                      <span className="flex items-center gap-1 text-cyan-400 bg-cyan-500/10 pl-2 pr-1 py-1 rounded-full">
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-                        </svg>
-                        Ominis
-                        <button onClick={() => setRagSearchEnabled(false)} className="ml-0.5 hover:text-cyan-200 transition-colors" title="Desactivar">
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
-                      </span>
-                    )}
-                    {webSearchEnabled && (
-                      <span className="flex items-center gap-1 text-blue-400 bg-blue-500/10 pl-2 pr-1 py-1 rounded-full">
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
-                        </svg>
-                        Web
-                        <button onClick={() => setWebSearchEnabled(false)} className="ml-0.5 hover:text-blue-200 transition-colors" title="Desactivar">
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
-                      </span>
-                    )}
-                    {pubmedSearchEnabled && (
-                      <span className="flex items-center gap-1 text-purple-400 bg-purple-500/10 pl-2 pr-1 py-1 rounded-full">
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                        </svg>
-                        PubMed
-                        <button onClick={() => setPubmedSearchEnabled(false)} className="ml-0.5 hover:text-purple-200 transition-colors" title="Desactivar">
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
-                      </span>
-                    )}
                     {(uploadedImages.length > 0 || uploadedFiles.length > 0) && (
                       <span className="flex items-center gap-1 text-orange-400 bg-orange-500/10 px-2 py-1 rounded-full">
                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2394,19 +2366,9 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   </div>
                 )}
 
-                {/* Input Row */}
+                {/* Input Row — tags Ominis/Web/PubMed inside field on the right */}
                 <div className="flex items-center gap-2">
-                  {/* Hidden file input */}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx"
-                    multiple
-                    onChange={handleFileUpload}
-                    className="hidden"
-                  />
-
-                  {/* Plus button with dropdown menu */}
+                  <input ref={fileInputRef} type="file" accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx" multiple onChange={handleFileUpload} className="hidden" />
                   <div className="relative" ref={plusMenuRef}>
                     <button
                       onClick={() => setShowPlusMenu(!showPlusMenu)}
@@ -2418,27 +2380,53 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                       </svg>
                     </button>
-
-                    {/* Dropdown Menu (chat mode) */}
                     {showPlusMenu && renderPlusMenu()}
                   </div>
 
-                  <textarea
-                    ref={inputRef}
-                    value={input}
-                    onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 150) + "px"; }}
-                    onKeyDown={handleKeyDown}
-                    onPaste={handlePaste}
-                    placeholder="Escribe tu pregunta sobre salud en México..."
-                    className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-white/30 transition-all resize-none overflow-y-auto"
-                    style={{ minHeight: "40px", maxHeight: "150px" }}
-                    rows={1}
-                    disabled={isLoading}
-                  />
+                  <div className="flex-1 flex items-end gap-2 min-w-0 bg-white/5 border border-white/10 rounded-2xl px-4 py-2.5 focus-within:border-white/30 transition-all">
+                    <textarea
+                      ref={inputRef}
+                      value={input}
+                      onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px"; }}
+                      onKeyDown={handleKeyDown}
+                      onPaste={handlePaste}
+                      placeholder="Escribe tu pregunta sobre salud en México..."
+                      className="flex-1 min-w-0 bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0"
+                      style={{ minHeight: "24px", maxHeight: "200px" }}
+                      rows={1}
+                      disabled={isLoading}
+                    />
+                    <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end self-end">
+                      {ragSearchEnabled && (
+                        <span className="inline-flex items-center gap-0.5 text-cyan-400 bg-cyan-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                          Ominis
+                          <button onClick={() => setRagSearchEnabled(false)} className="hover:text-cyan-200 transition-colors p-0.5" title="Desactivar">
+                            <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </span>
+                      )}
+                      {webSearchEnabled && (
+                        <span className="inline-flex items-center gap-0.5 text-blue-400 bg-blue-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                          Web
+                          <button onClick={() => setWebSearchEnabled(false)} className="hover:text-blue-200 transition-colors p-0.5" title="Desactivar">
+                            <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </span>
+                      )}
+                      {pubmedSearchEnabled && (
+                        <span className="inline-flex items-center gap-0.5 text-purple-400 bg-purple-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                          PubMed
+                          <button onClick={() => setPubmedSearchEnabled(false)} className="hover:text-purple-200 transition-colors p-0.5" title="Desactivar">
+                            <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </span>
+                      )}
+                    </div>
+                  </div>
                   <button
                     onClick={sendMessage}
                     disabled={isLoading || (!input.trim() && uploadedImages.length === 0)}
-                    className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
