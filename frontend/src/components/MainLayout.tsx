@@ -1972,6 +1972,17 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
 
                       <div className="flex flex-col gap-2 bg-white/[0.07] backdrop-blur-md border border-white/15 rounded-2xl px-3 py-2.5 shadow-lg shadow-black/10 focus-within:border-white/30 transition-all">
                         <input ref={fileInputRef} type="file" accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx" multiple onChange={handleFileUpload} className="hidden" />
+                        <textarea
+                          ref={inputRef}
+                          value={input}
+                          onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
+                          onKeyDown={handleKeyDown} onPaste={handlePaste}
+                          placeholder="Pregunta sobre salud en México..."
+                          className="w-full min-h-[2.5rem] bg-transparent border-none px-0 py-0 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
+                          style={{ maxHeight: "300px" }}
+                          rows={1}
+                          disabled={isLoading}
+                        />
                         <div className="flex items-center gap-2 flex-shrink-0">
                           <div className="relative" ref={plusMenuRef}>
                             <button
@@ -2017,17 +2028,6 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
                           </button>
                         </div>
-                        <textarea
-                          ref={inputRef}
-                          value={input}
-                          onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
-                          onKeyDown={handleKeyDown} onPaste={handlePaste}
-                          placeholder="Pregunta sobre salud en México..."
-                          className="w-full min-h-[2.5rem] bg-transparent border-none px-0 py-0 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
-                          style={{ maxHeight: "300px" }}
-                          rows={1}
-                          disabled={isLoading}
-                        />
                       </div>
                     </div>
 
@@ -2434,10 +2434,23 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   </div>
                 )}
 
-                {/* Input Row — textarea full width, expands frame upward */}
+                {/* Input Row — textarea on top, buttons below */}
                 <div className="flex flex-col gap-2 bg-white/5 border border-white/10 rounded-2xl px-3 py-2.5 focus-within:border-white/30 transition-all">
                   <input ref={fileInputRef} type="file" accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx" multiple onChange={handleFileUpload} className="hidden" />
-                  {/* Row 1: + | tags | send */}
+                  {/* Row 1: full-width textarea (grows, expands frame upward) */}
+                  <textarea
+                    ref={inputRef}
+                    value={input}
+                    onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
+                    onKeyDown={handleKeyDown}
+                    onPaste={handlePaste}
+                    placeholder="Pregunta sobre salud en México..."
+                    className="w-full min-h-[2.5rem] bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0"
+                    style={{ maxHeight: "300px" }}
+                    rows={1}
+                    disabled={isLoading}
+                  />
+                  {/* Row 2: + | tags | send */}
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <div className="relative" ref={plusMenuRef}>
                       <button
@@ -2488,19 +2501,6 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                       </svg>
                     </button>
                   </div>
-                  {/* Row 2: full-width textarea (grows, expands frame upward) */}
-                  <textarea
-                    ref={inputRef}
-                    value={input}
-                    onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
-                    onKeyDown={handleKeyDown}
-                    onPaste={handlePaste}
-                    placeholder="Pregunta sobre salud en México..."
-                    className="w-full min-h-[2.5rem] bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0"
-                    style={{ maxHeight: "300px" }}
-                    rows={1}
-                    disabled={isLoading}
-                  />
                 </div>
               </div>}
 
