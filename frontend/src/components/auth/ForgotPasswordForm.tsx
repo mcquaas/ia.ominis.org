@@ -1,11 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { forgotPassword } from '@/services/auth';
+import { forgotPassword, forgotPasswordPhone } from '@/services/auth';
 import Link from 'next/link';
 
 export function ForgotPasswordForm() {
-  const [email, setEmail] = useState('');
+  const [emailOrPhone, setEmailOrPhone] = useState('');
+  const [mode, setMode] = useState<'email' | 'phone'>('email');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
@@ -16,15 +17,24 @@ export function ForgotPasswordForm() {
     setIsLoading(true);
 
     try {
-      await forgotPassword(email);
+      if (mode === 'phone') {
+        await forgotPasswordPhone(emailOrPhone);
+      } else {
+        await forgotPassword(emailOrPhone);
+      }
       setSuccess(true);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Error al enviar el correo';
+      const message = err instanceof Error ? err.message : 'Error al enviar';
       setError(message);
     } finally {
       setIsLoading(false);
     }
   };
+
+  const isEmail = mode === 'email';
+  const successMessage = isEmail
+    ? `Hemos enviado un enlace de recuperación a ${emailOrPhone}. Revisa tu bandeja de entrada.`
+    : `Hemos enviado un enlace de recuperación por SMS a ${emailOrPhone}.`;
 
   if (success) {
     return (
@@ -36,17 +46,17 @@ export function ForgotPasswordForm() {
             </svg>
           </div>
           <h2 className="text-2xl font-bold text-white mb-2">
-            Correo Enviado
+            {isEmail ? 'Correo Enviado' : 'SMS Enviado'}
           </h2>
           <p className="text-gray-400 mb-6">
-            Hemos enviado un enlace de recuperación a <span className="text-white">{email}</span>. 
-            Revisa tu bandeja de entrada y sigue las instrucciones.
+            {successMessage}
           </p>
           <p className="text-gray-500 text-sm mb-6">
-            ¿No recibiste el correo? Revisa tu carpeta de spam o intenta de nuevo.
+            {isEmail ? '¿No recibiste el correo? Revisa tu carpeta de spam.' : '¿No recibiste el SMS? Verifica el número.'} Intenta de nuevo si es necesario.
           </p>
           <div className="flex flex-col gap-3">
             <button
+              type="button"
               onClick={() => setSuccess(false)}
               className="w-full bg-white/10 hover:bg-white/20 text-white font-medium py-3 px-4 rounded-lg transition-all"
             >
@@ -82,22 +92,38 @@ export function ForgotPasswordForm() {
           </div>
         )}
 
-        <div className="mb-6">
+          <div className="mb-4">
+          <div className="flex gap-2 mb-2">
+            <button
+              type="button"
+              onClick={() => { setMode('email'); setError(''); }}
+              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${mode === 'email' ? 'bg-accent/30 text-accent-light' : 'bg-white/5 text-gray-400 hover:bg-white/10'}`}
+            >
+              Email
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMode('phone'); setError(''); }}
+              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${mode === 'phone' ? 'bg-accent/30 text-accent-light' : 'bg-white/5 text-gray-400 hover:bg-white/10'}`}
+            >
+              Celular
+            </button>
+          </div>
           <label 
-            htmlFor="email" 
+            htmlFor="emailOrPhone" 
             className="block text-gray-300 text-sm font-medium mb-2"
           >
-            Email
+            {mode === 'email' ? 'Email' : 'Número de celular'}
           </label>
           <input
-            id="email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            id="emailOrPhone"
+            type={mode === 'email' ? 'email' : 'tel'}
+            value={emailOrPhone}
+            onChange={(e) => setEmailOrPhone(e.target.value)}
             required
-            autoComplete="email"
+            autoComplete={mode === 'email' ? 'email' : 'tel'}
             className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-all"
-            placeholder="tu@email.com"
+            placeholder={mode === 'email' ? 'tu@email.com' : '+52 555 123 4567'}
           />
         </div>
 

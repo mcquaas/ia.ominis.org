@@ -6,6 +6,9 @@ export interface User {
   id: number;
   username: string;
   email: string;
+  phone?: string | null;
+  phoneVerified?: boolean;
+  emailVerified?: boolean;
   role: {
     id: number;
     name: string;
@@ -33,6 +36,7 @@ export interface LoginCredentials {
 export interface RegisterData {
   username: string;
   email: string;
+  phone?: string;
   password: string;
 }
 

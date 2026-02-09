@@ -9,7 +9,7 @@ interface AuthContextType {
   loading: boolean;
   error: string | null;
   login: (identifier: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string) => Promise<void>;
+  register: (username: string, email: string, password: string, phone?: string) => Promise<void>;
   logout: () => void;
   clearError: () => void;
   isAuthenticated: boolean;
@@ -59,11 +59,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const register = useCallback(async (username: string, email: string, password: string) => {
+  const register = useCallback(async (username: string, email: string, password: string, phone?: string) => {
     setError(null);
     setLoading(true);
     try {
-      const response = await authService.register({ username, email, password });
+      const response = await authService.register({ username, email, password, phone });
       setUser(response.user);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Error al registrarse';
@@ -124,7 +124,7 @@ export function useAuth() {
       loading: true,
       error: null,
       login: async () => {},
-      register: async () => {},
+      register: async () => { /* noop */ },
       logout: () => {},
       clearError: () => {},
       isAuthenticated: false,

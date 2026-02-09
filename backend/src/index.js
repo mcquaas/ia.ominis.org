@@ -5,7 +5,28 @@ module.exports = {
    * An asynchronous register function that runs before
    * your application is initialized.
    */
-  register(/* { strapi } */) {},
+  register({ strapi }) {
+    // Extend user model with phone field
+    const userContentType = strapi.contentType('plugin::users-permissions.user');
+    if (userContentType?.attributes) {
+      userContentType.attributes.phone = {
+        type: 'string',
+        minLength: 10,
+        maxLength: 20,
+        required: false,
+      };
+      userContentType.attributes.phoneVerified = {
+        type: 'boolean',
+        default: false,
+        required: false,
+      };
+      userContentType.attributes.emailVerified = {
+        type: 'boolean',
+        default: false,
+        required: false,
+      };
+    }
+  },
 
   /**
    * An asynchronous bootstrap function that runs before

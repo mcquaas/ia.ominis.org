@@ -12,6 +12,7 @@ interface RegisterFormProps {
 export function RegisterForm({ onSuccess, redirectTo = '/' }: RegisterFormProps) {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -38,7 +39,7 @@ export function RegisterForm({ onSuccess, redirectTo = '/' }: RegisterFormProps)
     setIsLoading(true);
 
     try {
-      await register(username, email, password);
+      await register(username, email, password, phone || undefined);
       if (onSuccess) {
         onSuccess();
       } else if (typeof window !== 'undefined') {
@@ -115,6 +116,25 @@ export function RegisterForm({ onSuccess, redirectTo = '/' }: RegisterFormProps)
             className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-all"
             placeholder="tu@email.com"
           />
+        </div>
+
+        <div className="mb-4">
+          <label 
+            htmlFor="phone" 
+            className="block text-gray-300 text-sm font-medium mb-2"
+          >
+            Celular (opcional)
+          </label>
+          <input
+            id="phone"
+            type="tel"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            autoComplete="tel"
+            className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-all"
+            placeholder="+52 555 123 4567"
+          />
+          <p className="text-xs text-gray-500 mt-1">Formato internacional (ej: +52 555 123 4567)</p>
         </div>
 
         <div className="mb-4">

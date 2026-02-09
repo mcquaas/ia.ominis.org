@@ -49,9 +49,9 @@ export function getUser(): User | null {
 }
 
 /**
- * Store authentication data
+ * Store authentication data (exported for OAuth callback)
  */
-function storeAuth(jwt: string, user: User): void {
+export function storeAuth(jwt: string, user: User): void {
   localStorage.setItem(TOKEN_KEY, jwt);
   localStorage.setItem(USER_KEY, JSON.stringify(user));
 }
@@ -152,6 +152,15 @@ export async function register(data: RegisterData): Promise<AuthResponse> {
 }
 
 /**
+ * Get Google OAuth redirect URL
+ * Redirect user to this URL to initiate Google sign-in
+ */
+export function getGoogleAuthUrl(): string {
+  const base = STRAPI_URL.replace(/\/$/, '');
+  return `${base}${API_PREFIX}/api/connect/google`;
+}
+
+/**
  * Logout the current user
  */
 export function logout(): void {
@@ -217,6 +226,17 @@ export async function forgotPassword(email: string): Promise<{ ok: boolean }> {
   await fetchStrapi<{ ok: boolean }>('/api/auth/forgot-password', {
     method: 'POST',
     body: JSON.stringify({ email }),
+  });
+  return { ok: true };
+}
+
+/**
+ * Request password reset via SMS (requires Twilio)
+ */
+export async function forgotPasswordPhone(phone: string): Promise<{ ok: boolean }> {
+  await fetchStrapi<{ ok: boolean }>('/api/auth/forgot-password-phone', {
+    method: 'POST',
+    body: JSON.stringify({ phone }),
   });
   return { ok: true };
 }

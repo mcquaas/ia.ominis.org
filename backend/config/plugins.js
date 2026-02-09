@@ -5,6 +5,9 @@ module.exports = ({ env }) => ({
         expiresIn: '7d',
       },
       jwtSecret: env('JWT_SECRET'),
+      register: {
+        allowedFields: ['phone'],
+      },
     },
   },
 });
