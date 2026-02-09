@@ -2,10 +2,13 @@ import { NextRequest } from 'next/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 180; // research can take longer
+export const maxDuration = 300; // research can take longer (OpenScholar deep research)
 
-// Modo Investigación: deterministic routing to OpenScholar (per architecture)
-const RESEARCH_API = (process.env.BACKEND_URL || 'http://localhost:8000') + '/v1/academic_query-stream';
+/**
+ * Modo Investigación — OpenScholar pipeline.
+ * Deterministic routing: research mode always uses OpenScholar (academic LLM).
+ */
+const ACADEMIC_API = (process.env.BACKEND_URL || 'http://localhost:8000') + '/v1/academic_query-stream';
 
 export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
@@ -33,7 +36,7 @@ export async function POST(request: NextRequest) {
         excluded_sources: body.excluded_sources || [],
       };
 
-      const response = await fetch(RESEARCH_API, {
+      const response = await fetch(ACADEMIC_API, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -42,7 +45,7 @@ export async function POST(request: NextRequest) {
       });
 
       if (!response.ok) {
-        const errorEvent = `data: ${JSON.stringify({ type: 'error', message: `Research API error: ${response.status}` })}\n\n`;
+        const errorEvent = `data: ${JSON.stringify({ type: 'error', message: `Academic API error: ${response.status}` })}\n\n`;
         await writer.write(encoder.encode(errorEvent));
         await writer.close();
         return;
@@ -66,7 +69,7 @@ export async function POST(request: NextRequest) {
 
       await writer.close();
     } catch (error) {
-      console.error('[query-research-stream] Error:', error);
+      console.error('[academic-query-stream] Error:', error);
       const errorEvent = `data: ${JSON.stringify({ type: 'error', message: 'Connection error' })}\n\n`;
       try {
         await writer.write(encoder.encode(errorEvent));

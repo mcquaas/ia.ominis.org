@@ -25,7 +25,7 @@ export default function Header() {
   const handleLogout = () => {
     logout();
     setIsUserMenuOpen(false);
-    window.location.href = '/';
+    window.location.href = '/c';
   };
 
   return (
@@ -33,7 +33,7 @@ export default function Header() {
       <nav className="px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           {/* Logo + Title */}
-          <Link href="/" className="flex items-center gap-3">
+          <Link href="/c" className="flex items-center gap-3">
             <Image
               src="/logo.png"
               alt="OMINIS"

@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from app.auth.dependencies import get_current_user, get_optional_user
 from app.auth.models import RoleEnum, User
 from app.database import get_db
+from app.chat.models import Conversation
 from app.feedback.models import MessageFeedback
 from app.feedback.schemas import FeedbackCreate, FeedbackList, FeedbackOut
 
@@ -44,6 +45,9 @@ async def create_feedback(
         reason_category=body.reason_category,
         reason_text=body.reason_text,
         content_preview=body.content_preview,
+        model_name=body.model_name,
+        query_title=body.query_title,
+        sources_json=body.sources,
     )
     db.add(feedback)
     await db.commit()
@@ -51,6 +55,7 @@ async def create_feedback(
     out = FeedbackOut.model_validate(feedback)
     if feedback.user_id and user:
         out.user_email = user.email
+    out.sources = feedback.sources_json
     return out
 
 
@@ -77,7 +82,10 @@ async def list_feedback(
     total = (await db.execute(count_stmt)).scalar() or 0
 
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-    stmt = stmt.options(selectinload(MessageFeedback.user))
+    stmt = stmt.options(
+        selectinload(MessageFeedback.user),
+        selectinload(MessageFeedback.conversation),
+    )
     result = await db.execute(stmt)
     items = result.scalars().all()
 
@@ -86,6 +94,10 @@ async def list_feedback(
         o = FeedbackOut.model_validate(f)
         if f.user:
             o.user_email = f.user.email
+        # Fallback: use conversation title when query_title is empty
+        if not o.query_title and f.conversation:
+            o.query_title = f.conversation.title
+        o.sources = f.sources_json
         out_list.append(o)
 
     return FeedbackList(data=out_list, total=total)

@@ -12,6 +12,8 @@ import os
 from datetime import datetime, timezone
 
 # Configuration
+# Monitors only resources that matter for the working system.
+# LLM check uses Haystack's /system-stats/health (same path as actual inference).
 SERVICES = {
     "frontend": {
         "name": "Frontend (ia.ominis.org)",
@@ -20,44 +22,21 @@ SERVICES = {
         "timeout": 10,
         "critical": True
     },
-    "rag_api": {
-        "name": "RAG API",
-        "url": "http://127.0.0.1:8080/test",
+    "haystack_api": {
+        "name": "Agent API (api.ominis.org)",
+        "url": "http://127.0.0.1:8000/v1/health",
         "display_url": "api.ominis.org",
         "type": "json",
         "expected_key": "status",
         "timeout": 10,
         "critical": True
     },
-    "strapi_api": {
-        "name": "Strapi API",
-        "url": "https://api.ominis.org/v1",
-        "display_url": "api.ominis.org/v1",
-        "type": "http",
-        "timeout": 10,
-        "critical": False  # Not deployed yet
-    },
-    "gpu_ollama": {
-        "name": "GPU Ollama",
-        "url": "http://3.213.91.241:11434/api/tags",
-        "type": "json",
-        "expected_key": "models",
-        "timeout": 15,
-        "critical": True
-    },
-    "llm_model": {
-        "name": "LLM (ominis-2.0)",
-        "url": "http://3.213.91.241:11434/api/tags",
-        "type": "model_check",
-        "model_name": "mistral:7b-instruct",
-        "timeout": 15,
-        "critical": True
-    },
-    "vision_model": {
-        "name": "Vision Model (llama3.2-vision)",
-        "url": "http://3.213.91.241:11434/api/tags",
-        "type": "model_check",
-        "model_name": "llama3.2-vision:11b",
+    "llm_inference": {
+        "name": "LLM Inference",
+        "url": "http://127.0.0.1:8000/v1/system-stats/health",
+        "display_url": "api.ominis.org",
+        "type": "health_status",
+        "expected_value": "healthy",
         "timeout": 15,
         "critical": True
     }
@@ -103,6 +82,28 @@ def check_json(url, expected_key, timeout):
     except Exception as e:
         return False, "Error", str(e)
 
+
+def check_health_status(url, expected_value, timeout):
+    """Check if health endpoint returns expected status (e.g. 'healthy')."""
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'OMINIS-Watchdog/1.0'})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            status = data.get("status", "")
+            if status == expected_value:
+                return True, "Online", None
+            return False, f"Status: {status}", f"Expected '{expected_value}', got '{status}'"
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code}", str(e)
+    except urllib.error.URLError as e:
+        return False, "Connection failed", str(e.reason)
+    except socket.timeout:
+        return False, "Timeout", f"No response within {timeout}s"
+    except json.JSONDecodeError as e:
+        return False, "Invalid JSON", str(e)
+    except Exception as e:
+        return False, "Error", str(e)
+
 def check_model(url, model_name, timeout):
     """Check if a specific model is available in Ollama."""
     try:
@@ -136,6 +137,10 @@ def check_service(service_id, config):
         ok, status, error = check_http(url, timeout)
     elif check_type == 'json':
         ok, status, error = check_json(url, config.get('expected_key', 'status'), timeout)
+    elif check_type == 'health_status':
+        ok, status, error = check_health_status(
+            url, config.get('expected_value', 'healthy'), timeout
+        )
     elif check_type == 'model_check':
         ok, status, error = check_model(url, config.get('model_name'), timeout)
     else:
@@ -233,7 +238,7 @@ def generate_html(results, last_check, history):
         status_class = "status-ok" if r['ok'] else "status-error"
         status_icon = "✓" if r['ok'] else "✗"
         error_html = f'<div class="error-detail">{r["error"]}</div>' if r.get('error') else ''
-        critical_badge = '<span class="badge critical">Critical</span>' if r['critical'] else ''
+        critical_badge = '<span class="badge critical">Core</span>' if r['critical'] else ''
         
         services_html += f'''
         <div class="service-card {status_class}">

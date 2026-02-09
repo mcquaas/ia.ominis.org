@@ -34,15 +34,16 @@ from app.config import DEFAULT_MODEL_ID, get_model_config, get_settings
 from app.rag.pipeline import (
     SYSTEM_PROMPT,
     build_chat_messages,
-    build_research_messages,
     get_pipeline_manager,
 )
 from app.rag.document_store import get_document_store
 from app.rag.charting import generate_chart_specs, render_chart_images
+from app.rag.pdf_generator import generate_pdf
 from app.rag.web_search import search_web
 from app.rag.pubmed_search import search_pubmed
 from app.rag.vision import analyze_image
 from app.rag.scraper import BROWSER_HEADERS
+from app.rag.openscholar import get_openscholar_generator, build_academic_messages
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -118,10 +119,24 @@ def sse_event(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _source_display_title(meta: dict) -> str:
+    """Get a display title for a source; fallback to URL hostname when title is generic/empty."""
+    title = (meta.get("title") or "").strip()
+    url = meta.get("url", "")
+    if not title or title.lower() in ("url", "sin título", "sin titulo"):
+        if url:
+            try:
+                return urlparse(url).netloc or url[:60]
+            except Exception:
+                return url[:60] if len(url) > 60 else url
+        return "Sin título"
+    return title
+
+
 def _doc_to_source(doc: Document) -> dict:
     """Convert a Haystack Document to a source dict for the API response."""
     return {
-        "title": doc.meta.get("title", "Sin título"),
+        "title": _source_display_title(doc.meta),
         "url": doc.meta.get("url", ""),
         "score": round(doc.score or 0.0, 4) if doc.score else None,
         "type": doc.meta.get("source_type", "rag"),
@@ -287,6 +302,7 @@ async def _build_research_plan(question: str, generator) -> dict:
     """
     Build a simple research plan using the LLM.
     Returns a dict with keys: focus, queries, sections.
+    In Phase 2, question may include user specifications/clarifications — those OVERRIDE the original topic.
     """
     system = (
         "Eres un planificador de investigación en salud para México. "
@@ -297,6 +313,11 @@ async def _build_research_plan(question: str, generator) -> dict:
         "Evalúa la siguiente pregunta y genera un plan de investigación. "
         "Si la pregunta no tiene sentido, es gibberish, o no es investigable, "
         "pon viable=false.\n"
+        "REGLA CRÍTICA: Si el usuario proporcionó ESPECIFICACIONES Y ACLARACIONES, "
+        "estas OBLIGATORIAMENTE reemplazan o aclaran el tema original. "
+        "Ejemplo: si el usuario escribió 'IC' y luego aclaró 'me refería a Insuficiencia Cardiaca', "
+        "las queries DEBEN ser sobre Insuficiencia Cardiaca, NO sobre infección crónica (u otro IC)."
+        "\n"
         "Formato JSON:\n"
         "{"
         "\"viable\": true/false, "
@@ -307,21 +328,33 @@ async def _build_research_plan(question: str, generator) -> dict:
         "}\n"
         "REGLAS PARA QUERIES:\n"
         "- Genera 5-7 consultas MUY ESPECÍFICAS al tema exacto que pide el usuario.\n"
+        "- Si hay aclaraciones del usuario, las queries DEBEN reflejar EXACTAMENTE esas aclaraciones.\n"
         "- Al menos 3 consultas en INGLÉS con términos técnicos/MeSH para PubMed.\n"
         "- Al menos 2 consultas en ESPAÑOL para búsqueda web.\n"
         "- Las consultas deben usar los términos EXACTOS del tema (no generalices).\n"
         "- Incluye variaciones: sinónimos, términos técnicos, combinaciones.\n"
-        f"Pregunta: {question}"
+        f"Pregunta y contexto:\n{question}"
     )
     messages = [
         ChatMessage.from_system(system),
         ChatMessage.from_user(user),
     ]
     try:
-        result = generator.run(messages=messages)
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: generator.run(messages=messages),
+            ),
+            timeout=90.0,  # OpenScholar plan call timeout
+        )
         replies = result.get("replies", [])
         text = replies[0].text if replies else ""
         plan = _extract_json_object(text) or {}
+    except asyncio.TimeoutError:
+        logger.error("Research plan timeout: OpenScholar did not respond in 90s")
+        plan = {"viable": False, "reason": "OpenScholar no respondió a tiempo. Verifica que el servicio esté disponible."}
     except Exception as e:
         logger.error(f"Research plan error: {e}", exc_info=True)
         plan = {}
@@ -680,6 +713,53 @@ async def extract_file(file: UploadFile = File(...)):
         tmp_path.unlink(missing_ok=True)
 
 
+# --- PDF generation endpoint ---
+
+class GeneratePdfRequest(BaseModel):
+    content: str
+    title: Optional[str] = "OMINIS Report"
+
+
+@router.post("/generate-pdf")
+async def generate_pdf_endpoint(body: GeneratePdfRequest):
+    """
+    Generate a PDF from markdown content.
+    Returns PDF file for download.
+    """
+    import asyncio
+    from fastapi.responses import Response
+
+    title = (body.title or "OMINIS Report").strip() or "OMINIS Report"
+    # Limit content size to avoid DoS
+    content = (body.content or "")[:500000]
+
+    loop = asyncio.get_event_loop()
+    pdf_bytes = await loop.run_in_executor(
+        None,
+        lambda: generate_pdf(content, title=title),
+    )
+
+    if pdf_bytes is None:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail="PDF generation is not available. Install weasyprint and markdown.",
+        )
+
+    # Safe filename from title
+    import re
+    safe_title = re.sub(r'[^\w\s\-]', '', title)[:60].strip() or "ominis-report"
+    safe_title = re.sub(r'\s+', '-', safe_title)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_title}.pdf"',
+        },
+    )
+
+
 # --- Model listing endpoint ---
 
 @router.get("/models")
@@ -893,115 +973,137 @@ async def query_stream(body: QueryRequest, request: Request):
     )
 
 
-@router.post("/query-research-stream")
-async def query_research_stream(body: ResearchRequest, request: Request):
+# Public model ID for academic/research mode (OpenScholar)
+ACADEMIC_MODEL_ID = "openscholar"
+
+
+async def _research_stream_events(body: ResearchRequest):
     """
-    Research mode streaming endpoint.
-    Runs a lightweight research plan, gathers evidence iteratively, and
-    produces a structured report with citations.
+    Shared event generator for research/academic mode.
+    Uses OpenScholar (academic LLM) exclusively — per architecture doc.
     """
+    logger.info("Research mode: using OpenScholar (academic_query-stream)")
     manager = get_pipeline_manager()
-    model_id = manager.get_model_id(body.model)
-    public_model_id = manager.get_public_model_id(model_id)
+    generator = get_openscholar_generator()
+    public_model_id = ACADEMIC_MODEL_ID
 
-    async def event_generator():
-        start_time = time.time()
-        full_answer = ""
-        sources_list = []
+    start_time = time.time()
+    full_answer = ""
+    sources_list = []
 
-        try:
-            has_image = body.image and len(body.image) > 50
-            image_description = ""
+    try:
+        has_image = body.image and len(body.image) > 50
+        image_description = ""
 
-            if has_image:
-                yield sse_event({
-                    "type": "status",
-                    "message": "Analizando imagen...",
-                    "model": public_model_id,
-                })
-                vision_gen = manager.get_vision_generator()
-                image_description = await analyze_image(
-                    image_b64=body.image,
-                    question=body.question,
-                    vision_generator=vision_gen,
-                )
+        if has_image:
+            yield sse_event({
+                "type": "status",
+                "message": "Analizando imagen...",
+                "model": public_model_id,
+            })
+            vision_gen = manager.get_vision_generator()
+            image_description = await analyze_image(
+                image_b64=body.image,
+                question=body.question,
+                vision_generator=vision_gen,
+            )
 
-            # Detect phase: is user replying to a previous plan?
-            history_dicts = [msg.model_dump() for msg in body.history] if body.history else []
-            is_phase2 = False
-            if history_dicts and len(history_dicts) >= 2:
-                for msg in history_dicts:
-                    if msg.get("role") == "assistant" and "?" in (msg.get("content") or "") and len(msg.get("content", "")) > 50:
-                        is_phase2 = True
-                        break
+        # Detect phase: is user replying to a previous plan?
+        history_dicts = [msg.model_dump() for msg in body.history] if body.history else []
+        is_phase2 = False
+        if history_dicts and len(history_dicts) >= 2:
+            for msg in history_dicts:
+                if msg.get("role") == "assistant" and "?" in (msg.get("content") or "") and len(msg.get("content", "")) > 50:
+                    is_phase2 = True
+                    break
 
-            generator = manager.get_generator(model_id)
+        # Phase 1 only: validate viability (always runs, regardless of history length)
+        if not is_phase2:
+            yield sse_event({
+                "type": "status",
+                "message": "Evaluando consulta...",
+                "model": public_model_id,
+            })
+            plan = await _build_research_plan(body.question, generator)
+            if not plan.get("viable", True):
+                reason = plan.get("reason", "La pregunta no es clara o no es viable para investigar.")
+                yield sse_event({"type": "chunk", "text": f"No es posible investigar esta consulta.\n\n**Razón:** {reason}\n\nReformula tu pregunta con un tema específico."})
+                yield sse_event({"type": "done", "answer": f"No viable: {reason}", "sources": [], "model": public_model_id, "elapsed_ms": int((time.time() - start_time) * 1000)})
+                return
+        else:
+            # Phase 2: build plan from the FULL conversation context
+            # CRITICAL: user clarifications OVERRIDE ambiguous original topic (e.g. "IC" → "Insuficiencia Cardiaca")
+            original_topic = ""
+            user_answers = ""
+            for msg in history_dicts:
+                if msg.get("role") == "user":
+                    if not original_topic:
+                        original_topic = msg.get("content", "")
+                    else:
+                        user_answers += msg.get("content", "") + "\n"
+            user_answers += body.question  # Current message is also an answer
+            # Pass full context so plan reflects user's clarifications (e.g. IC = Insuficiencia Cardiaca, not infección crónica)
+            plan_input = f"{original_topic}\n\nESPECIFICACIONES Y ACLARACIONES DEL USUARIO (OBLIGATORIAS — las queries DEBEN reflejar esto):\n{user_answers}"
+            plan = await _build_research_plan(plan_input, generator)
 
-            # Phase 1 only: validate viability
-            if not is_phase2:
-                yield sse_event({
-                    "type": "status",
-                    "message": "Evaluando consulta...",
-                    "model": public_model_id,
-                })
-                plan = await _build_research_plan(body.question, generator)
-                if not plan.get("viable", True):
-                    reason = plan.get("reason", "La pregunta no es clara o no es viable para investigar.")
-                    yield sse_event({"type": "chunk", "text": f"No es posible investigar esta consulta.\n\n**Razón:** {reason}\n\nReformula tu pregunta con un tema específico."})
-                    yield sse_event({"type": "done", "answer": f"No viable: {reason}", "sources": [], "model": public_model_id, "elapsed_ms": int((time.time() - start_time) * 1000)})
-                    return
-            else:
-                # Phase 2: build plan from the FULL conversation context
-                # Extract original topic + user's answers to questions
-                original_topic = ""
-                user_answers = ""
-                for msg in history_dicts:
-                    if msg.get("role") == "user":
-                        if not original_topic:
-                            original_topic = msg.get("content", "")
-                        else:
-                            user_answers += msg.get("content", "") + "\n"
-                user_answers += body.question  # Current message is also an answer
-                plan = await _build_research_plan(original_topic, generator)
+        # Search for sources
+        queries = plan.get("queries", [])
 
-            # Search for sources
-            queries = plan.get("queries", [])
+        if not is_phase2:
+            # Phase 1: quick search for planning
+            collected: list[Document] = []
+            yield sse_event({"type": "status", "message": "Buscando fuentes iniciales..."})
+            docs = await _gather_sources(
+                question=queries[0] if queries else body.question,
+                rag_search=body.rag_search, web_search=body.web_search,
+                pubmed_search=body.pubmed_search, num_sources=5, manager=manager,
+            )
+            collected.extend(docs)
+        else:
+            # Phase 2: DEEP research — 3 independent phases, each with its own budget
+            collected = []
+            seen_urls: set[str] = set()
+            research_steps: list[dict] = []
+            total_found = 0
+            total_read = 0
 
-            if not is_phase2:
-                # Phase 1: quick search for planning
-                collected: list[Document] = []
-                yield sse_event({"type": "status", "message": "Buscando fuentes iniciales..."})
+            def emit_step(action: str, detail: str, url: str = "", result: str = ""):
+                step = {"action": action, "detail": detail, "url": url, "result": result, "elapsed": int(time.time() - start_time)}
+                research_steps.append(step)
+                return sse_event({"type": "research_step", "step": step, "progress": {
+                    "found": total_found, "read": total_read,
+                    "totalSteps": len(research_steps),
+                    "elapsedSeconds": step["elapsed"],
+                }})
+
+            # ── PHASE A: SEARCH (no time limit — always completes all queries) ──
+            yield emit_step("plan", f"Plan: {plan.get('focus', '')}", result=f"{len(queries)} consultas")
+
+            for i, q in enumerate(queries):
+                yield sse_event({"type": "status", "message": f"Buscando ({i+1}/{len(queries)}): {q[:50]}..."})
+                yield emit_step("search", f"Buscando: {q}")
                 docs = await _gather_sources(
-                    question=queries[0] if queries else body.question,
-                    rag_search=body.rag_search, web_search=body.web_search,
-                    pubmed_search=body.pubmed_search, num_sources=5, manager=manager,
+                    question=q, rag_search=body.rag_search,
+                    web_search=body.web_search, pubmed_search=body.pubmed_search,
+                    num_sources=body.num_sources, manager=manager,
                 )
                 collected.extend(docs)
-            else:
-                # Phase 2: DEEP research — 3 independent phases, each with its own budget
-                collected = []
-                seen_urls: set[str] = set()
-                research_steps: list[dict] = []
-                total_found = 0
-                total_read = 0
+                total_found += len(docs)
+                yield emit_step("search_result", f"Resultados: {q[:40]}", result=f"{len(docs)} fuentes")
 
-                def emit_step(action: str, detail: str, url: str = "", result: str = ""):
-                    step = {"action": action, "detail": detail, "url": url, "result": result, "elapsed": int(time.time() - start_time)}
-                    research_steps.append(step)
-                    return sse_event({"type": "research_step", "step": step, "progress": {
-                        "found": total_found, "read": total_read,
-                        "totalSteps": len(research_steps),
-                        "elapsedSeconds": step["elapsed"],
-                    }})
-
-                # ── PHASE A: SEARCH (no time limit — always completes all queries) ──
-                yield emit_step("plan", f"Plan: {plan.get('focus', '')}", result=f"{len(queries)} consultas")
-
-                for i, q in enumerate(queries):
-                    yield sse_event({"type": "status", "message": f"Buscando ({i+1}/{len(queries)}): {q[:50]}..."})
-                    yield emit_step("search", f"Buscando: {q}")
+            # Refine with user's answers (always runs if answers exist)
+            if user_answers.strip():
+                yield emit_step("refine", "Refinando con respuestas del usuario")
+                yield sse_event({"type": "status", "message": "Refinando búsqueda..."})
+                extra_queries = await _refine_search_query(
+                    question=f"{original_topic}\nEl usuario especificó: {user_answers}",
+                    history=history_dicts, generator=generator,
+                )
+                for q in extra_queries:
+                    yield sse_event({"type": "status", "message": f"Buscando: {q[:50]}..."})
+                    yield emit_step("search", f"Refinada: {q}")
                     docs = await _gather_sources(
-                        question=q, rag_search=body.rag_search,
+                        question=q, rag_search=False,
                         web_search=body.web_search, pubmed_search=body.pubmed_search,
                         num_sources=body.num_sources, manager=manager,
                     )
@@ -1009,166 +1111,145 @@ async def query_research_stream(body: ResearchRequest, request: Request):
                     total_found += len(docs)
                     yield emit_step("search_result", f"Resultados: {q[:40]}", result=f"{len(docs)} fuentes")
 
-                # Refine with user's answers (always runs if answers exist)
-                if user_answers.strip():
-                    yield emit_step("refine", "Refinando con respuestas del usuario")
-                    yield sse_event({"type": "status", "message": "Refinando búsqueda..."})
-                    extra_queries = await _refine_search_query(
-                        question=f"{original_topic}\nEl usuario especificó: {user_answers}",
-                        history=history_dicts, generator=generator,
-                    )
-                    for q in extra_queries:
-                        yield sse_event({"type": "status", "message": f"Buscando: {q[:50]}..."})
-                        yield emit_step("search", f"Refinada: {q}")
-                        docs = await _gather_sources(
-                            question=q, rag_search=False,
-                            web_search=body.web_search, pubmed_search=body.pubmed_search,
-                            num_sources=body.num_sources, manager=manager,
-                        )
-                        collected.extend(docs)
-                        total_found += len(docs)
-                        yield emit_step("search_result", f"Resultados: {q[:40]}", result=f"{len(docs)} fuentes")
+            # Deduplicate
+            candidates = _deduplicate_and_rank(collected, max_total=40)
+            candidates.sort(key=_source_priority)
+            yield emit_step("filter", f"{len(collected)} → {len(candidates)} únicas")
 
-                # Deduplicate
-                candidates = _deduplicate_and_rank(collected, max_total=40)
-                candidates.sort(key=_source_priority)
-                yield emit_step("filter", f"{len(collected)} → {len(candidates)} únicas")
+            # ── PHASE B: READ ALL SOURCES (web + PubMed full text) ──
+            read_deadline = time.time() + 150  # 2.5 min for reading
+            fetched_count = 0
+            follow_urls: list[str] = []
 
-                # ── PHASE B: READ ALL SOURCES (web + PubMed full text) ──
-                read_deadline = time.time() + 150  # 2.5 min for reading
-                fetched_count = 0
-                follow_urls: list[str] = []
+            # Read ALL sources — web snippets need full pages, PubMed abstracts
+            readable = []
+            for d in candidates:
+                url = d.meta.get("url", "")
+                if url and url not in seen_urls:
+                    readable.append(d)
 
-                # Read ALL sources — web snippets need full pages, PubMed abstracts
-                # benefit from visiting the full article page for more details
-                readable = []
-                for d in candidates:
-                    url = d.meta.get("url", "")
-                    if url and url not in seen_urls:
-                        readable.append(d)
+            yield emit_step("read_start", f"Leyendo {len(readable)} fuentes de {len(candidates)} candidatas")
 
-                yield emit_step("read_start", f"Leyendo {len(readable)} fuentes de {len(candidates)} candidatas")
+            for doc in readable:
+                if time.time() > read_deadline or fetched_count >= body.max_follow_links:
+                    yield emit_step("read_skip", f"Límite alcanzado: {fetched_count}/{body.max_follow_links} leídas")
+                    break
+                url = doc.meta.get("url", "")
+                seen_urls.add(url)
+                title_hint = doc.meta.get("title", "")[:50]
 
-                for doc in readable:
-                    if time.time() > read_deadline or fetched_count >= body.max_follow_links:
-                        yield emit_step("read_skip", f"Límite alcanzado: {fetched_count}/{body.max_follow_links} leídas")
-                        break
-                    url = doc.meta.get("url", "")
-                    seen_urls.add(url)
-                    title_hint = doc.meta.get("title", "")[:50]
+                yield sse_event({"type": "status", "message": f"Leyendo ({fetched_count+1}/{len(readable)}): {title_hint or url[:40]}..."})
+                yield emit_step("read", f"Leyendo: {title_hint}", url=url)
+                try:
+                    title, text, links = await _fetch_url_content(url)
+                except Exception as e:
+                    yield emit_step("read_fail", f"Error: {title_hint}", url=url, result=str(e)[:80])
+                    continue
+                if text and len(text) > 50:
+                    collected.append(Document(
+                        content=text,
+                        meta={"title": title or title_hint, "url": url, "source_type": "webpage"},
+                    ))
+                    fetched_count += 1
+                    total_read += 1
+                    preview = text[:120].replace("\n", " ")
+                    yield emit_step("read_done", f"{title or title_hint}", url=url, result=f"{len(text)} chars — {preview}")
+                    for link in links:
+                        if _is_trustworthy_domain(link) and link not in seen_urls:
+                            follow_urls.append(link)
+                else:
+                    yield emit_step("read_fail", f"Sin contenido útil", url=url, result=f"{len(text or '')} chars")
 
-                    yield sse_event({"type": "status", "message": f"Leyendo ({fetched_count+1}/{len(readable)}): {title_hint or url[:40]}..."})
-                    yield emit_step("read", f"Leyendo: {title_hint}", url=url)
-                    try:
-                        title, text, links = await _fetch_url_content(url)
-                    except Exception as e:
-                        yield emit_step("read_fail", f"Error: {title_hint}", url=url, result=str(e)[:80])
-                        continue
-                    if text and len(text) > 50:
-                        collected.append(Document(
-                            content=text,
-                            meta={"title": title or title_hint, "url": url, "source_type": "webpage"},
-                        ))
-                        fetched_count += 1
-                        total_read += 1
-                        preview = text[:120].replace("\n", " ")
-                        yield emit_step("read_done", f"{title or title_hint}", url=url, result=f"{len(text)} chars — {preview}")
-                        for link in links:
-                            if _is_trustworthy_domain(link) and link not in seen_urls:
-                                follow_urls.append(link)
-                    else:
-                        yield emit_step("read_fail", f"Sin contenido útil", url=url, result=f"{len(text or '')} chars")
+            # ── PHASE C: FOLLOW TRUSTED LINKS (separate budget) ──
+            if follow_urls and time.time() < read_deadline:
+                unique_follows = []
+                for link in follow_urls:
+                    if link not in seen_urls and len(unique_follows) < body.max_follow_links:
+                        unique_follows.append(link)
+                if unique_follows:
+                    yield emit_step("follow", f"Siguiendo {len(unique_follows)} enlaces confiables")
+                    for link in unique_follows:
+                        if time.time() > read_deadline or fetched_count >= body.max_follow_links * 2:
+                            break
+                        seen_urls.add(link)
+                        yield sse_event({"type": "status", "message": f"Siguiendo: {link[:50]}..."})
+                        yield emit_step("read", "Enlace", url=link)
+                        title, text, _ = await _fetch_url_content(link)
+                        if text:
+                            collected.append(Document(
+                                content=text,
+                                meta={"title": title or "", "url": link, "source_type": "webpage"},
+                            ))
+                            fetched_count += 1
+                            total_read += 1
+                            yield emit_step("read_done", f"{title or link[:40]}", url=link, result=f"{len(text)} chars")
 
-                # ── PHASE C: FOLLOW TRUSTED LINKS (separate budget) ──
-                if follow_urls and time.time() < read_deadline:
-                    unique_follows = []
-                    for link in follow_urls:
-                        if link not in seen_urls and len(unique_follows) < body.max_follow_links:
-                            unique_follows.append(link)
-                    if unique_follows:
-                        yield emit_step("follow", f"Siguiendo {len(unique_follows)} enlaces confiables")
-                        for link in unique_follows:
-                            if time.time() > read_deadline or fetched_count >= body.max_follow_links * 2:
-                                break
-                            seen_urls.add(link)
-                            yield sse_event({"type": "status", "message": f"Siguiendo: {link[:50]}..."})
-                            yield emit_step("read", "Enlace", url=link)
-                            title, text, _ = await _fetch_url_content(link)
-                            if text:
-                                collected.append(Document(
-                                    content=text,
-                                    meta={"title": title or "", "url": link, "source_type": "webpage"},
-                                ))
-                                fetched_count += 1
-                                total_read += 1
-                                yield emit_step("read_done", f"{title or link[:40]}", url=link, result=f"{len(text)} chars")
+            elapsed_search = int(time.time() - start_time)
+            yield emit_step("complete", "Investigación completa", result=f"{total_found} encontradas, {total_read} leídas, {elapsed_search}s")
+            logger.info(f"Deep research: {total_found} found, {total_read} read, {fetched_count} fetched, {elapsed_search}s")
 
-                elapsed_search = int(time.time() - start_time)
-                yield emit_step("complete", "Investigación completa", result=f"{total_found} encontradas, {total_read} leídas, {elapsed_search}s")
-                logger.info(f"Deep research: {total_found} found, {total_read} read, {fetched_count} fetched, {elapsed_search}s")
+        # Final source selection (runs for both Phase 1 and Phase 2)
+        documents = _deduplicate_and_rank(collected, max_total=body.max_total_sources)
 
-            # Final source selection
-            documents = _deduplicate_and_rank(collected, max_total=body.max_total_sources)
+        # Remove user-excluded sources
+        if body.excluded_sources:
+            excluded_set = set(body.excluded_sources)
+            before = len(documents)
+            documents = [d for d in documents if d.meta.get("url", "") not in excluded_set]
+            if is_phase2 and before != len(documents):
+                yield emit_step("filter", f"Excluidas {before - len(documents)} fuentes por el usuario")
 
-            # Remove user-excluded sources
-            if body.excluded_sources:
-                excluded_set = set(body.excluded_sources)
-                before = len(documents)
-                documents = [d for d in documents if d.meta.get("url", "") not in excluded_set]
-                if is_phase2 and before != len(documents):
-                    yield emit_step("filter", f"Excluidas {before - len(documents)} fuentes por el usuario")
-
-            # Phase 2: filter for relevance using LLM before generating report
-            if is_phase2 and len(documents) > 5:
-                yield sse_event({"type": "status", "message": "Evaluando relevancia de fuentes..."})
-                if is_phase2:
-                    yield emit_step("relevance", f"Evaluando {len(documents)} fuentes para relevancia")
-                documents = await _score_source_relevance(
-                    topic=original_topic,
-                    user_spec=user_answers,
-                    documents=documents,
-                    generator=generator,
-                )
-                if is_phase2:
-                    yield emit_step("relevance_done", f"{len(documents)} fuentes relevantes seleccionadas")
-
-            all_sources_list = [
-                _doc_to_source(doc) for doc in documents
-                if doc.content and doc.meta.get("url")
-            ]
-
-            if all_sources_list:
-                yield sse_event({"type": "sources", "sources": all_sources_list})
-                if is_phase2:
-                    yield emit_step("sources", f"{len(all_sources_list)} fuentes para el reporte")
-
-            yield sse_event({
-                "type": "status",
-                "message": "Generando reporte..." if is_phase2 else "Preparando plan...",
-            })
-
-            # Build messages — include user's answers in context for Phase 2
-            messages = build_research_messages(
-                question=body.question,
+        # Phase 2: filter for relevance using LLM before generating report
+        if is_phase2 and len(documents) > 5:
+            yield sse_event({"type": "status", "message": "Evaluando relevancia de fuentes..."})
+            yield emit_step("relevance", f"Evaluando {len(documents)} fuentes para relevancia")
+            documents = await _score_source_relevance(
+                topic=original_topic,
+                user_spec=user_answers,
                 documents=documents,
-                plan=plan,
-                history=history_dicts,
-                image_description=image_description,
-                file_context=body.file_context or "",
+                generator=generator,
             )
+            yield emit_step("relevance_done", f"{len(documents)} fuentes relevantes seleccionadas")
 
-            # Phase 2 reports need much more tokens for detailed reports
-            research_gen_kwargs = {"num_predict": 16384, "temperature": 0.3} if is_phase2 else {}
+        all_sources_list = [
+            _doc_to_source(doc) for doc in documents
+            if doc.content and doc.meta.get("url")
+        ]
 
-            chunk_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        if all_sources_list:
+            yield sse_event({"type": "sources", "sources": all_sources_list})
+            if is_phase2:
+                yield emit_step("sources", f"{len(all_sources_list)} fuentes para el reporte")
 
-            def streaming_callback(chunk: StreamingChunk):
-                text = chunk.content
-                if text:
-                    chunk_queue.put_nowait(text)
+        yield sse_event({
+            "type": "status",
+            "message": "Generando reporte..." if is_phase2 else "Preparando plan...",
+        })
 
-            async def run_generator():
-                loop = asyncio.get_event_loop()
+        # Build messages — OpenScholar academic prompt
+        messages = build_academic_messages(
+            question=body.question,
+            documents=documents,
+            plan=plan,
+            history=history_dicts,
+            image_description=image_description,
+            file_context=body.file_context or "",
+            is_phase2=is_phase2,
+        )
+
+        # Phase 2 reports; max_tokens must fit in model ctx (8192) minus input
+        research_gen_kwargs = {"max_tokens": 4096, "temperature": 0.3} if is_phase2 else {}
+
+        chunk_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+
+        def streaming_callback(chunk: StreamingChunk):
+            text = chunk.content
+            if text:
+                chunk_queue.put_nowait(text)
+
+        async def run_generator():
+            loop = asyncio.get_event_loop()
+            try:
                 result = await loop.run_in_executor(
                     None,
                     lambda: generator.run(
@@ -1177,73 +1258,133 @@ async def query_research_stream(body: ResearchRequest, request: Request):
                         generation_kwargs=research_gen_kwargs,
                     ),
                 )
-                await chunk_queue.put(None)
-                return result
-
-            gen_task = asyncio.create_task(run_generator())
-
-            while True:
-                try:
-                    token = await asyncio.wait_for(chunk_queue.get(), timeout=300.0)
-                except asyncio.TimeoutError:
-                    yield sse_event({"type": "error", "message": "Generation timed out"})
-                    break
-
-                if token is None:
-                    break
-
-                token = _sanitize_text(token)
-                full_answer += token
-                yield sse_event({"type": "chunk", "text": token})
-
-            await gen_task
-
-            sources_list = _filter_cited_sources(full_answer, all_sources_list)
-            charts: list[dict] = []
-            try:
-                chart_specs = await generate_chart_specs(
-                    question=body.question,
-                    answer=full_answer,
-                    documents=documents,
-                    history=[msg.model_dump() for msg in body.history] if body.history else [],
-                    generator=generator,
-                )
-                charts = render_chart_images(chart_specs)
-                if charts:
-                    yield sse_event({"type": "charts", "charts": charts})
             except Exception as e:
-                logger.error(f"Chart generation error: {e}", exc_info=True)
-            elapsed_ms = int((time.time() - start_time) * 1000)
+                logger.error(f"OpenScholar generation failed: {e}", exc_info=True)
+                raise
+            finally:
+                chunk_queue.put_nowait(None)  # unblock consumer loop
+            return result
 
+        # Timeout: 150s (OpenScholar HTTP timeout is 120s; extra buffer for slow responses)
+        gen_task = asyncio.create_task(
+            asyncio.wait_for(run_generator(), timeout=150.0)
+        )
+
+        while True:
+            try:
+                token = await asyncio.wait_for(chunk_queue.get(), timeout=160.0)
+            except asyncio.TimeoutError:
+                gen_task.cancel()
+                try:
+                    await gen_task
+                except asyncio.CancelledError:
+                    pass
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    pass
+                yield sse_event({
+                    "type": "error",
+                    "message": "OpenScholar no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
+                })
+                return
+
+            if token is None:
+                break
+
+            token = _sanitize_text(token)
+            full_answer += token
+            yield sse_event({"type": "chunk", "text": token})
+
+        try:
+            await gen_task
+        except asyncio.TimeoutError:
             yield sse_event({
-                "type": "done",
-                "answer": full_answer,
-                "sources": sources_list,
-                "charts": charts if charts else None,
-                "model": public_model_id,
-                "elapsed_ms": elapsed_ms,
-                "is_report": is_phase2,  # Flag: this is a research report
+                "type": "error",
+                "message": "OpenScholar no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
             })
-
-            asyncio.create_task(
-                _log_query(
-                    question=body.question,
-                    answer=full_answer,
-                    sources=sources_list,
-                    elapsed_ms=elapsed_ms,
-                    model_used=model_id,
-                    rag_search=body.rag_search,
-                    web_search=body.web_search,
-                    pubmed_search=body.pubmed_search,
-                )
-            )
-
+            return
         except Exception as e:
-            logger.error(f"Research streaming error: {e}", exc_info=True)
-            yield sse_event({"type": "error", "message": str(e)})
+            err_msg = str(e)
+            if "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+                yield sse_event({
+                    "type": "error",
+                    "message": "OpenScholar no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
+                })
+            else:
+                yield sse_event({"type": "error", "message": f"Error de OpenScholar: {err_msg}"})
+            return
 
+        sources_list = _filter_cited_sources(full_answer, all_sources_list)
+        charts: list[dict] = []
+        try:
+            chart_specs = await generate_chart_specs(
+                question=body.question,
+                answer=full_answer,
+                documents=documents,
+                history=[msg.model_dump() for msg in body.history] if body.history else [],
+                generator=generator,
+            )
+            charts = render_chart_images(chart_specs)
+            if charts:
+                yield sse_event({"type": "charts", "charts": charts})
+        except Exception as e:
+            logger.error(f"Chart generation error: {e}", exc_info=True)
+        elapsed_ms = int((time.time() - start_time) * 1000)
+
+        yield sse_event({
+            "type": "done",
+            "answer": full_answer,
+            "sources": sources_list,
+            "charts": charts if charts else None,
+            "model": public_model_id,
+            "elapsed_ms": elapsed_ms,
+            "is_report": is_phase2,  # Flag: this is a research report
+        })
+
+        asyncio.create_task(
+            _log_query(
+                question=body.question,
+                answer=full_answer,
+                sources=sources_list,
+                elapsed_ms=elapsed_ms,
+                model_used=ACADEMIC_MODEL_ID,
+                rag_search=body.rag_search,
+                web_search=body.web_search,
+                pubmed_search=body.pubmed_search,
+            )
+        )
+
+    except Exception as e:
+        logger.error(f"Research streaming error: {e}", exc_info=True)
+        yield sse_event({"type": "error", "message": str(e)})
+
+
+@router.post("/query-research-stream")
+async def query_research_stream(body: ResearchRequest, request: Request):
+    """
+    Research mode streaming endpoint.
+    Uses OpenScholar (academic LLM) exclusively — per architecture.
+    """
     return StreamingResponse(
-        event_generator(),
+        _research_stream_events(body),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/academic_query-stream")
+async def academic_query_stream(body: ResearchRequest, request: Request):
+    """
+    Modo Investigación (OpenScholar) — same as query-research-stream.
+    Deterministic routing: research mode always uses OpenScholar.
+    """
+    return StreamingResponse(
+        _research_stream_events(body),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",

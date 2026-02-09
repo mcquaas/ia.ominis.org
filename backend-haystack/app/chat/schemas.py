@@ -32,6 +32,7 @@ class ChatMessageCreate(BaseModel):
 
 class ConversationOut(BaseModel):
     id: int
+    uuid: str
     title: str
     is_saved: bool
     created_at: datetime

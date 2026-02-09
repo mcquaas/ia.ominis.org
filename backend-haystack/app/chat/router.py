@@ -3,6 +3,7 @@ CRUD endpoints for conversations and chat messages.
 """
 
 import logging
+import uuid as uuid_module
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func, select
@@ -143,6 +144,7 @@ async def create_conversation(
 ):
     """Create a new conversation."""
     conv = Conversation(
+        uuid=str(uuid_module.uuid4()),
         user_id=user.id,
         title=body.title or "Nueva conversación",
     )
@@ -151,6 +153,25 @@ async def create_conversation(
     await db.refresh(conv)
     # Return with empty messages
     return ConversationDetail.model_validate({**conv.__dict__, "messages": []})
+
+
+@router.get("/uuid/{conversation_uuid}", response_model=ConversationDetail)
+async def get_conversation_by_uuid(
+    conversation_uuid: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a conversation by its UUID (for shareable URLs)."""
+    stmt = select(Conversation).where(
+        Conversation.uuid == conversation_uuid,
+        Conversation.user_id == user.id,
+    )
+    stmt = stmt.options(selectinload(Conversation.messages))
+    result = await db.execute(stmt)
+    conv = result.scalar_one_or_none()
+    if not conv:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    return ConversationDetail.model_validate(conv)
 
 
 @router.delete("/purge")

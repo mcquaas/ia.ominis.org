@@ -51,6 +51,7 @@ HERRAMIENTAS DISPONIBLES:
 - Puedes generar gráficas (barras, líneas, pastel) automáticamente. Cuando el usuario pida una gráfica, proporciona los datos en una tabla Markdown y la gráfica se generará automáticamente. NO digas que no puedes crear gráficas.
 - Puedes analizar archivos adjuntos (PDF, CSV, XLS, DOC) y responder preguntas sobre su contenido.
 - Puedes analizar imágenes adjuntas.
+- Puedes generar PDFs: las respuestas largas incluyen un botón "Descargar PDF" para exportar. NO indiques copiar a Word o Google Docs para PDF; el botón ya lo hace.
 - Puedes consultar los CUBOS OLAP del SINBA (Sistema Nacional de Información Básica en Salud) de la Secretaría de Salud de México. Estos cubos contienen estadísticas de egresos hospitalarios, defunciones, nacimientos, servicios de salud y más.
 
 REGLAS DE CITACIÓN (muy importante):
@@ -129,7 +130,8 @@ def build_chat_messages(
     if documents:
         source_text = "FUENTES DISPONIBLES (usa [N] para citar):\n"
         for i, doc in enumerate(documents, 1):
-            source_type = (doc.meta.get("source_type", "rag") or "rag").upper()
+            raw_type = doc.meta.get("source_type", "rag") or "rag"
+            source_type = "OMINIS" if raw_type == "rag" else raw_type.upper()
             title = doc.meta.get("title", "Sin título")
             url = doc.meta.get("url", "")
             citation = doc.meta.get("citation", "")
@@ -232,7 +234,8 @@ def build_research_messages(
     if documents:
         source_text = "EVIDENCIA DISPONIBLE (usa [N] para citar):\n"
         for i, doc in enumerate(documents, 1):
-            source_type = (doc.meta.get("source_type", "rag") or "rag").upper()
+            raw_type = doc.meta.get("source_type", "rag") or "rag"
+            source_type = "OMINIS" if raw_type == "rag" else raw_type.upper()
             title = doc.meta.get("title", "Sin título")
             url = doc.meta.get("url", "")
             citation = doc.meta.get("citation", "")

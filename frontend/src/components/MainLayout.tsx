@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
 import ChatSidebar from "@/components/ChatSidebar";
 import Footer from "@/components/Footer";
@@ -52,7 +53,12 @@ const HISTORY_ENABLED_KEY = "ominis_history_enabled";
 // Data is stored in Mexico (S3 mx-central-1), no 3rd party models
 // Inference runs on GPU for speed via /api/query-stream
 
-export default function MainLayout() {
+interface MainLayoutProps {
+  initialUuid?: string;
+}
+
+export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
+  const router = useRouter();
   const { isAuthenticated, user } = useAuth();
 
   const [messages, setMessages] = useState<Message[]>([]);
@@ -116,6 +122,35 @@ export default function MainLayout() {
     }
   }, [isAuthenticated, user]);
 
+  // Load conversation from URL uuid when navigating to /c/[uuid]
+  useEffect(() => {
+    if (!initialUuid || !isAuthenticated) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const detail = await chatService.getConversationByUuid(initialUuid);
+        if (cancelled) return;
+        setActiveConversationId(detail.id);
+        activeConversationIdRef.current = detail.id;
+        const loaded: Message[] = [];
+        for (const m of detail.messages) {
+          loaded.push({
+            id: String(m.id),
+            role: m.role as "user" | "assistant",
+            content: m.content,
+            sources: m.sources as Source[] | undefined,
+            images: m.has_images ? [] : undefined,
+            dbMessageId: m.role === "assistant" ? m.id : undefined,
+          });
+        }
+        setMessages(loaded);
+      } catch (err) {
+        console.warn("[Ominis] Failed to load conversation from URL:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [initialUuid, isAuthenticated]);
+
   const loadConversations = useCallback(async () => {
     try {
       const res = await chatService.listConversations();
@@ -125,36 +160,59 @@ export default function MainLayout() {
     }
   }, []);
 
-  const handleNewChat = useCallback(() => {
-    setActiveConversationId(null);
-    activeConversationIdRef.current = null;
-    setMessages([]);
-    inputRef.current?.focus();
-  }, []);
-
-  const handleSelectConversation = useCallback(async (id: number) => {
+  const handleNewChat = useCallback(async () => {
+    if (!isAuthenticated || !historyEnabled) {
+      setActiveConversationId(null);
+      activeConversationIdRef.current = null;
+      setMessages([]);
+      router.push("/c");
+      inputRef.current?.focus();
+      return;
+    }
     try {
-      const detail = await chatService.getConversation(id);
-      setActiveConversationId(id);
-      // Reconstruct messages from backend data
-      const loaded: Message[] = [];
-      for (const m of detail.messages) {
-        loaded.push({
-          id: String(m.id),
-          role: m.role as "user" | "assistant",
-          content: m.content,
-          sources: m.sources as Source[] | undefined,
-          images: m.has_images ? [] : undefined, // Images are not stored server-side
-          dbMessageId: m.role === "assistant" ? m.id : undefined,
-        });
-      }
-      setMessages(loaded);
+      const conv = await chatService.createConversation();
+      // Set state immediately so persistMessages uses this conv if user sends before useEffect loads
+      setActiveConversationId(conv.id);
+      activeConversationIdRef.current = conv.id;
+      setMessages([]);
+      router.push(`/c/${conv.uuid}`);
       setSidebarOpen(false);
+      await loadConversations();
       setTimeout(() => inputRef.current?.focus(), 100);
     } catch (err) {
-      console.warn("[Ominis] Failed to load conversation:", err);
+      console.warn("[Ominis] Failed to create conversation:", err);
+      setActiveConversationId(null);
+      activeConversationIdRef.current = null;
+      setMessages([]);
+      router.push("/c");
     }
-  }, []);
+  }, [router, isAuthenticated, historyEnabled, loadConversations]);
+
+  // Redirect /c to /c/[uuid] when authenticated and history enabled (create new conversation)
+  useEffect(() => {
+    if (initialUuid !== undefined || !isAuthenticated || !historyEnabled) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const conv = await chatService.createConversation();
+        if (cancelled) return;
+        setActiveConversationId(conv.id);
+        activeConversationIdRef.current = conv.id;
+        setMessages([]);
+        router.replace(`/c/${conv.uuid}`);
+        loadConversations();
+      } catch (err) {
+        console.warn("[Ominis] Failed to create conversation on /c:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [initialUuid, isAuthenticated, historyEnabled, router, loadConversations]);
+
+  const handleSelectConversation = useCallback((uuid: string) => {
+    router.push(`/c/${uuid}`);
+    setSidebarOpen(false);
+    setTimeout(() => inputRef.current?.focus(), 100);
+  }, [router]);
 
   const handleDeleteConversation = useCallback(async (id: number) => {
     try {
@@ -163,11 +221,12 @@ export default function MainLayout() {
       if (activeConversationId === id) {
         setActiveConversationId(null);
         setMessages([]);
+        router.push("/c");
       }
     } catch (err) {
       console.warn("[Ominis] Failed to delete conversation:", err);
     }
-  }, [activeConversationId]);
+  }, [activeConversationId, router]);
 
   const handleRenameConversation = useCallback(async (id: number, newTitle: string) => {
     try {
@@ -219,10 +278,11 @@ export default function MainLayout() {
       try {
         let convId = activeConversationIdRef.current;
 
-        // Create conversation if needed
+        let newUuid: string | undefined;
         if (!convId) {
           const conv = await chatService.createConversation();
           convId = conv.id;
+          newUuid = conv.uuid;
           setActiveConversationId(convId);
           activeConversationIdRef.current = convId;
         }
@@ -247,13 +307,18 @@ export default function MainLayout() {
           );
         }
 
+        // Redirect to UUID URL only after messages are saved (avoids showing empty window)
+        if (newUuid) {
+          router.replace(`/c/${newUuid}`);
+        }
+
         // Refresh conversation list to show new/updated titles
         await loadConversations();
       } catch (err) {
         console.warn("[Ominis] Failed to persist chat:", err);
       }
     },
-    [isAuthenticated, historyEnabled, loadConversations],
+    [isAuthenticated, historyEnabled, loadConversations, router],
   );
 
   const scrollToBottom = () => {
@@ -292,7 +357,7 @@ export default function MainLayout() {
           // Extract title from text before the URL on the same line
           const beforeUrl = line.slice(0, line.indexOf("<")).trim();
           let title = beforeUrl.replace(/^\[\d+\]\s*/, "").replace(/^\d+\.\s*/, "").replace(/[:\s]+$/, "").trim();
-          if (!title || title.length < 3) {
+          if (!title || title.length < 3 || title.toLowerCase() === "url") {
             try { title = new URL(url).hostname; } catch { title = url; }
           }
           sources.push({ title, url, type: "web" });
@@ -306,7 +371,7 @@ export default function MainLayout() {
         if (!sources.some(s => s.url === url)) {
           const beforeUrl = line.slice(0, line.indexOf("http")).trim();
           let title = beforeUrl.replace(/^\[\d+\]\s*/, "").replace(/^\d+\.\s*/, "").replace(/[:\s]+$/, "").trim();
-          if (!title || title.length < 3) {
+          if (!title || title.length < 3 || title.toLowerCase() === "url") {
             try { title = new URL(url).hostname; } catch { title = url; }
           }
           sources.push({ title, url, type: "web" });
@@ -850,9 +915,14 @@ export default function MainLayout() {
     return result.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   };
 
+  // Replace "RAG" with "OMINIS" in LLM output so references always show OMINIS
+  const normalizeRagToOminis = (text: string): string =>
+    text.replace(/\bRAG\b/g, "OMINIS");
+
   const renderContentWithCitations = (content: string, sources?: Source[]) => {
     const effectiveSrc = sources || [];
-    const contentWithoutReferencias = stripReferenciasBlock(content);
+    let contentWithoutReferencias = stripReferenciasBlock(content);
+    contentWithoutReferencias = normalizeRagToOminis(contentWithoutReferencias);
     const formattedContent = formatContentWithCitations(contentWithoutReferencias, effectiveSrc.length > 0 ? effectiveSrc : undefined);
 
     // Segment into text and table blocks
@@ -1326,13 +1396,26 @@ export default function MainLayout() {
     } catch { /* ignore */ }
   };
 
+  const getFeedbackExtras = (message: Message) => {
+    const conv = activeConversationId ? conversations.find((c) => c.id === activeConversationId) : null;
+    const queryTitle = conv?.title ?? messages.find((m) => m.role === "user")?.content.slice(0, 100) ?? "Nueva conversación";
+    return {
+      model_name: message.model ?? selectedModel,
+      query_title: queryTitle,
+    };
+  };
+
   const handleThumbsUp = async (message: Message) => {
     try {
+      const { model_name, query_title } = getFeedbackExtras(message);
       await feedbackService.submitFeedback({
         message_id: message.dbMessageId,
         conversation_id: activeConversationId ?? undefined,
         rating: "positive",
         content_preview: message.content.slice(0, 500),
+        model_name,
+        query_title,
+        sources: message.sources,
       });
       setFeedbackByMessageId((prev) => ({ ...prev, [message.id]: "positive" }));
     } catch (err) {
@@ -1354,6 +1437,7 @@ export default function MainLayout() {
 
     setFeedbackSubmitting(true);
     try {
+      const { model_name, query_title } = getFeedbackExtras(msg);
       await feedbackService.submitFeedback({
         message_id: msg.dbMessageId,
         conversation_id: activeConversationId ?? undefined,
@@ -1361,6 +1445,9 @@ export default function MainLayout() {
         reason_category: feedbackReasonCategory ?? undefined,
         reason_text: feedbackReasonText.trim() || undefined,
         content_preview: msg.content.slice(0, 500),
+        model_name,
+        query_title,
+        sources: msg.sources,
       });
       setFeedbackByMessageId((prev) => ({ ...prev, [msgId]: "negative" }));
       setFeedbackModalMessageId(null);
@@ -1372,112 +1459,59 @@ export default function MainLayout() {
   };
 
   const handleDownloadPdf = async (content: string, title: string) => {
-    const win = window.open("", "_blank");
-    if (!win) return;
-
-    // Convert markdown to HTML
-    let html = content
-      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-      .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-      .replace(/^\- (.+)$/gm, '<li>$1</li>')
-      .replace(/^\* (.+)$/gm, '<li>$1</li>')
-      .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.+?)\*/g, '<em>$1</em>')
-      .replace(/\[(\d+)\]/g, '<sup class="ref">[$1]</sup>')
-      .replace(/\n\n/g, '</p><p>')
-      .replace(/\n/g, '<br>');
-    html = '<p>' + html + '</p>';
-    html = html.replace(/<p><h/g, '<h').replace(/<\/h(\d)><\/p>/g, '</h$1>');
-    html = html.replace(/<p><li>/g, '<ul><li>').replace(/<\/li><\/p>/g, '</li></ul>');
-
-    const logoUrl = window.location.origin + '/logo.png';
-
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
-<style>
-  @page {
-    margin: 25mm 20mm 20mm 20mm;
-    @top-right { content: ""; }
-  }
-  body {
-    font-family: Helvetica, Arial, sans-serif;
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 0 20px;
-    color: #1a1a1a;
-    font-size: 11pt;
-    line-height: 1.55;
-  }
-  .header {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    padding: 8px 0 12px;
-    border-bottom: 1px solid #ddd;
-    margin-bottom: 16px;
-  }
-  .header img { height: 28px; }
-  h1 {
-    font-size: 20pt;
-    color: #111;
-    border-bottom: 2px solid #222;
-    padding-bottom: 6px;
-    margin: 0 0 12px 0;
-    line-height: 1.3;
-  }
-  h2 {
-    font-size: 14pt;
-    color: #333;
-    margin: 16px 0 6px 0;
-    padding-bottom: 3px;
-    border-bottom: 1px solid #eee;
-  }
-  h3 {
-    font-size: 12pt;
-    color: #444;
-    margin: 12px 0 4px 0;
-  }
-  p {
-    margin: 0 0 8px 0;
-  }
-  ul {
-    margin: 4px 0 8px 20px;
-    padding: 0;
-  }
-  li {
-    margin: 2px 0;
-  }
-  sup.ref {
-    color: #1a5fb4;
-    font-size: 8pt;
-    font-weight: 600;
-  }
-  strong { color: #111; }
-  a { color: #1a5fb4; text-decoration: none; }
-  .footer {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    text-align: center;
-    font-size: 8pt;
-    color: #999;
-    padding: 6px 0;
-    border-top: 1px solid #eee;
-  }
-  @media print {
-    .footer { position: fixed; bottom: 0; }
-    body { padding-bottom: 30px; }
-  }
-</style>
-</head><body>
-<div class="header"><img src="${logoUrl}" alt="OMINIS" /></div>
-${html}
-<div class="footer">con apoyo de ia.ominis.org</div>
-</body></html>`);
-    win.document.close();
-    setTimeout(() => { win.print(); }, 600);
+    try {
+      const res = await fetch("/api/generate-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, title: title || "OMINIS Report" }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Error al generar PDF");
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition");
+      const filenameMatch = disposition?.match(/filename="([^"]+)"/);
+      const filename = filenameMatch?.[1] || "ominis-report.pdf";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.warn("[PDF] Fallback to print:", err);
+      // Fallback: open print dialog (same as before)
+      const win = window.open("", "_blank");
+      if (!win) return;
+      let html = content
+        .replace(/^# (.+)$/gm, "<h1>$1</h1>")
+        .replace(/^## (.+)$/gm, "<h2>$1</h2>")
+        .replace(/^### (.+)$/gm, "<h3>$1</h3>")
+        .replace(/^\- (.+)$/gm, "<li>$1</li>")
+        .replace(/^\* (.+)$/gm, "<li>$1</li>")
+        .replace(/^\d+\. (.+)$/gm, "<li>$1</li>")
+        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*(.+?)\*/g, "<em>$1</em>")
+        .replace(/\[(\d+)\]/g, '<sup class="ref">[$1]</sup>')
+        .replace(/\n\n/g, "</p><p>")
+        .replace(/\n/g, "<br>");
+      html = "<p>" + html + "</p>";
+      html = html.replace(/<p><h/g, "<h").replace(/<\/h(\d)><\/p>/g, "</h$1>");
+      html = html.replace(/<p><li>/g, "<ul><li>").replace(/<\/li><\/p>/g, "</li></ul>");
+      const logoUrl = window.location.origin + "/logo.png";
+      win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+<style>body{font-family:Helvetica,Arial,sans-serif;max-width:720px;margin:0 auto;padding:20px;color:#1a1a1a;font-size:11pt;line-height:1.55}
+h1{font-size:20pt;color:#111;border-bottom:2px solid #222;padding-bottom:6px;margin:0 0 12px 0}h2{font-size:14pt;color:#333;margin:16px 0 6px 0}
+h3{font-size:12pt;color:#444;margin:12px 0 4px 0}p{margin:0 0 8px 0}ul{margin:4px 0 8px 20px;padding:0}li{margin:2px 0}
+sup.ref{color:#1a5fb4;font-size:8pt;font-weight:600}.footer{font-size:8pt;color:#999;margin-top:24px;padding-top:8px;border-top:1px solid #eee}</style>
+</head><body><div style="text-align:right;padding-bottom:12px;border-bottom:1px solid #ddd"><img src="${logoUrl}" alt="OMINIS" height="28" /></div>
+${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
+      win.document.close();
+      setTimeout(() => win.print(), 600);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -2053,15 +2087,13 @@ ${html}
                                       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
                                     )}
                                   </button>
-                                  {message.isReport && (
-                                    <button
-                                      onClick={() => handleDownloadPdf(message.content, message.content.split("\n")[0]?.replace(/^#+ /, "") || "Reporte")}
-                                      className="text-gray-500 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
-                                      title="Descargar PDF"
-                                    >
-                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                                    </button>
-                                  )}
+                                  <button
+                                    onClick={() => handleDownloadPdf(message.content, message.content.split("\n")[0]?.replace(/^#+ /, "") || "Reporte")}
+                                    className="text-gray-500 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
+                                    title="Descargar PDF"
+                                  >
+                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                  </button>
                                 </>
                               )}
                               <button
@@ -2134,6 +2166,9 @@ ${html}
                                     ) : (
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>
                                     );
+                                    const displayTitle = (source.title && source.title.toLowerCase() !== "url")
+                                      ? source.title
+                                      : (source.url ? (() => { try { return new URL(source.url).hostname; } catch { return source.url.slice(0, 50); } })() : "Sin título");
                                     return (
                                       <li key={source.displayNum} className={`text-xs ${isExcluded ? "opacity-40" : ""}`}>
                                         <div className="flex items-start gap-1.5">
@@ -2155,7 +2190,7 @@ ${html}
                                           <div className="min-w-0">
                                             <a href={source.url} target="_blank" rel="noopener noreferrer"
                                               className="text-blue-400 hover:text-blue-300 transition-colors hover:underline">
-                                              [{source.displayNum}] {source.title}
+                                              [{source.displayNum}] {displayTitle}
                                             </a>
                                             <div className="text-[10px] text-gray-500 mt-0.5 flex items-center gap-1">
                                               <span className="inline-flex items-center">{originIcon}{originLabel}</span>
@@ -2486,7 +2521,7 @@ ${html}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-white font-semibold">Compartir comentarios</h3>
+              <h3 className="text-white font-semibold">Gracias por ayudarnos</h3>
               <button
                 onClick={() => setFeedbackModalMessageId(null)}
                 className="text-gray-400 hover:text-white transition-colors"

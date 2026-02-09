@@ -167,6 +167,12 @@ export default function DashboardPage() {
   const [feedbackPage, setFeedbackPage] = useState(1);
   const [feedbackRating, setFeedbackRating] = useState<'positive' | 'negative' | undefined>(undefined);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [feedbackModalItem, setFeedbackModalItem] = useState<FeedbackOut | null>(null);
+  const [feedbackModalInfra, setFeedbackModalInfra] = useState<{
+    health: typeof health;
+    gpuPerf: typeof gpuPerf;
+    serverPerf: typeof serverPerf;
+  } | null>(null);
 
   // ---------- fetch everything ----------
   const loadData = useCallback(async () => {
@@ -215,6 +221,23 @@ export default function DashboardPage() {
     } catch { /* non-critical */ }
     finally { setFeedbackLoading(false); }
   }, [isAdmin, feedbackPage, feedbackRating]);
+
+  const handleOpenFeedbackModal = useCallback(async (f: FeedbackOut) => {
+    setFeedbackModalItem(f);
+    setFeedbackModalInfra(null);
+    try {
+      const [hRes, gRes, sRes] = await Promise.allSettled([
+        getHealth(),
+        getGpuServerPerformance(),
+        getServerPerformance(),
+      ]);
+      setFeedbackModalInfra({
+        health: hRes.status === 'fulfilled' ? (hRes.value as typeof health) : null,
+        gpuPerf: gRes.status === 'fulfilled' ? (gRes.value as typeof gpuPerf) : null,
+        serverPerf: sRes.status === 'fulfilled' ? (sRes.value as typeof serverPerf) : null,
+      });
+    } catch { /* non-critical */ }
+  }, []);
 
   useEffect(() => {
     if (isAdmin) loadFeedback();
@@ -1170,27 +1193,37 @@ export default function DashboardPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-gray-400 text-xs uppercase border-b border-white/10">
-                    <th className="pb-2 pr-4">Fecha</th>
-                    <th className="pb-2 pr-4">Usuario</th>
-                    <th className="pb-2 pr-4">Valoración</th>
-                    <th className="pb-2 pr-4">Categoría</th>
-                    <th className="pb-2 pr-4">Detalles</th>
-                    <th className="pb-2">Vista previa</th>
+                    <th className="pb-2 pr-3">Hora</th>
+                    <th className="pb-2 pr-3 w-10"></th>
+                    <th className="pb-2 pr-3">Modelo</th>
+                    <th className="pb-2 pr-3">Usuario</th>
+                    <th className="pb-2">Título</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
                   {feedbackData.map((f) => (
-                    <tr key={f.id} className="hover:bg-white/5 transition-colors">
-                      <td className="py-2.5 pr-4 text-gray-400 text-xs">{new Date(f.created_at).toLocaleString('es-MX')}</td>
-                      <td className="py-2.5 pr-4 text-gray-300">{f.user_email || '—'}</td>
-                      <td className="py-2.5 pr-4">
-                        <span className={`px-2 py-0.5 text-xs rounded-full ${f.rating === 'positive' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'}`}>
-                          {f.rating === 'positive' ? 'Positivo' : 'Negativo'}
-                        </span>
+                    <tr
+                      key={f.id}
+                      onClick={() => handleOpenFeedbackModal(f)}
+                      className="hover:bg-white/10 cursor-pointer transition-colors"
+                    >
+                      <td className="py-2.5 pr-3 text-gray-400 text-xs whitespace-nowrap">{new Date(f.created_at).toLocaleString('es-MX')}</td>
+                      <td className="py-2.5 pr-3">
+                        {f.rating === 'positive' ? (
+                          <svg className="w-4 h-4 text-green-400" fill="currentColor" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                            <path d="M15 5.88 14 10h5.83a2 2 0 011.92 2.56l-2.33 8A2 2 0 0117.5 22H4a2 2 0 01-2-2v-8a2 2 0 012-2h2.76a2 2 0 001.79-1.11L12 2a3.13 3.13 0 011 3.88Z" />
+                            <path d="M7 10v12" />
+                          </svg>
+                        ) : (
+                          <svg className="w-4 h-4 text-red-400" fill="currentColor" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                            <path d="M9 18.12 10 14H4.17a2 2 0 01-1.92-2.56l2.33-8A2 2 0 016.5 2H20a2 2 0 012 2v8a2 2 0 01-2 2h-2.76a2 2 0 00-1.79 1.11L12 22a3.13 3.13 0 01-3-3.88Z" />
+                            <path d="M17 14V2" />
+                          </svg>
+                        )}
                       </td>
-                      <td className="py-2.5 pr-4 text-gray-400 text-xs">{f.reason_category ? REASON_LABELS[f.reason_category] || f.reason_category : '—'}</td>
-                      <td className="py-2.5 pr-4 text-gray-300 text-xs max-w-[200px] truncate">{f.reason_text || '—'}</td>
-                      <td className="py-2.5 text-gray-500 text-xs max-w-[250px] truncate">{f.content_preview || '—'}</td>
+                      <td className="py-2.5 pr-3 text-gray-300 text-xs">{f.model_name || '—'}</td>
+                      <td className="py-2.5 pr-3 text-gray-300 text-xs truncate max-w-[140px]">{f.user_email || '—'}</td>
+                      <td className="py-2.5 text-gray-400 text-xs truncate max-w-[220px]" title={f.query_title || undefined}>{f.query_title || '—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1219,6 +1252,101 @@ export default function DashboardPage() {
             <p className="text-gray-500 text-sm">{feedbackLoading ? 'Cargando...' : 'No hay comentarios aún.'}</p>
           )}
         </Section>
+
+        {/* Feedback detail modal */}
+        {feedbackModalItem && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setFeedbackModalItem(null)}>
+            <div className="bg-[#0f172a] border border-white/10 rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 bg-white/5">
+                <h3 className="text-white font-semibold">Detalle del comentario</h3>
+                <button onClick={() => setFeedbackModalItem(null)} className="p-1 text-gray-400 hover:text-white rounded">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-5 space-y-4 custom-scrollbar">
+                {/* Feedback details */}
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div><span className="text-gray-500">Fecha</span><p className="text-white">{new Date(feedbackModalItem.created_at).toLocaleString('es-MX')}</p></div>
+                  <div><span className="text-gray-500">Usuario</span><p className="text-white">{feedbackModalItem.user_email || '—'}</p></div>
+                  <div><span className="text-gray-500">Modelo</span><p className="text-white">{feedbackModalItem.model_name || '—'}</p></div>
+                  <div><span className="text-gray-500">Valoración</span>
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full ${feedbackModalItem.rating === 'positive' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'}`}>
+                      {feedbackModalItem.rating === 'positive' ? 'Positivo' : 'Negativo'}
+                    </span>
+                  </div>
+                  <div className="col-span-2"><span className="text-gray-500">Título / Consulta</span><p className="text-white break-words">{feedbackModalItem.query_title || '—'}</p></div>
+                  {feedbackModalItem.reason_category && (
+                    <div className="col-span-2"><span className="text-gray-500">Categoría</span><p className="text-white">{REASON_LABELS[feedbackModalItem.reason_category] || feedbackModalItem.reason_category}</p></div>
+                  )}
+                  {feedbackModalItem.reason_text && (
+                    <div className="col-span-2"><span className="text-gray-500">Detalles del usuario</span><p className="text-white whitespace-pre-wrap break-words">{feedbackModalItem.reason_text}</p></div>
+                  )}
+                  <div className="col-span-2"><span className="text-gray-500">Vista previa de la respuesta</span><p className="text-gray-300 text-xs leading-relaxed whitespace-pre-wrap break-words mt-1">{feedbackModalItem.content_preview || '—'}</p></div>
+                  {feedbackModalItem.sources && feedbackModalItem.sources.length > 0 && (
+                    <div className="col-span-2">
+                      <span className="text-gray-500">Fuentes utilizadas ({feedbackModalItem.sources.length})</span>
+                      <ul className="mt-2 space-y-2">
+                        {feedbackModalItem.sources.map((s, i) => (
+                          <li key={i} className="bg-white/5 rounded-lg px-3 py-2 text-xs">
+                            <span className="text-cyan-400 font-medium">
+                              {s.type === 'pubmed' ? 'PubMed' : s.type === 'rag' ? 'Ominis' : s.type === 'web' ? 'Web' : 'Fuente'}
+                            </span>
+                            {s.title && <p className="text-white mt-0.5 truncate" title={s.title}>{s.title}</p>}
+                            {s.url && (
+                              <a href={s.url} target="_blank" rel="noopener noreferrer" className="text-cyan-400/80 hover:text-cyan-300 truncate block mt-0.5">
+                                {s.url}
+                              </a>
+                            )}
+                            {(s.authors || s.year || s.journal) && (
+                              <p className="text-gray-500 mt-0.5">{[s.authors, s.year, s.journal].filter(Boolean).join(' · ')}</p>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+
+                {/* Current infrastructure (at time of view) */}
+                <div className="pt-4 border-t border-white/10">
+                  <h4 className="text-gray-400 text-xs uppercase tracking-wider mb-3">Infraestructura actual (referencia)</h4>
+                  <div className="space-y-3 text-sm">
+                    {feedbackModalInfra?.health && (
+                      <div className="bg-white/5 rounded-lg p-3">
+                        <p className="text-gray-500 text-xs mb-1">Estado del sistema</p>
+                        <p className="text-white">Estado: {feedbackModalInfra.health.status}</p>
+                        <p className="text-gray-400 text-xs">Modelo: {feedbackModalInfra.health.model?.version || '—'} · {feedbackModalInfra.health.model?.status || '—'}</p>
+                      </div>
+                    )}
+                    {feedbackModalInfra?.gpuPerf && (
+                      <div className="bg-white/5 rounded-lg p-3">
+                        <p className="text-gray-500 text-xs mb-1">Servidor GPU / LLM</p>
+                        <p className="text-white">Estado: {feedbackModalInfra.gpuPerf.status}</p>
+                        {feedbackModalInfra.gpuPerf.runningModels && feedbackModalInfra.gpuPerf.runningModels.length > 0 && (
+                          <p className="text-gray-400 text-xs">Modelos en VRAM: {feedbackModalInfra.gpuPerf.runningModels.map(m => `${m.name} (${m.sizeVramGB}GB)`).join(', ')}</p>
+                        )}
+                        {feedbackModalInfra.gpuPerf.models && (
+                          <p className="text-gray-400 text-xs mt-1">Instalados: {feedbackModalInfra.gpuPerf.models.map(m => m.name).join(', ')}</p>
+                        )}
+                      </div>
+                    )}
+                    {feedbackModalInfra?.serverPerf && (
+                      <div className="bg-white/5 rounded-lg p-3">
+                        <p className="text-gray-500 text-xs mb-1">Servidor de aplicación</p>
+                        <p className="text-gray-400 text-xs">
+                          {feedbackModalInfra.serverPerf.awsInstanceType && <>{feedbackModalInfra.serverPerf.awsInstanceType}</>}
+                          {feedbackModalInfra.serverPerf.awsInstanceId && <> · {feedbackModalInfra.serverPerf.awsInstanceId}</>}
+                          {feedbackModalInfra.serverPerf.uptimeHours != null && <> · Uptime: {feedbackModalInfra.serverPerf.uptimeHours}h</>}
+                        </p>
+                      </div>
+                    )}
+                    {!feedbackModalInfra && <p className="text-gray-500 text-xs">Cargando infraestructura...</p>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

@@ -14,6 +14,17 @@ export const REASON_CATEGORIES = [
   { value: 'otra', label: 'Otra opción' },
 ] as const;
 
+export interface FeedbackSource {
+  title?: string;
+  url?: string;
+  type?: 'rag' | 'web' | 'pubmed';
+  score?: number;
+  authors?: string;
+  year?: string;
+  journal?: string;
+  ref_num?: number;
+}
+
 export interface FeedbackCreate {
   message_id?: number;
   conversation_id?: number;
@@ -21,6 +32,9 @@ export interface FeedbackCreate {
   reason_category?: string;
   reason_text?: string;
   content_preview?: string;
+  model_name?: string;
+  query_title?: string;
+  sources?: FeedbackSource[];
 }
 
 export interface FeedbackOut {
@@ -33,6 +47,9 @@ export interface FeedbackOut {
   reason_category?: string;
   reason_text?: string;
   content_preview?: string;
+  model_name?: string;
+  query_title?: string;
+  sources?: FeedbackSource[];
   created_at: string;
 }
 

@@ -105,6 +105,13 @@ class Settings(BaseSettings):
     # SINBA OLAP Cubes
     sinba_xmla_url: str = ""  # XMLA endpoint URL (e.g., http://server/olap/msmdpump.dll)
 
+    # OpenScholar (Modo Investigación - academic research LLM)
+    openscholar_api_url: str = "http://44.217.135.115:8000"  # OpenAI-compatible vLLM endpoint
+    openscholar_model: str = "openscholar"  # Must match vLLM --served-model-name
+    openscholar_temperature: float = 0.2
+    openscholar_api_key: str = "dummy"  # vLLM often accepts any value
+    openscholar_timeout: float = 120  # seconds before HTTP timeout (prevents indefinite hang)
+
     # CORS
     frontend_url: str = "http://localhost:3000"
     allowed_origins: str = "http://localhost:3000"

@@ -11,7 +11,7 @@ interface ChatSidebarProps {
   isAuthenticated: boolean;
   conversations: ConversationSummary[];
   activeConversationId: number | null;
-  onSelectConversation: (id: number) => void;
+  onSelectConversation: (uuid: string) => void;
   onNewChat: () => void;
   onDeleteConversation: (id: number) => void;
   onRenameConversation: (id: number, newTitle: string) => void;
@@ -241,7 +241,7 @@ export default function ChatSidebar({
                 {group.items.map((conv) => (
                   <div
                     key={conv.id}
-                    className={`group relative flex items-center px-3 mx-2 rounded-lg cursor-pointer transition-colors ${
+                    className={`group relative flex items-center px-3 mx-2 rounded-lg transition-colors ${
                       conv.id === activeConversationId
                         ? "bg-white/10 text-white"
                         : "text-gray-300 hover:bg-white/5 hover:text-white"
@@ -260,14 +260,15 @@ export default function ChatSidebar({
                         className="flex-1 bg-white/10 border border-white/20 rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 my-0.5"
                       />
                     ) : (
-                      <button
-                        onClick={() => onSelectConversation(conv.id)}
-                        className="flex-1 text-left py-1.5 pr-6 min-w-0"
+                      <Link
+                        href={`/c/${conv.uuid}`}
+                        onClick={(e) => { e.preventDefault(); onSelectConversation(conv.uuid); }}
+                        className="flex-1 block py-1.5 pr-6 min-w-0 cursor-pointer"
                         title={conv.title}
                       >
                         <span className="text-sm leading-snug line-clamp-2">{conv.title}</span>
                         <span className="text-[10px] text-gray-500 block mt-0.5">{formatRelativeTime(conv.updated_at)}</span>
-                      </button>
+                      </Link>
                     )}
 
                     {/* 3-dot menu button */}
@@ -293,6 +294,19 @@ export default function ChatSidebar({
                         ref={menuRef}
                         className="absolute right-0 top-full mt-1 w-44 bg-[#1a2744] border border-white/10 rounded-xl shadow-xl py-1 z-50"
                       >
+                        <button
+                          onClick={() => {
+                            const url = `${typeof window !== "undefined" ? window.location.origin : ""}/c/${conv.uuid}`;
+                            navigator.clipboard.writeText(url);
+                            setMenuOpenId(null);
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                          Copiar enlace
+                        </button>
                         <button
                           onClick={() => startRename(conv)}
                           className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors"

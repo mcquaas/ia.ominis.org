@@ -1,7 +1,7 @@
 """Pydantic schemas for feedback endpoints."""
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,9 @@ class FeedbackCreate(BaseModel):
     reason_category: Optional[str] = None
     reason_text: Optional[str] = None
     content_preview: Optional[str] = Field(None, max_length=500)
+    model_name: Optional[str] = Field(None, max_length=100)
+    query_title: Optional[str] = Field(None, max_length=500)
+    sources: Optional[list[dict[str, Any]]] = None  # RAG/web/PubMed sources used for response
 
 
 class FeedbackOut(BaseModel):
@@ -36,7 +39,9 @@ class FeedbackOut(BaseModel):
     reason_category: Optional[str] = None
     reason_text: Optional[str] = None
     content_preview: Optional[str] = None
-    created_at: datetime
+    model_name: Optional[str] = None
+    query_title: Optional[str] = None
+    sources: Optional[list[dict[str, Any]]] = None  # RAG/web/PubMed sources used for response
 
     model_config = {"from_attributes": True}
 

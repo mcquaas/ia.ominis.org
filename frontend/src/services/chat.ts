@@ -34,6 +34,7 @@ export interface ChatMessageData {
 
 export interface ConversationSummary {
   id: number;
+  uuid: string;
   title: string;
   is_saved: boolean;
   created_at: string;
@@ -100,10 +101,17 @@ export async function createConversation(title?: string): Promise<ConversationDe
 }
 
 /**
- * Get a conversation with all its messages
+ * Get a conversation with all its messages (by id)
  */
 export async function getConversation(id: number): Promise<ConversationDetail> {
   return fetchChat(`/${id}`);
+}
+
+/**
+ * Get a conversation by UUID (for shareable URLs)
+ */
+export async function getConversationByUuid(uuid: string): Promise<ConversationDetail> {
+  return fetchChat(`/uuid/${uuid}`);
 }
 
 /**
