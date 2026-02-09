@@ -69,6 +69,8 @@ PHASE 2 — REPORT (if user has answered or says "proceed"):
 - If evidence is insufficient, state this clearly.
 - Geographic focus: Mexico unless otherwise specified.
 - If the user indicated what NOT to include (topics, study types, etc.), respect it strictly.
+- TABLE DECISION: When you find structured or comparative data (numbers, categories, time series), decide whether a table would help. If yes, choose the most relevant columns and datapoints and include a markdown table in the report (header row with |, separator | --- |, then data rows). Use the table to present the data clearly; cite the source [N].
+- CHART DECISION: When quantitative data would be clearer as a graphic, decide if a chart makes sense. If yes, choose chart type (bar, line, or pie) and which data to include, then output a single fenced block so we can render it: use a code block with language \"chart\" and inside put ONLY valid JSON in this exact form: {\"charts\": [{\"type\": \"bar\"|\"line\"|\"pie\", \"title\": \"...\", \"x_label\": \"...\", \"y_label\": \"...\", \"series\": [{\"name\": \"...\", \"data\": [{\"x\": \"label\", \"y\": number}]}]}]}. For pie use \"labels\": [\"...\"], \"values\": [number]. Use ONLY data from the sources; max 12 points per series. If no chart is needed, do not output a chart block.
 - Respond only in Mexican Spanish."""
 
 
@@ -213,8 +215,7 @@ def build_academic_messages(
             + plan_block
             + "Stay STRICTLY on topic. Use only literal data from sources [N].\n"
             "Cite as: [N] Autor(es). Título. Fuente, año. URL.\n"
-            "Sections: # Título, ## Resumen ejecutivo, ## Contexto, ## Hallazgos principales (con citas [N]), "
-            "## Análisis detallado, ## Discusión, ## Limitaciones, ## Conclusiones, ## Referencias."
+            "Sections: # Título, ## Resumen ejecutivo, ## Contexto, ## Hallazgos principales (con citas [N]); include markdown tables when data is tabular. ## Análisis detallado, ## Discusión, ## Limitaciones, ## Conclusiones, ## Referencias. If you want a chart, add a ```chart code block with JSON {\"charts\": [...]} (see system prompt)."
         )
     else:
         user_parts.append(

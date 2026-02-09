@@ -146,5 +146,8 @@ Añadir un campo **`reasoning`** (o `thought`) a cada paso, con frases como:
    - Formato de citas y secciones obligatorias en prompt; plan explícito (Focus, Qué incluir, Qué no hacer).
 
 4. **Fase 4 – Opcional**
-   - Añadir LLM extra por fuente para resumir notas (si se prioriza calidad sobre latencia).
-   - Permitir que el usuario especifique exclusiones temáticas (ej. “no incluir X”).
+   - LLM extra por fuente: no implementado. Exclusiones temáticas: excluded_topics en ResearchRequest.
+
+5. **Decisiones tabla y gráfica** ✅ IMPLEMENTADO
+   - Tabla: el agente decide si incluir tabla; elige columnas y datos e incluye tabla en markdown en el reporte.
+   - Gráfica: decide si una gráfica ayuda; puede emitir bloque ```chart con JSON para renderizar; o en Phase 2 se llama al generador de gráficas (force=True). El bloque ```chart se elimina del texto enviado al cliente.

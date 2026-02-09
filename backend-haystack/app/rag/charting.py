@@ -233,8 +233,10 @@ async def generate_chart_specs(
     documents: list[Document],
     history: list[dict] | None,
     generator,
+    force: bool = False,
 ) -> list[dict]:
-    if not looks_like_chart_request(question):
+    """Generate chart specs from question/answer/documents. If force=True (e.g. research report), skip the question-based gate."""
+    if not force and not looks_like_chart_request(question):
         return []
 
     messages = _build_chart_messages(
@@ -267,6 +269,44 @@ async def generate_chart_specs(
         if norm:
             normalized.append(norm)
     return normalized[:3]
+
+
+# Pattern for fenced block: ```chart or ```json followed by content and closing ```
+_CHART_BLOCK_RE = re.compile(
+    r"```(?:chart|json)\s*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def parse_chart_specs_from_text(text: str) -> list[dict]:
+    """
+    Parse embedded chart spec from report text. Looks for ```chart or ```json
+    block containing {"charts": [...]}. Returns list of normalized chart dicts
+    (empty if none or invalid).
+    """
+    if not text or not text.strip():
+        return []
+    normalized: list[dict] = []
+    for match in _CHART_BLOCK_RE.finditer(text):
+        block = match.group(1).strip()
+        spec = _extract_json_object(block)
+        if not spec:
+            continue
+        charts_raw = spec.get("charts") if isinstance(spec.get("charts"), list) else []
+        for chart in charts_raw:
+            norm = _normalize_chart(chart)
+            if norm:
+                normalized.append(norm)
+        if normalized:
+            break  # Use first valid block only
+    return normalized[:3]
+
+
+def strip_chart_block_from_text(text: str) -> str:
+    """Remove the first ```chart or ```json block from text (so the report does not show raw JSON)."""
+    if not text:
+        return text
+    return _CHART_BLOCK_RE.sub("", text, count=1).strip()
 
 
 def render_chart_images(charts: list[dict]) -> list[dict]:

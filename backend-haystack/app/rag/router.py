@@ -37,7 +37,7 @@ from app.rag.pipeline import (
     get_pipeline_manager,
 )
 from app.rag.document_store import get_document_store
-from app.rag.charting import generate_chart_specs, render_chart_images
+from app.rag.charting import generate_chart_specs, parse_chart_specs_from_text, render_chart_images, strip_chart_block_from_text
 from app.rag.pdf_generator import generate_pdf
 from app.rag.web_search import search_web
 from app.rag.pubmed_search import search_pubmed
@@ -1347,15 +1347,34 @@ async def _research_stream_events(body: ResearchRequest):
 
         sources_list = _filter_cited_sources(full_answer, all_sources_list)
         charts: list[dict] = []
+        answer_for_client = full_answer
         try:
-            chart_specs = await generate_chart_specs(
-                question=body.question,
-                answer=full_answer,
-                documents=documents,
-                history=[msg.model_dump() for msg in body.history] if body.history else [],
-                generator=generator,
-            )
-            charts = render_chart_images(chart_specs)
+            # 1) Prefer charts embedded by the report LLM (```chart block)
+            chart_specs = parse_chart_specs_from_text(full_answer)
+            if chart_specs:
+                charts = render_chart_images(chart_specs)
+                answer_for_client = strip_chart_block_from_text(full_answer)
+            # 2) If no embedded charts and this is a research report, ask chart LLM to suggest from report
+            if not charts and is_phase2:
+                chart_specs = await generate_chart_specs(
+                    question=body.question,
+                    answer=full_answer,
+                    documents=documents,
+                    history=[msg.model_dump() for msg in body.history] if body.history else [],
+                    generator=generator,
+                    force=True,
+                )
+                charts = render_chart_images(chart_specs)
+            # 3) Non-research: only suggest charts when question looks chart-related
+            elif not charts:
+                chart_specs = await generate_chart_specs(
+                    question=body.question,
+                    answer=full_answer,
+                    documents=documents,
+                    history=[msg.model_dump() for msg in body.history] if body.history else [],
+                    generator=generator,
+                )
+                charts = render_chart_images(chart_specs)
             if charts:
                 yield sse_event({"type": "charts", "charts": charts})
         except Exception as e:
@@ -1364,7 +1383,7 @@ async def _research_stream_events(body: ResearchRequest):
 
         yield sse_event({
             "type": "done",
-            "answer": full_answer,
+            "answer": answer_for_client,
             "sources": sources_list,
             "charts": charts if charts else None,
             "model": public_model_id,
@@ -1375,7 +1394,7 @@ async def _research_stream_events(body: ResearchRequest):
         asyncio.create_task(
             _log_query(
                 question=body.question,
-                answer=full_answer,
+                answer=answer_for_client,
                 sources=sources_list,
                 elapsed_ms=elapsed_ms,
                 model_used=ACADEMIC_MODEL_ID,
