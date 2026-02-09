@@ -279,7 +279,7 @@ export default function ChatSidebar({
                           setMenuOpenId(menuOpenId === conv.id ? null : conv.id);
                           setConfirmDeleteId(null);
                         }}
-                        className="absolute right-2 opacity-0 group-hover:opacity-100 text-gray-400 hover:text-white p-1 transition-opacity"
+                        className="absolute right-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 text-gray-400 hover:text-white p-1 transition-opacity"
                         title="Opciones"
                       >
                         <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">

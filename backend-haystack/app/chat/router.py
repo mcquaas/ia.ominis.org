@@ -38,7 +38,7 @@ def _auto_title(content: str, max_len: int = 60) -> str:
     first_line = re.sub(r"\[\d+ imágenes? adjuntas?:[^\]]*\]", "", first_line).strip()
     if len(first_line) > max_len:
         return first_line[:max_len].rsplit(" ", 1)[0] + "…"
-    return first_line or "Nueva conversación"
+    return first_line or "Nuevo trabajo"
 
 
 async def _llm_title(user_content: str, assistant_content: str = "") -> str:
@@ -146,7 +146,7 @@ async def create_conversation(
     conv = Conversation(
         uuid=str(uuid_module.uuid4()),
         user_id=user.id,
-        title=body.title or "Nueva conversación",
+        title=body.title or "Nuevo trabajo",
     )
     db.add(conv)
     await db.commit()
@@ -283,7 +283,7 @@ async def add_messages(
         new_msgs.append(msg)
 
     # Auto-generate title using LLM if title is still default
-    if conv.title == "Nueva conversación":
+    if conv.title == "Nuevo trabajo":
         first_user = next((m for m in body.messages if m.role == "user"), None)
         first_assistant = next((m for m in body.messages if m.role == "assistant"), None)
         if first_user:

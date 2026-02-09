@@ -25,7 +25,7 @@ class Conversation(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     uuid = Column(String(36), unique=True, nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    title = Column(String(255), nullable=False, default="Nueva conversación")
+    title = Column(String(255), nullable=False, default="Nuevo trabajo")
     is_saved = Column(Boolean, default=True, nullable=False)
 
     created_at = Column(

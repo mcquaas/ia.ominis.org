@@ -357,6 +357,17 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     return () => el.removeEventListener("scroll", onScroll);
   }, [messages.length]);
 
+  // Resize textarea when input changes (e.g. from suggestion click) so it expands with wrapped text
+  const resizeInputTextarea = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(Math.max(el.scrollHeight, 40), 300) + "px";
+  }, []);
+  useEffect(() => {
+    resizeInputTextarea();
+  }, [input, resizeInputTextarea]);
+
   const generateId = () => Math.random().toString(36).substring(2, 9);
 
   // Extract sources from URLs embedded in LLM-generated text
@@ -1414,7 +1425,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
 
   const getFeedbackExtras = (message: Message) => {
     const conv = activeConversationId ? conversations.find((c) => c.id === activeConversationId) : null;
-    const queryTitle = conv?.title ?? messages.find((m) => m.role === "user")?.content.slice(0, 100) ?? "Nueva conversación";
+    const queryTitle = conv?.title ?? messages.find((m) => m.role === "user")?.content.slice(0, 100) ?? "Nuevo trabajo";
     return {
       model_name: message.model ?? selectedModel,
       query_title: queryTitle,
@@ -1975,11 +1986,11 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           <textarea
                             ref={inputRef}
                             value={input}
-                            onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px"; }}
+                            onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
                             onKeyDown={handleKeyDown} onPaste={handlePaste}
                             placeholder="Pregunta sobre salud en México..."
-                            className="flex-1 min-w-0 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
-                            style={{ minHeight: "24px", maxHeight: "200px" }}
+                            className="flex-1 min-w-0 min-h-[2.5rem] flex-shrink-0 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
+                            style={{ maxHeight: "300px" }}
                             rows={1}
                             disabled={isLoading}
                           />
@@ -2034,7 +2045,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
 
               {/* Messages Area */}
               {hasMessages && (
-              <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+              <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
                 {messages.map((message) => {
                   // Compute effective sources: merge backend sources with any URLs found in content
                   const effectiveSources = message.role === "assistant"
@@ -2306,6 +2317,22 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
               </div>
               )}
 
+              {/* Scroll-to-top — above input, outline arrow with line above */}
+              {hasMessages && showScrollTop && (
+                <div className="flex-shrink-0 flex justify-end items-center border-t border-white/10 px-4 py-2">
+                  <button
+                    onClick={() => messagesContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })}
+                    className="p-2 rounded-full border border-white/30 text-white/80 hover:text-white hover:border-white/50 hover:bg-white/5 transition-colors"
+                    title="Volver arriba"
+                    aria-label="Volver arriba"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+
               {/* Input Area (bottom — only when chat has messages) */}
               {hasMessages && <div
                 className={`p-3 flex-shrink-0 border-t border-white/10 relative ${isDragOver ? "ring-2 ring-cyan-400/50 bg-cyan-500/5 rounded-xl" : ""}`}
@@ -2428,12 +2455,12 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                     <textarea
                       ref={inputRef}
                       value={input}
-                      onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px"; }}
+                      onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
                       onKeyDown={handleKeyDown}
                       onPaste={handlePaste}
                       placeholder="Pregunta sobre salud en México..."
-                      className="flex-1 min-w-0 bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0"
-                      style={{ minHeight: "24px", maxHeight: "200px" }}
+                      className="flex-1 min-w-0 min-h-[2.5rem] flex-shrink-0 bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0"
+                      style={{ maxHeight: "300px" }}
                       rows={1}
                       disabled={isLoading}
                     />
@@ -2476,20 +2503,6 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                 </div>
               </div>}
 
-            {/* Scroll-to-top button - bottom right on canvas */}
-            {hasMessages && showScrollTop && (
-              <button
-                onClick={() => messagesContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })}
-                className="fixed bottom-24 right-6 z-30 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white border border-white/20 shadow-lg transition-colors backdrop-blur-sm"
-                title="Volver arriba"
-                aria-label="Volver arriba"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
-                </svg>
-              </button>
-            )}
-
             {/* Bottom info line */}
             <div className="flex-shrink-0 text-center py-1.5">
               <span className="text-gray-500 text-[11px]">
@@ -2513,14 +2526,15 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
       {footerExpanded && (
         <div className={`fixed inset-x-0 bottom-0 z-40 max-h-[70vh] overflow-y-auto transition-all duration-300 ${sidebarOpen ? "lg:pl-72" : "lg:pl-10"}`}>
           <div className="bg-[#060e1a]/95 backdrop-blur-md border-t border-white/10">
-            <div className="text-center pt-2 pb-2">
-              <button
-                onClick={() => setFooterExpanded(false)}
-                className="text-gray-500 hover:text-gray-300 text-[11px] transition-colors"
-              >
+            <button
+              type="button"
+              onClick={() => setFooterExpanded(false)}
+              className="w-full text-center py-3 cursor-pointer hover:bg-white/5 transition-colors border-b border-white/10"
+            >
+              <span className="text-gray-500 hover:text-gray-300 text-[11px] transition-colors">
                 Ocultar ▼
-              </button>
-            </div>
+              </span>
+            </button>
             <Footer />
           </div>
         </div>
