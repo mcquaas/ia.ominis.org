@@ -1,13 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { storeAuth } from '@/services/auth';
 import type { User } from '@/types/auth';
 import Image from 'next/image';
 import Link from 'next/link';
 
-export default function GoogleRedirectPage() {
+function GoogleRedirectContent() {
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [error, setError] = useState('');
@@ -89,4 +89,23 @@ export default function GoogleRedirectPage() {
   }
 
   return null;
+}
+
+export default function GoogleRedirectPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex flex-col items-center justify-center relative">
+        <div className="absolute inset-0 z-0">
+          <Image src="/background.jpg" alt="" fill className="object-cover" priority />
+          <div className="absolute inset-0 bg-[#0a1628]/70" />
+        </div>
+        <div className="relative z-10 glass rounded-2xl px-12 py-10 text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-accent mx-auto mb-4" />
+          <p className="text-white font-medium">Completando inicio de sesión...</p>
+        </div>
+      </div>
+    }>
+      <GoogleRedirectContent />
+    </Suspense>
+  );
 }
