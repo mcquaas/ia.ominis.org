@@ -63,10 +63,12 @@ PHASE 2 — REPORT (if user has answered or says "proceed"):
 - Generate a full white-paper style report in Markdown.
 - Use EXCLUSIVELY data from the provided sources [N].
 - Every claim MUST have a verifiable citation [N].
+- Citation format: [N] Autor(es). Título. Fuente, año. URL. Use exact names and titles from the sources.
 - NEVER invent authors, titles, journals, or URLs.
-- Use exact names and titles from the sources.
+- Mandatory sections: Resumen ejecutivo, Contexto, Hallazgos principales (con citas [N]), Análisis detallado, Discusión, Limitaciones, Conclusiones, Referencias (formato completo).
 - If evidence is insufficient, state this clearly.
 - Geographic focus: Mexico unless otherwise specified.
+- If the user indicated what NOT to include (topics, study types, etc.), respect it strictly.
 - Respond only in Mexican Spanish."""
 
 
@@ -104,6 +106,7 @@ def build_academic_messages(
     image_description: str = "",
     is_phase2: bool = False,
     research_notes: list[str] | None = None,
+    excluded_topics: list[str] | None = None,
 ) -> list[ChatMessage]:
     """
     Build ChatMessage objects for OpenScholar (academic research mode).
@@ -192,15 +195,26 @@ def build_academic_messages(
         user_specs += question
         original_topic = _truncate_to_tokens(original_topic, 150)
         user_specs = _truncate_to_tokens(user_specs, 200)
+        focus = (plan.get("focus", "") if plan else "")[:200]
 
+        exclusion_note = "Las fuentes deseleccionadas ya fueron excluidas."
+        if excluded_topics:
+            exclusion_note += f" NO incluir: {', '.join(excluded_topics[:10])}."
+        else:
+            exclusion_note += " Si el usuario indicó temas o tipos de información que NO incluir, respétalos."
+        plan_block = (
+            "\nPLAN DE INVESTIGACIÓN (con retroalimentación del usuario):\n"
+            f"- Focus: {focus or original_topic}\n"
+            f"- Qué incluir: {user_specs}\n"
+            f"- Qué no hacer: {exclusion_note}\n"
+        )
         user_parts.append(
             "\nPHASE 2: GENERATE THE FULL REPORT.\n"
-            f"MAIN TOPIC: {original_topic}\n"
-            f"USER SPECIFICATIONS: {user_specs}\n\n"
-            "Stay STRICTLY on topic. Use only literal data from sources [N].\n"
-            "Cite with [N]. Copy exact author names and titles. Never invent.\n"
-            "Format: # Title, ## Summary, ## Methods, ## Findings, ## Discussion, "
-            "## Limitations, ## References."
+            + plan_block
+            + "Stay STRICTLY on topic. Use only literal data from sources [N].\n"
+            "Cite as: [N] Autor(es). Título. Fuente, año. URL.\n"
+            "Sections: # Título, ## Resumen ejecutivo, ## Contexto, ## Hallazgos principales (con citas [N]), "
+            "## Análisis detallado, ## Discusión, ## Limitaciones, ## Conclusiones, ## Referencias."
         )
     else:
         user_parts.append(

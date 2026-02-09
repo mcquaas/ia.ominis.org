@@ -93,6 +93,7 @@ class ResearchRequest(BaseModel):
     max_trusted_sources: int = 10
     time_budget_seconds: int = 300
     excluded_sources: list[str] = []  # URLs the user deselected from the plan
+    excluded_topics: list[str] = []  # Topics or study types the user asked NOT to include
 
 
 # --- Text sanitization ---
@@ -1263,6 +1264,7 @@ async def _research_stream_events(body: ResearchRequest):
             file_context=body.file_context or "",
             is_phase2=is_phase2,
             research_notes=research_notes if is_phase2 else None,
+            excluded_topics=body.excluded_topics or None,
         )
 
         # Phase 2 reports; max_tokens must fit in model ctx (8192) minus input

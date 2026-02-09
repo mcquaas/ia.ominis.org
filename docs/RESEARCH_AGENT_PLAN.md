@@ -142,9 +142,8 @@ Añadir un campo **`reasoning`** (o `thought`) a cada paso, con frases como:
    - Emitir notas en `read_done` usando el extracto de texto.
    - Pasar `research_notes` al prompt del reporte.
 
-3. **Fase 3 – Mejoras de reporte**
-   - Ajustar formato de citas en el prompt.
-   - Asegurar que el plan y las especificaciones del usuario se incluyan explícitamente.
+3. **Fase 3 – Mejoras de reporte** ✅ IMPLEMENTADO
+   - Formato de citas y secciones obligatorias en prompt; plan explícito (Focus, Qué incluir, Qué no hacer).
 
 4. **Fase 4 – Opcional**
    - Añadir LLM extra por fuente para resumir notas (si se prioriza calidad sobre latencia).
