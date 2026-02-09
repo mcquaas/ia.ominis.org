@@ -1977,8 +1977,8 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                             value={input}
                             onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px"; }}
                             onKeyDown={handleKeyDown} onPaste={handlePaste}
-                            placeholder="Escribe tu pregunta sobre salud en México..."
-                            className="flex-1 min-w-0 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
+                            placeholder="Pregunta sobre salud en México..."
+                            className="flex-1 min-w-0 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 placeholder:whitespace-nowrap focus:outline-none resize-none overflow-y-auto"
                             style={{ minHeight: "24px", maxHeight: "200px" }}
                             rows={1}
                             disabled={isLoading}
@@ -2431,8 +2431,8 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                       onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px"; }}
                       onKeyDown={handleKeyDown}
                       onPaste={handlePaste}
-                      placeholder="Escribe tu pregunta sobre salud en México..."
-                      className="flex-1 min-w-0 bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0"
+                      placeholder="Pregunta sobre salud en México..."
+                      className="flex-1 min-w-0 bg-transparent border-none text-sm text-white placeholder-gray-500 placeholder:whitespace-nowrap focus:outline-none resize-none overflow-y-auto py-0"
                       style={{ minHeight: "24px", maxHeight: "200px" }}
                       rows={1}
                       disabled={isLoading}
