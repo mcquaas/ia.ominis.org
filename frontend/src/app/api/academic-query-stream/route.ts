@@ -2,11 +2,11 @@ import { NextRequest } from 'next/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300; // research can take longer (OpenScholar deep research)
+export const maxDuration = 300; // research can take longer (ominis-2.0 deep research)
 
 /**
- * Modo Investigación — OpenScholar pipeline.
- * Deterministic routing: research mode always uses OpenScholar (academic LLM).
+ * Modo Investigación — ominis-2.0 pipeline.
+ * Deterministic routing: research mode always uses ominis-2.0 (academic LLM).
  */
 const ACADEMIC_API = (process.env.BACKEND_URL || 'http://localhost:8000') + '/v1/academic_query-stream';
 

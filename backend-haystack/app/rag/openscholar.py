@@ -10,6 +10,25 @@ import logging
 from typing import Optional
 
 from haystack.components.generators.chat import OpenAIChatGenerator
+
+# Model context limit; reserve tokens for system prompt and output
+MODEL_CTX_LIMIT = 8192
+TARGET_INPUT_TOKENS = 5500  # Leave ~600 system, ~2000 output
+CHARS_PER_TOKEN = 4  # Approximate for Spanish/English
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token."""
+    return max(0, len(text) // CHARS_PER_TOKEN)
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Truncate text to fit within token budget."""
+    if _estimate_tokens(text) <= max_tokens:
+        return text
+    return text[: max_tokens * CHARS_PER_TOKEN].rsplit(" ", 1)[0] + "…"
+
+
 from haystack.dataclasses import ChatMessage, Document
 from haystack.utils import Secret
 
@@ -84,18 +103,22 @@ def build_academic_messages(
     file_context: str = "",
     image_description: str = "",
     is_phase2: bool = False,
+    research_notes: list[str] | None = None,
 ) -> list[ChatMessage]:
     """
     Build ChatMessage objects for OpenScholar (academic research mode).
-    Reuses the same structure as build_research_messages but with academic prompt.
+    Truncates history and document content to stay within model context limit (8192 tokens).
     """
     messages: list[ChatMessage] = []
     messages.append(ChatMessage.from_system(ACADEMIC_RESEARCH_PROMPT))
 
+    # Truncate history: keep last 6 messages, max ~80 tokens each (~500 tokens total)
     if history:
-        for msg in history:
+        recent = history[-6:]
+        for msg in recent:
             role = msg.get("role", "user")
             content = msg.get("content", "")
+            content = _truncate_to_tokens(content, 80)  # ~80 tokens per message
             if role == "user":
                 messages.append(ChatMessage.from_user(content))
             elif role == "assistant":
@@ -120,6 +143,11 @@ def build_academic_messages(
                 plan_text += f"  - {s}\n"
         user_parts.append(plan_text)
 
+    # Document budget: allocate ~4000 tokens for evidence (scale per doc count)
+    doc_budget_tokens = 4000
+    num_docs = len(documents) if documents else 1
+    max_content_per_doc = max(600, (doc_budget_tokens * CHARS_PER_TOKEN) // num_docs)
+
     if documents:
         source_text = "EVIDENCE (cite with [N]):\n"
         for i, doc in enumerate(documents, 1):
@@ -128,8 +156,7 @@ def build_academic_messages(
             title = doc.meta.get("title", "Sin título")
             url = doc.meta.get("url", "")
             citation = doc.meta.get("citation", "")
-            max_content = 4000 if (plan and is_phase2) else (1500 if plan else 800)
-            content = (doc.content or "")[:max_content]
+            content = (doc.content or "")[:max_content_per_doc]
 
             source_text += f"\n[{i}] {source_type} — {title}\n"
             source_text += f"URL: {url}\n"
@@ -139,10 +166,16 @@ def build_academic_messages(
         user_parts.append(source_text)
 
     if file_context:
-        user_parts.append(f"\nATTACHED FILE:\n{file_context}")
+        user_parts.append(f"\nATTACHED FILE:\n{_truncate_to_tokens(file_context, 800)}")
 
     if image_description:
-        user_parts.append(f"\nIMAGE ANALYSIS:\n{image_description}")
+        user_parts.append(f"\nIMAGE ANALYSIS:\n{_truncate_to_tokens(image_description, 300)}")
+
+    if research_notes and is_phase2:
+        notes_text = "RESEARCH NOTES (key findings per source — use for structure and citations):\n"
+        for i, note in enumerate(research_notes[:20], 1):  # Cap at 20 notes
+            notes_text += f"- [{i}] {_truncate_to_tokens(note, 80)}\n"
+        user_parts.append(notes_text)
 
     user_parts.append(f"\nUser question: {question}")
 
@@ -157,6 +190,8 @@ def build_academic_messages(
                     else:
                         user_specs += msg.get("content", "") + " "
         user_specs += question
+        original_topic = _truncate_to_tokens(original_topic, 150)
+        user_specs = _truncate_to_tokens(user_specs, 200)
 
         user_parts.append(
             "\nPHASE 2: GENERATE THE FULL REPORT.\n"

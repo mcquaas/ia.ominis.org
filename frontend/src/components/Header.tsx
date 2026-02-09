@@ -3,14 +3,17 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useAuth } from "@/hooks/useAuth";
 
 export default function Header() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [photoUrl, setPhotoUrl] = useState<string>("");
+  const [menuPosition, setMenuPosition] = useState<{ top: number; right: number } | null>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
-  const { user, isAuthenticated, isAdmin, logout, loading } = useAuth();
+  const profileButtonRef = useRef<HTMLButtonElement>(null);
+  const { user, isAuthenticated, isAdmin, isDeveloper, logout, loading } = useAuth();
 
   const displayName = user?.full_name?.trim() || user?.username || "";
 
@@ -20,10 +23,24 @@ export default function Header() {
     }
   }, [user?.id]);
 
+  // Clear menu position when closing
+  useEffect(() => {
+    if (!isUserMenuOpen) setMenuPosition(null);
+  }, [isUserMenuOpen]);
+
+  const openUserMenu = () => {
+    if (profileButtonRef.current) {
+      const rect = profileButtonRef.current.getBoundingClientRect();
+      setMenuPosition({ top: rect.bottom + 8, right: window.innerWidth - rect.right });
+    }
+    setIsUserMenuOpen(true);
+  };
+
   // Close user menu when clicking outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (userMenuRef.current && !userMenuRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (userMenuRef.current && !userMenuRef.current.contains(target) && !(target as Element).closest?.("[data-profile-menu]")) {
         setIsUserMenuOpen(false);
       }
     }
@@ -38,8 +55,8 @@ export default function Header() {
   };
 
   return (
-    <header className="fixed top-0 left-0 right-0 z-50 bg-[#0a1628]/90 backdrop-blur-sm border-b border-white/10">
-      <nav className="px-4 sm:px-6 lg:px-8">
+    <header className="fixed top-0 left-0 right-0 z-[9999] bg-[#0a1628]/90 backdrop-blur-sm border-b border-white/10 pt-[env(safe-area-inset-top)]">
+      <nav className="px-4 sm:px-6 lg:px-8 w-full min-w-0 overflow-x-hidden">
         <div className="flex items-center justify-between h-16">
           {/* Logo + Title */}
           <Link href="/c" className="flex items-center gap-3">
@@ -76,7 +93,8 @@ export default function Header() {
             ) : isAuthenticated && user ? (
               <div className="relative" ref={userMenuRef}>
                 <button
-                  onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
+                  ref={profileButtonRef}
+                  onClick={() => (isUserMenuOpen ? setIsUserMenuOpen(false) : openUserMenu())}
                   className="flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
                 >
                   <div className="w-8 h-8 rounded-full bg-accent/30 flex items-center justify-center text-white text-sm font-medium overflow-hidden">
@@ -97,9 +115,17 @@ export default function Header() {
                   </svg>
                 </button>
 
-                {/* User Dropdown Menu */}
-                {isUserMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-56 bg-[#0f1d32]/95 backdrop-blur-md border border-white/15 rounded-xl py-2 shadow-2xl animate-fade-in">
+                {/* User Dropdown Menu — rendered via Portal to escape stacking context */}
+                {isUserMenuOpen && menuPosition && typeof document !== "undefined" && createPortal(
+                  <div
+                    data-profile-menu
+                    className="fixed w-56 bg-[#0f1d32]/95 backdrop-blur-md border border-white/15 rounded-xl py-2 shadow-2xl animate-fade-in"
+                    style={{
+                      top: menuPosition.top,
+                      right: menuPosition.right,
+                      zIndex: 2147483647,
+                    }}
+                  >
                     <div className="px-4 py-2 border-b border-white/10">
                       <p className="text-white font-medium truncate">{displayName || user.username}</p>
                       <p className="text-gray-400 text-xs truncate">{user.email}</p>
@@ -158,20 +184,22 @@ export default function Header() {
                           Ir al Chat
                         </span>
                       </Link>
-                      {isAdmin && (
+                      {(isAdmin || isDeveloper) && (
                         <>
-                          <Link
-                            href="/dashboard"
-                            onClick={() => setIsUserMenuOpen(false)}
-                            className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
-                          >
-                            <span className="flex items-center gap-2">
-                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
-                              </svg>
-                              Dashboard
-                            </span>
-                          </Link>
+                          {isAdmin && (
+                            <Link
+                              href="/dashboard"
+                              onClick={() => setIsUserMenuOpen(false)}
+                              className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-white/5 transition-colors text-sm"
+                            >
+                              <span className="flex items-center gap-2">
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
+                                </svg>
+                                Dashboard
+                              </span>
+                            </Link>
+                          )}
                           <Link
                             href="/rag"
                             onClick={() => setIsUserMenuOpen(false)}
@@ -200,7 +228,8 @@ export default function Header() {
                         </span>
                       </button>
                     </div>
-                  </div>
+                  </div>,
+                  document.body
                 )}
               </div>
             ) : (
@@ -303,8 +332,9 @@ export default function Header() {
                     >
                       Ir al Chat
                     </Link>
-                    {isAdmin && (
+                    {(isAdmin || isDeveloper) && (
                       <>
+                        {isAdmin && (
                         <Link 
                           href="/dashboard"
                           className="block text-gray-300 hover:text-white transition-colors"
@@ -312,6 +342,7 @@ export default function Header() {
                         >
                           Dashboard
                         </Link>
+                        )}
                         <Link 
                           href="/rag"
                           className="block text-gray-300 hover:text-white transition-colors"

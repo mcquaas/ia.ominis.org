@@ -38,7 +38,7 @@ def _auto_title(content: str, max_len: int = 60) -> str:
     first_line = re.sub(r"\[\d+ imágenes? adjuntas?:[^\]]*\]", "", first_line).strip()
     if len(first_line) > max_len:
         return first_line[:max_len].rsplit(" ", 1)[0] + "…"
-    return first_line or "Nuevo trabajo"
+    return first_line or "(Título pendiente)"
 
 
 async def _llm_title(user_content: str, assistant_content: str = "") -> str:
@@ -52,7 +52,7 @@ async def _llm_title(user_content: str, assistant_content: str = "") -> str:
 
         messages = [
             HayChatMessage.from_system(
-                "Genera un título MUY corto (5-8 palabras máximo) que resuma esta conversación. "
+                "Genera un título MUY corto (5-8 palabras máximo) que resuma el trabajo o chat. "
                 "Solo responde con el título, sin comillas, sin puntuación final, sin explicación."
             ),
             HayChatMessage.from_user(
@@ -146,7 +146,7 @@ async def create_conversation(
     conv = Conversation(
         uuid=str(uuid_module.uuid4()),
         user_id=user.id,
-        title=body.title or "Nuevo trabajo",
+        title=body.title or "(Título pendiente)",
     )
     db.add(conv)
     await db.commit()
@@ -283,7 +283,7 @@ async def add_messages(
         new_msgs.append(msg)
 
     # Auto-generate title using LLM if title is still default
-    if conv.title == "Nuevo trabajo":
+    if conv.title == "(Título pendiente)":
         first_user = next((m for m in body.messages if m.role == "user"), None)
         first_assistant = next((m for m in body.messages if m.role == "assistant"), None)
         if first_user:

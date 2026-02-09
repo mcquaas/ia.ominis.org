@@ -4,6 +4,14 @@ import os
 import sys
 from logging.config import fileConfig
 
+# Load .env before any app imports (so DATABASE_URL_SYNC is available)
+try:
+    from dotenv import load_dotenv
+    env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+    load_dotenv(env_path)
+except ImportError:
+    pass
+
 from sqlalchemy import engine_from_config, pool
 from alembic import context
 
@@ -19,8 +27,12 @@ from app.feedback.models import MessageFeedback  # noqa: F401
 
 config = context.config
 
-# Override sqlalchemy.url from environment if available
+# Override sqlalchemy.url from environment (DATABASE_URL_SYNC or sync equiv of DATABASE_URL)
 database_url = os.environ.get("DATABASE_URL_SYNC")
+if not database_url:
+    async_url = os.environ.get("DATABASE_URL", "")
+    if async_url and "asyncpg" in async_url:
+        database_url = async_url.replace("postgresql+asyncpg://", "postgresql://").replace("postgresql+asyncpg", "postgresql")
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 

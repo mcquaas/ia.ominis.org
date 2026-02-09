@@ -4,7 +4,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 180; // research can take longer
 
-// Modo Investigación: deterministic routing to OpenScholar (per architecture)
+// Modo Investigación: deterministic routing to ominis-2.0 (per architecture)
 const RESEARCH_API = (process.env.BACKEND_URL || 'http://localhost:8000') + '/v1/academic_query-stream';
 
 export async function POST(request: NextRequest) {

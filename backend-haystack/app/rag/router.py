@@ -347,14 +347,14 @@ async def _build_research_plan(question: str, generator) -> dict:
                 None,
                 lambda: generator.run(messages=messages),
             ),
-            timeout=90.0,  # OpenScholar plan call timeout
+            timeout=90.0,  # ominis-2.0 plan call timeout
         )
         replies = result.get("replies", [])
         text = replies[0].text if replies else ""
         plan = _extract_json_object(text) or {}
     except asyncio.TimeoutError:
-        logger.error("Research plan timeout: OpenScholar did not respond in 90s")
-        plan = {"viable": False, "reason": "OpenScholar no respondió a tiempo. Verifica que el servicio esté disponible."}
+        logger.error("Research plan timeout: ominis-2.0 did not respond in 90s")
+        plan = {"viable": False, "reason": "ominis-2.0 no respondió a tiempo. Verifica que el servicio esté disponible."}
     except Exception as e:
         logger.error(f"Research plan error: {e}", exc_info=True)
         plan = {}
@@ -973,16 +973,16 @@ async def query_stream(body: QueryRequest, request: Request):
     )
 
 
-# Public model ID for academic/research mode (OpenScholar)
-ACADEMIC_MODEL_ID = "openscholar"
+# Public model ID for academic/research mode (ominis-2.0-research)
+ACADEMIC_MODEL_ID = "ominis-2.0-research"
 
 
 async def _research_stream_events(body: ResearchRequest):
     """
     Shared event generator for research/academic mode.
-    Uses OpenScholar (academic LLM) exclusively — per architecture doc.
+    Uses ominis-2.0 (academic LLM) exclusively — per architecture doc.
     """
-    logger.info("Research mode: using OpenScholar (academic_query-stream)")
+    logger.info("Research mode: using ominis-2.0 (academic_query-stream)")
     manager = get_pipeline_manager()
     generator = get_openscholar_generator()
     public_model_id = ACADEMIC_MODEL_ID
@@ -1048,6 +1048,7 @@ async def _research_stream_events(body: ResearchRequest):
 
         # Search for sources
         queries = plan.get("queries", [])
+        research_notes: list[str] = []
 
         if not is_phase2:
             # Phase 1: quick search for planning
@@ -1067,8 +1068,8 @@ async def _research_stream_events(body: ResearchRequest):
             total_found = 0
             total_read = 0
 
-            def emit_step(action: str, detail: str, url: str = "", result: str = ""):
-                step = {"action": action, "detail": detail, "url": url, "result": result, "elapsed": int(time.time() - start_time)}
+            def emit_step(action: str, detail: str, url: str = "", result: str = "", reasoning: str = ""):
+                step = {"action": action, "detail": detail, "url": url, "result": result, "reasoning": reasoning, "elapsed": int(time.time() - start_time)}
                 research_steps.append(step)
                 return sse_event({"type": "research_step", "step": step, "progress": {
                     "found": total_found, "read": total_read,
@@ -1077,11 +1078,14 @@ async def _research_stream_events(body: ResearchRequest):
                 }})
 
             # ── PHASE A: SEARCH (no time limit — always completes all queries) ──
-            yield emit_step("plan", f"Plan: {plan.get('focus', '')}", result=f"{len(queries)} consultas")
+            focus = plan.get("focus", "")
+            yield emit_step("plan", f"Plan: {focus}", result=f"{len(queries)} consultas",
+                reasoning=f"Definiendo el plan de investigación para abordar: {focus[:80]}{'...' if len(focus) > 80 else ''}. Consultas iniciales: {len(queries)}.")
 
             for i, q in enumerate(queries):
                 yield sse_event({"type": "status", "message": f"Buscando ({i+1}/{len(queries)}): {q[:50]}..."})
-                yield emit_step("search", f"Buscando: {q}")
+                yield emit_step("search", f"Buscando: {q}",
+                    reasoning=f"Buscaré en PubMed, web y bases locales información sobre: {q[:60]}{'...' if len(q) > 60 else ''}. Es relevante para el tema de {focus[:40]}{'...' if len(focus) > 40 else ''}.")
                 docs = await _gather_sources(
                     question=q, rag_search=body.rag_search,
                     web_search=body.web_search, pubmed_search=body.pubmed_search,
@@ -1089,11 +1093,13 @@ async def _research_stream_events(body: ResearchRequest):
                 )
                 collected.extend(docs)
                 total_found += len(docs)
-                yield emit_step("search_result", f"Resultados: {q[:40]}", result=f"{len(docs)} fuentes")
+                yield emit_step("search_result", f"Resultados: {q[:40]}", result=f"{len(docs)} fuentes",
+                    reasoning=f"Encontré {len(docs)} fuentes. Evaluando cuáles profundizar para el reporte.")
 
             # Refine with user's answers (always runs if answers exist)
             if user_answers.strip():
-                yield emit_step("refine", "Refinando con respuestas del usuario")
+                yield emit_step("refine", "Refinando con respuestas del usuario",
+                    reasoning=f"Refinando con las especificaciones del usuario: {user_answers[:100].replace(chr(10), ' ')}{'...' if len(user_answers) > 100 else ''}")
                 yield sse_event({"type": "status", "message": "Refinando búsqueda..."})
                 extra_queries = await _refine_search_query(
                     question=f"{original_topic}\nEl usuario especificó: {user_answers}",
@@ -1101,7 +1107,8 @@ async def _research_stream_events(body: ResearchRequest):
                 )
                 for q in extra_queries:
                     yield sse_event({"type": "status", "message": f"Buscando: {q[:50]}..."})
-                    yield emit_step("search", f"Refinada: {q}")
+                    yield emit_step("search", f"Refinada: {q}",
+                        reasoning=f"Buscando fuentes refinadas según lo que el usuario indicó: {q[:60]}{'...' if len(q) > 60 else ''}")
                     docs = await _gather_sources(
                         question=q, rag_search=False,
                         web_search=body.web_search, pubmed_search=body.pubmed_search,
@@ -1109,12 +1116,14 @@ async def _research_stream_events(body: ResearchRequest):
                     )
                     collected.extend(docs)
                     total_found += len(docs)
-                    yield emit_step("search_result", f"Resultados: {q[:40]}", result=f"{len(docs)} fuentes")
+                    yield emit_step("search_result", f"Resultados: {q[:40]}", result=f"{len(docs)} fuentes",
+                        reasoning=f"Me interesaron {len(docs)} fuentes adicionales. Las incorporaré al análisis.")
 
             # Deduplicate
             candidates = _deduplicate_and_rank(collected, max_total=40)
             candidates.sort(key=_source_priority)
-            yield emit_step("filter", f"{len(collected)} → {len(candidates)} únicas")
+            yield emit_step("filter", f"{len(collected)} → {len(candidates)} únicas",
+                reasoning=f"Filtrando duplicados: de {len(collected)} resultados a {len(candidates)} fuentes únicas para leer.")
 
             # ── PHASE B: READ ALL SOURCES (web + PubMed full text) ──
             read_deadline = time.time() + 150  # 2.5 min for reading
@@ -1128,22 +1137,26 @@ async def _research_stream_events(body: ResearchRequest):
                 if url and url not in seen_urls:
                     readable.append(d)
 
-            yield emit_step("read_start", f"Leyendo {len(readable)} fuentes de {len(candidates)} candidatas")
+            yield emit_step("read_start", f"Leyendo {len(readable)} fuentes de {len(candidates)} candidatas",
+                reasoning=f"Identificando fuentes para leer en detalle. Tomaré notas de cada una para el reporte final.")
 
             for doc in readable:
                 if time.time() > read_deadline or fetched_count >= body.max_follow_links:
-                    yield emit_step("read_skip", f"Límite alcanzado: {fetched_count}/{body.max_follow_links} leídas")
+                    yield emit_step("read_skip", f"Límite alcanzado: {fetched_count}/{body.max_follow_links} leídas",
+                        reasoning="Respetando el límite de fuentes para garantizar un reporte enfocado y completo.")
                     break
                 url = doc.meta.get("url", "")
                 seen_urls.add(url)
                 title_hint = doc.meta.get("title", "")[:50]
 
                 yield sse_event({"type": "status", "message": f"Leyendo ({fetched_count+1}/{len(readable)}): {title_hint or url[:40]}..."})
-                yield emit_step("read", f"Leyendo: {title_hint}", url=url)
+                yield emit_step("read", f"Leyendo: {title_hint}", url=url,
+                    reasoning=f"Leyendo esta fuente para extraer datos relevantes sobre {focus[:50]}{'...' if len(focus) > 50 else ''}.")
                 try:
                     title, text, links = await _fetch_url_content(url)
                 except Exception as e:
-                    yield emit_step("read_fail", f"Error: {title_hint}", url=url, result=str(e)[:80])
+                    yield emit_step("read_fail", f"Error: {title_hint}", url=url, result=str(e)[:80],
+                        reasoning="No pude extraer contenido de esta fuente. Continuando con otras.")
                     continue
                 if text and len(text) > 50:
                     collected.append(Document(
@@ -1152,13 +1165,17 @@ async def _research_stream_events(body: ResearchRequest):
                     ))
                     fetched_count += 1
                     total_read += 1
-                    preview = text[:120].replace("\n", " ")
-                    yield emit_step("read_done", f"{title or title_hint}", url=url, result=f"{len(text)} chars — {preview}")
+                    preview = text[:200].replace("\n", " ")
+                    note = f"{title or title_hint}: {preview}"
+                    research_notes.append(note)
+                    yield emit_step("read_done", f"{title or title_hint}", url=url, result=f"{len(text)} chars — {preview[:80]}",
+                        reasoning=f"Hallazgo: {preview[:120]}... Tomando nota para citar en el reporte.")
                     for link in links:
                         if _is_trustworthy_domain(link) and link not in seen_urls:
                             follow_urls.append(link)
                 else:
-                    yield emit_step("read_fail", f"Sin contenido útil", url=url, result=f"{len(text or '')} chars")
+                    yield emit_step("read_fail", f"Sin contenido útil", url=url, result=f"{len(text or '')} chars",
+                        reasoning="Contenido no útil. Marcando para no incluir en el reporte.")
 
             # ── PHASE C: FOLLOW TRUSTED LINKS (separate budget) ──
             if follow_urls and time.time() < read_deadline:
@@ -1167,13 +1184,15 @@ async def _research_stream_events(body: ResearchRequest):
                     if link not in seen_urls and len(unique_follows) < body.max_follow_links:
                         unique_follows.append(link)
                 if unique_follows:
-                    yield emit_step("follow", f"Siguiendo {len(unique_follows)} enlaces confiables")
+                    yield emit_step("follow", f"Siguiendo {len(unique_follows)} enlaces confiables",
+                        reasoning=f"Explorando enlaces adicionales de fuentes confiables para ampliar la investigación.")
                     for link in unique_follows:
                         if time.time() > read_deadline or fetched_count >= body.max_follow_links * 2:
                             break
                         seen_urls.add(link)
                         yield sse_event({"type": "status", "message": f"Siguiendo: {link[:50]}..."})
-                        yield emit_step("read", "Enlace", url=link)
+                        yield emit_step("read", "Enlace", url=link,
+                            reasoning="Leyendo enlace secundario para completar el contexto.")
                         title, text, _ = await _fetch_url_content(link)
                         if text:
                             collected.append(Document(
@@ -1182,10 +1201,14 @@ async def _research_stream_events(body: ResearchRequest):
                             ))
                             fetched_count += 1
                             total_read += 1
-                            yield emit_step("read_done", f"{title or link[:40]}", url=link, result=f"{len(text)} chars")
+                            follow_preview = (text or "")[:200].replace("\n", " ")
+                            research_notes.append(f"{title or link[:40]}: {follow_preview}")
+                            yield emit_step("read_done", f"{title or link[:40]}", url=link, result=f"{len(text)} chars",
+                                reasoning="Contenido adicional útil. Incorporando al análisis.")
 
             elapsed_search = int(time.time() - start_time)
-            yield emit_step("complete", "Investigación completa", result=f"{total_found} encontradas, {total_read} leídas, {elapsed_search}s")
+            yield emit_step("complete", "Investigación completa", result=f"{total_found} encontradas, {total_read} leídas, {elapsed_search}s",
+                reasoning=f"Consolidando lo que he encontrado: {total_found} fuentes encontradas, {total_read} leídas. Preparando el reporte con citas específicas.")
             logger.info(f"Deep research: {total_found} found, {total_read} read, {fetched_count} fetched, {elapsed_search}s")
 
         # Final source selection (runs for both Phase 1 and Phase 2)
@@ -1197,19 +1220,22 @@ async def _research_stream_events(body: ResearchRequest):
             before = len(documents)
             documents = [d for d in documents if d.meta.get("url", "") not in excluded_set]
             if is_phase2 and before != len(documents):
-                yield emit_step("filter", f"Excluidas {before - len(documents)} fuentes por el usuario")
+                yield emit_step("filter", f"Excluidas {before - len(documents)} fuentes por el usuario",
+                    reasoning="Respetando las fuentes que el usuario decidió excluir del plan.")
 
         # Phase 2: filter for relevance using LLM before generating report
         if is_phase2 and len(documents) > 5:
             yield sse_event({"type": "status", "message": "Evaluando relevancia de fuentes..."})
-            yield emit_step("relevance", f"Evaluando {len(documents)} fuentes para relevancia")
+            yield emit_step("relevance", f"Evaluando {len(documents)} fuentes para relevancia",
+                reasoning=f"Identificando cuáles de {len(documents)} fuentes son más relevantes para el tema del usuario.")
             documents = await _score_source_relevance(
                 topic=original_topic,
                 user_spec=user_answers,
                 documents=documents,
                 generator=generator,
             )
-            yield emit_step("relevance_done", f"{len(documents)} fuentes relevantes seleccionadas")
+            yield emit_step("relevance_done", f"{len(documents)} fuentes relevantes seleccionadas",
+                reasoning=f"Seleccionadas las {len(documents)} fuentes más pertinentes para elaborar el reporte detallado.")
 
         all_sources_list = [
             _doc_to_source(doc) for doc in documents
@@ -1219,14 +1245,15 @@ async def _research_stream_events(body: ResearchRequest):
         if all_sources_list:
             yield sse_event({"type": "sources", "sources": all_sources_list})
             if is_phase2:
-                yield emit_step("sources", f"{len(all_sources_list)} fuentes para el reporte")
+                yield emit_step("sources", f"{len(all_sources_list)} fuentes para el reporte",
+                    reasoning=f"Generando reporte con {len(all_sources_list)} fuentes, citando científicamente cada origen.")
 
         yield sse_event({
             "type": "status",
             "message": "Generando reporte..." if is_phase2 else "Preparando plan...",
         })
 
-        # Build messages — OpenScholar academic prompt
+        # Build messages — ominis-2.0-research academic prompt
         messages = build_academic_messages(
             question=body.question,
             documents=documents,
@@ -1235,6 +1262,7 @@ async def _research_stream_events(body: ResearchRequest):
             image_description=image_description,
             file_context=body.file_context or "",
             is_phase2=is_phase2,
+            research_notes=research_notes if is_phase2 else None,
         )
 
         # Phase 2 reports; max_tokens must fit in model ctx (8192) minus input
@@ -1259,13 +1287,13 @@ async def _research_stream_events(body: ResearchRequest):
                     ),
                 )
             except Exception as e:
-                logger.error(f"OpenScholar generation failed: {e}", exc_info=True)
+                logger.error(f"ominis-2.0 generation failed: {e}", exc_info=True)
                 raise
             finally:
                 chunk_queue.put_nowait(None)  # unblock consumer loop
             return result
 
-        # Timeout: 150s (OpenScholar HTTP timeout is 120s; extra buffer for slow responses)
+        # Timeout: 150s (ominis-2.0 HTTP timeout is 120s; extra buffer for slow responses)
         gen_task = asyncio.create_task(
             asyncio.wait_for(run_generator(), timeout=150.0)
         )
@@ -1285,7 +1313,7 @@ async def _research_stream_events(body: ResearchRequest):
                     pass
                 yield sse_event({
                     "type": "error",
-                    "message": "OpenScholar no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
+                    "message": "ominis-2.0 no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
                 })
                 return
 
@@ -1301,7 +1329,7 @@ async def _research_stream_events(body: ResearchRequest):
         except asyncio.TimeoutError:
             yield sse_event({
                 "type": "error",
-                "message": "OpenScholar no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
+                "message": "ominis-2.0 no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
             })
             return
         except Exception as e:
@@ -1309,10 +1337,10 @@ async def _research_stream_events(body: ResearchRequest):
             if "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
                 yield sse_event({
                     "type": "error",
-                    "message": "OpenScholar no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
+                    "message": "ominis-2.0 no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
                 })
             else:
-                yield sse_event({"type": "error", "message": f"Error de OpenScholar: {err_msg}"})
+                yield sse_event({"type": "error", "message": f"Error de ominis-2.0: {err_msg}"})
             return
 
         sources_list = _filter_cited_sources(full_answer, all_sources_list)
@@ -1364,7 +1392,7 @@ async def _research_stream_events(body: ResearchRequest):
 async def query_research_stream(body: ResearchRequest, request: Request):
     """
     Research mode streaming endpoint.
-    Uses OpenScholar (academic LLM) exclusively — per architecture.
+    Uses ominis-2.0 (academic LLM) exclusively — per architecture.
     """
     return StreamingResponse(
         _research_stream_events(body),
@@ -1380,8 +1408,8 @@ async def query_research_stream(body: ResearchRequest, request: Request):
 @router.post("/academic_query-stream")
 async def academic_query_stream(body: ResearchRequest, request: Request):
     """
-    Modo Investigación (OpenScholar) — same as query-research-stream.
-    Deterministic routing: research mode always uses OpenScholar.
+    Modo Investigación (ominis-2.0) — same as query-research-stream.
+    Deterministic routing: research mode always uses ominis-2.0.
     """
     return StreamingResponse(
         _research_stream_events(body),

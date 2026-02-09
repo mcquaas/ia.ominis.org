@@ -36,7 +36,7 @@ interface Message {
   images?: string[];
   charts?: ChartData[];
   isReport?: boolean;
-  model?: string;  // e.g. "openscholar" from done event (shown as Investigación)
+  model?: string;  // e.g. "ominis-2.0" from done event (shown as Investigación)
   dbMessageId?: number;  // DB id when persisted (for feedback)
 }
 
@@ -48,6 +48,23 @@ interface ModelOption {
 }
 
 const HISTORY_ENABLED_KEY = "ominis_history_enabled";
+
+/** Decode HTML entities so they display correctly (e.g. &oacute; → ó). Preserves markdown. */
+function decodeHtmlEntities(text: string): string {
+  if (!text || typeof text !== "string") return text;
+  const entities: Record<string, string> = {
+    "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
+    "&nbsp;": "\u00A0", "&aacute;": "á", "&eacute;": "é", "&iacute;": "í", "&oacute;": "ó", "&uacute;": "ú",
+    "&Aacute;": "Á", "&Eacute;": "É", "&Iacute;": "Í", "&Oacute;": "Ó", "&Uacute;": "Ú",
+    "&ntilde;": "ñ", "&Ntilde;": "Ñ", "&uuml;": "ü", "&Uuml;": "Ü",
+    "&copy;": "©", "&reg;": "®", "&trade;": "™",
+  };
+  return text.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|([a-zA-Z]+));/g, (_, dec, hex, name) => {
+    if (dec != null) return String.fromCharCode(parseInt(dec, 10));
+    if (hex != null) return String.fromCharCode(parseInt(hex, 16));
+    return entities[`&${name};`] ?? `&${name};`;
+  });
+}
 
 // ominis-2.0 (Mexican LLM by FUNSALUD)
 // Data is stored in Mexico (S3 mx-central-1), no 3rd party models
@@ -73,7 +90,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const [uploadedFiles, setUploadedFiles] = useState<Array<{ name: string; ext: string; text: string; extracting: boolean }>>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
-  const [researchSteps, setResearchSteps] = useState<Array<{ action: string; detail: string; url?: string; result?: string; elapsed?: number }>>([]);
+  const [researchSteps, setResearchSteps] = useState<Array<{ action: string; detail: string; url?: string; result?: string; reasoning?: string; elapsed?: number }>>([]);
   const [researchProgress, setResearchProgress] = useState<{ found: number; read: number; totalSteps: number; elapsedSeconds: number } | null>(null);
   const [showResearchPanel, setShowResearchPanel] = useState(false);
   const [excludedSources, setExcludedSources] = useState<Set<string>>(new Set());
@@ -579,7 +596,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-medium bg-blue-500 hover:bg-blue-400 text-white rounded-full align-super mx-0.5 transition-colors"
-          title={source.title}
+          title={decodeHtmlEntities(source.title || "")}
         >
           {sourceNum}
         </a>
@@ -644,10 +661,11 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     const bulletMatch = trimmedLine.match(/^[-*•]\s+(.+)$/);
     if (bulletMatch) {
       return (
-        <span key={lIdx} className="block ml-3 relative">
-          <span className="absolute -left-3 text-gray-500">•</span>
-          {renderInlineContent(bulletMatch[1], sources, `p${pIdx}-l${lIdx}`)}
-          {lIdx < totalLines - 1 && <br />}
+        <span key={lIdx} className="flex gap-2 mb-2 first:mt-0">
+          <span className="flex-shrink-0 text-gray-500">•</span>
+          <span className="flex-1 min-w-0">
+            {renderInlineContent(bulletMatch[1], sources, `p${pIdx}-l${lIdx}`)}
+          </span>
         </span>
       );
     }
@@ -656,10 +674,11 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     const numberedMatch = trimmedLine.match(/^(\d+)\.\s+(.+)$/);
     if (numberedMatch) {
       return (
-        <span key={lIdx} className="block ml-4 relative">
-          <span className="absolute -left-4 text-gray-400 text-xs">{numberedMatch[1]}.</span>
-          {renderInlineContent(numberedMatch[2], sources, `p${pIdx}-l${lIdx}`)}
-          {lIdx < totalLines - 1 && <br />}
+        <span key={lIdx} className="flex gap-2 mb-2 first:mt-0">
+          <span className="flex-shrink-0 text-gray-400 text-xs tabular-nums">{numberedMatch[1]}.</span>
+          <span className="flex-1 min-w-0">
+            {renderInlineContent(numberedMatch[2], sources, `p${pIdx}-l${lIdx}`)}
+          </span>
         </span>
       );
     }
@@ -895,7 +914,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     }
 
     return (
-      <div key={keyOffset} className="space-y-3">
+      <div key={keyOffset} className="space-y-4">
         {paragraphs.map((para, pIdx) => {
           const trimmed = para.trim();
           if (!trimmed) return null;
@@ -948,7 +967,8 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
 
   const renderContentWithCitations = (content: string, sources?: Source[]) => {
     const effectiveSrc = sources || [];
-    let contentWithoutReferencias = stripReferenciasBlock(content);
+    const decodedContent = decodeHtmlEntities(content);
+    let contentWithoutReferencias = stripReferenciasBlock(decodedContent);
     contentWithoutReferencias = normalizeRagToOminis(contentWithoutReferencias);
     const formattedContent = formatContentWithCitations(contentWithoutReferencias, effectiveSrc.length > 0 ? effectiveSrc : undefined);
 
@@ -1253,10 +1273,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
                 const eventData = JSON.parse(jsonStr);
 
                 if (eventData.type === "status") {
-                  const statusMsg = eventData.model === "openscholar"
-                    ? `${eventData.message} (OpenScholar)`
-                    : eventData.message;
-                  setLoadingStatus(statusMsg);
+                  setLoadingStatus(eventData.message);
 
                 } else if (eventData.type === "research_step") {
                   if (eventData.step) {
@@ -1281,7 +1298,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
                       id: assistantId,
                       role: "assistant",
                       content: streamedContent,
-                      model: researchModeEnabled ? "openscholar" : undefined,
+                      model: researchModeEnabled ? "ominis-2.0-research" : undefined,
                     };
                     setMessages((prev) => [...prev, newMsg]);
                   } else {
@@ -1425,7 +1442,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
 
   const getFeedbackExtras = (message: Message) => {
     const conv = activeConversationId ? conversations.find((c) => c.id === activeConversationId) : null;
-    const queryTitle = conv?.title ?? messages.find((m) => m.role === "user")?.content.slice(0, 100) ?? "Nuevo trabajo";
+    const queryTitle = conv?.title ?? messages.find((m) => m.role === "user")?.content.slice(0, 100) ?? "(Título pendiente)";
     return {
       model_name: message.model ?? selectedModel,
       query_title: queryTitle,
@@ -1786,10 +1803,10 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
   const lastUserMessageId = [...messages].reverse().find(m => m.role === "user")?.id;
 
   const suggestedQuestions = [
-    "Principales causas de muerte en México",
-    "Fuentes de datos de salud en México",
-    "Diferencia entre diabetes tipo 1 y tipo 2",
-    "Guías clínicas recientes para hipertensión",
+    "¿Cuáles son las principales causas de muerte en México?",
+    "¿Qué fuentes de información sobre Cáncer existen?",
+    "¿Cuáles son los diferentes sistemas de salud y a quiénes atienden?",
+    "¿Qué guías clínicas recientes existen para hipertensión?",
   ];
 
   const hasMessages = messages.length > 0;
@@ -1836,7 +1853,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
   );
 
   return (
-    <section className="h-screen pt-16 relative flex flex-col overflow-hidden overflow-x-hidden max-w-[100vw]">
+    <section className="h-screen pt-[calc(4rem+env(safe-area-inset-top))] relative flex flex-col overflow-hidden overflow-x-hidden w-full max-w-[100vw] min-w-0">
       {/* Background */}
       <div className="absolute inset-0 z-0">
         <Image
@@ -1868,8 +1885,8 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
       />
 
       {/* Content */}
-      <div className={`relative z-10 flex-1 flex flex-col min-h-0 transition-all duration-300 overflow-x-hidden max-w-full ${sidebarOpen ? "lg:pl-72" : "lg:pl-10"}`}>
-        <div className="flex-1 flex flex-col max-w-4xl w-full mx-auto px-4 sm:px-6 min-h-0 max-w-full">
+      <div className={`relative z-10 flex-1 flex flex-col min-h-0 min-w-0 transition-all duration-300 overflow-x-hidden w-full max-w-full ${sidebarOpen ? "lg:pl-72" : "lg:pl-10"}`}>
+        <div className="flex-1 flex flex-col w-full min-w-0 mx-auto px-4 sm:px-6 min-h-0 max-w-full lg:max-w-3xl">
               {/* Mobile toolbar - hamburger (history) and + (new job) at top left */}
               <div className="lg:hidden flex items-center gap-2 py-2 flex-shrink-0 -mx-4 sm:-mx-6 px-4 sm:px-6 border-b border-white/10 mb-1">
                 <button
@@ -1906,7 +1923,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   </h1>
 
                   {/* Centered input for empty state */}
-                  <div className="w-full max-w-2xl">
+                  <div className="w-full max-w-full lg:max-w-2xl">
                     {/* Capsules (research, model, attachments — Ominis/Web/PubMed inside input) */}
                     {(researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
                       <div className="flex items-center justify-center gap-1.5 mb-3 text-xs flex-wrap">
@@ -2118,14 +2135,14 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           <div className="text-sm leading-relaxed">
                             {message.role === "assistant" 
                               ? renderContentWithCitations(message.content, effectiveSources)
-                              : <p className="whitespace-pre-wrap">{message.content}</p>
+                              : <p className="whitespace-pre-wrap">{decodeHtmlEntities(message.content)}</p>
                             }
                           </div>
 
                           {/* Action buttons for assistant messages */}
                           {message.role === "assistant" && (
                             <div className="flex items-center gap-1.5 mt-2 pt-1">
-                              {message.model === "openscholar" && (
+                              {(message.model === "ominis-2.0-research" || message.model === "ominis-2.0") && (
                                 <span className="text-[9px] text-amber-300 bg-amber-500/15 border border-amber-400/30 rounded px-1.5 py-0.5 mr-1" title="Generado con motor Investigación">Investigación</span>
                               )}
                               {message.isReport && (
@@ -2224,7 +2241,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>
                                     );
                                     const displayTitle = (source.title && source.title.toLowerCase() !== "url")
-                                      ? source.title
+                                      ? decodeHtmlEntities(source.title)
                                       : (source.url ? (() => { try { return new URL(source.url).hostname; } catch { return source.url.slice(0, 50); } })() : "Sin título");
                                     return (
                                       <li key={source.displayNum} className={`text-xs ${isExcluded ? "opacity-40" : ""}`}>
@@ -2294,7 +2311,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
                             <span>{researchProgress.found} fuentes · {researchProgress.read} leídas</span>
                             <span className="flex items-center gap-1.5">
-                              <span className="text-amber-300/90 font-medium">OpenScholar</span>
+                              <span className="text-amber-300/90 font-medium">ominis-2.0-research</span>
                               <span>{researchProgress.elapsedSeconds}s</span>
                             </span>
                           </div>
@@ -2335,7 +2352,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
 
               {/* Input Area (bottom — only when chat has messages) */}
               {hasMessages && <div
-                className={`p-3 flex-shrink-0 border-t border-white/10 relative ${isDragOver ? "ring-2 ring-cyan-400/50 bg-cyan-500/5 rounded-xl" : ""}`}
+                className={`p-3 flex-shrink-0 border-t border-white/10 relative w-full max-w-full lg:max-w-2xl lg:mx-auto ${isDragOver ? "ring-2 ring-cyan-400/50 bg-cyan-500/5 rounded-xl" : ""}`}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
@@ -2662,14 +2679,15 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
           )}
           <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
             {researchSteps.map((step, i) => {
-              const iconMap: Record<string, string> = { plan: "📋", search: "🔍", search_result: "📄", refine: "🎯", filter: "⚙️", read: "📖", read_done: "✅", read_fail: "❌", follow: "🔗", complete: "🏁", sources: "📊" };
+              const iconMap: Record<string, string> = { plan: "📋", search: "🔍", search_result: "📄", refine: "🎯", filter: "⚙️", read: "📖", read_done: "✅", read_fail: "❌", read_start: "📚", read_skip: "⏸️", follow: "🔗", complete: "🏁", sources: "📊", relevance: "🎯", relevance_done: "✓" };
               const icon = iconMap[step.action] || "•";
               return (
                 <div key={i} className="text-[11px] leading-relaxed">
                   <div className="flex items-start gap-1.5">
                     <span className="flex-shrink-0 mt-0.5">{icon}</span>
-                    <div className="min-w-0">
+                    <div className="min-w-0 flex-1">
                       <p className="text-gray-300">{step.detail}</p>
+                      {step.reasoning && <p className="text-amber-200/80 italic mt-0.5">{step.reasoning}</p>}
                       {step.result && <p className="text-gray-500">{step.result}</p>}
                       {step.url && (
                         <a href={step.url} target="_blank" rel="noopener noreferrer" className="text-cyan-500 hover:text-cyan-400 truncate block">{step.url.replace(/^https?:\/\//, '').substring(0, 50)}</a>

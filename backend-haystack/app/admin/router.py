@@ -285,16 +285,46 @@ async def list_rag_sources(
     page_size: int = Query(25, alias="pagination[pageSize]"),
     status_filter: Optional[str] = Query(None, alias="filters[status]"),
     source_type_filter: Optional[str] = Query(None, alias="filters[sourceType]"),
-    _: User = Depends(require_role(RoleEnum.admin)),
+    taxonomy_filter: Optional[str] = Query(None, alias="filters[taxonomy]"),
+    search: Optional[str] = Query(None, alias="filters[search]"),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all RAG sources (Admin+)."""
+    """List all RAG sources (Admin+). Supports taxonomy and text search filters."""
     query = select(RAGSource)
 
     if status_filter:
         query = query.where(RAGSource.status == status_filter)
     if source_type_filter:
         query = query.where(RAGSource.source_type == source_type_filter)
+
+    # Taxonomy filter: JSON like {"institucion":["SSA","IMSS"],"tipo_documento":["guia_clinica"]}
+    # Each dimension: source must have at least one of the filter values (OR within dimension)
+    if taxonomy_filter:
+        try:
+            tax = json.loads(taxonomy_filter)
+            if isinstance(tax, dict):
+                for dim, values in tax.items():
+                    if values and isinstance(values, list):
+                        if len(values) == 1:
+                            query = query.where(RAGSource.taxonomy.op("@>")({dim: values}))
+                        else:
+                            # OR: taxonomy contains any of the values
+                            dim_conds = [RAGSource.taxonomy.op("@>")({dim: [v]}) for v in values]
+                            query = query.where(or_(*dim_conds))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Text search in title, description, publisher (coalesce nulls for ILIKE)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        query = query.where(
+            or_(
+                RAGSource.title.ilike(term),
+                func.coalesce(RAGSource.description, "").ilike(term),
+                func.coalesce(RAGSource.publisher, "").ilike(term),
+            )
+        )
 
     # Count total
     count_query = select(func.count()).select_from(query.subquery())
@@ -315,16 +345,40 @@ async def list_rag_sources(
 
 @router.get("/api/rag-sources/taxonomy-schema")
 async def get_taxonomy_schema(
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
 ):
     """Return the taxonomy dimensions and valid values for researcher classification."""
     from app.rag.taxonomy import RAG_TAXONOMY
     return {"taxonomy": RAG_TAXONOMY}
 
 
+@router.get("/api/rag-sources/taxonomy-stats")
+async def get_taxonomy_stats(
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return aggregated counts by taxonomy dimensions (institucion, tipo_documento)."""
+    result = {}
+    for dim in ("institucion", "tipo_documento"):
+        # Safe: dim is from fixed set
+        sql = text(f"""
+            SELECT v AS value, count(*)::int AS cnt
+            FROM rag_sources,
+                 jsonb_array_elements_text(taxonomy->'{dim}') AS v
+            WHERE taxonomy IS NOT NULL
+              AND taxonomy->'{dim}' IS NOT NULL
+              AND jsonb_typeof(taxonomy->'{dim}') = 'array'
+            GROUP BY v
+            ORDER BY cnt DESC
+        """)
+        rows = (await db.execute(sql)).fetchall()
+        result[dim] = {r.value: r.cnt for r in rows}
+    return {"taxonomyStats": result}
+
+
 @router.get("/api/rag-sources/stats", response_model=SourceStatsOut)
 async def get_source_stats(
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """Get RAG source statistics (Admin+)."""
@@ -351,7 +405,7 @@ async def get_source_stats(
 
 @router.get("/api/rag-sources/store-stats", response_model=StoreStatsOut)
 async def get_store_stats_endpoint(
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
 ):
     """Get document store statistics (Admin+)."""
     from app.rag.indexing import get_store_stats
@@ -364,7 +418,7 @@ async def get_store_stats_endpoint(
 
 @router.get("/api/rag-sources/tainacan-preview", response_model=TainacanPreviewResponse)
 async def tainacan_preview(
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
 ):
     """Preview Tainacan collection — shows item count and file type breakdown."""
     from app.rag.tainacan_importer import preview_collection
@@ -385,7 +439,7 @@ async def tainacan_preview(
 @router.post("/api/rag-sources/tainacan-import", response_model=TainacanImportResponse)
 async def tainacan_import(
     body: TainacanImportRequest,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -516,7 +570,7 @@ async def _run_tainacan_item_index(source_id: int, item: dict):
 @router.post("/api/rag-sources/scrape-preview", response_model=ScrapePreviewResponse)
 async def scrape_preview(
     body: ScrapeUrlRequest,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
 ):
     """
     Preview: Scrape a URL and return all PDF links found, without downloading/indexing.
@@ -546,7 +600,7 @@ async def scrape_preview(
 @router.post("/api/rag-sources/scrape-index", response_model=ScrapeIndexResponse)
 async def scrape_and_index(
     body: ScrapeIndexRequest,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -695,7 +749,7 @@ async def _run_pdf_download_and_index(
 @router.post("/api/rag-sources/dataset-preview", response_model=DatasetPreviewResponse)
 async def dataset_preview(
     body: DatasetPreviewRequest,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
 ):
     """
     Preview: Scrape a dataset page (datos.gob.mx, CKAN, etc.) and return all
@@ -729,7 +783,7 @@ async def dataset_preview(
 @router.post("/api/rag-sources/dataset-index", response_model=DatasetIndexResponse)
 async def dataset_index(
     body: DatasetIndexRequest,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -928,7 +982,7 @@ async def _run_dataset_resource_index(
 @router.get("/api/rag-sources/{source_id}")
 async def get_rag_source(
     source_id: int,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """Get a single RAG source (Admin+)."""
@@ -944,7 +998,7 @@ async def get_source_chunks_endpoint(
     source_id: int,
     page: int = Query(1),
     page_size: int = Query(20),
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """List chunks belonging to a specific source (Admin+)."""
@@ -980,7 +1034,7 @@ async def get_source_chunks_endpoint(
 @router.post("/api/rag-sources")
 async def create_rag_source(
     body: dict,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new RAG source (Admin+). Triggers indexing if content or URL is provided."""
@@ -1053,7 +1107,7 @@ async def upload_rag_source(
     title: str = Form(...),
     category: str = Form(""),
     language: str = Form("es"),
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1128,7 +1182,7 @@ async def upload_rag_source(
 async def update_rag_source(
     source_id: int,
     body: dict,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """Update a RAG source (Admin+)."""
@@ -1160,7 +1214,7 @@ async def update_rag_source(
 @router.delete("/api/rag-sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_rag_source(
     source_id: int,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a RAG source and all its chunks from pgvector (Admin+)."""
@@ -1185,7 +1239,7 @@ async def delete_rag_source(
 @router.post("/api/rag-sources/{source_id}/classify")
 async def classify_source_taxonomy(
     source_id: int,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1234,7 +1288,7 @@ async def classify_source_taxonomy(
 @router.post("/api/rag-sources/{source_id}/reindex")
 async def reindex_source(
     source_id: int,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """Trigger re-indexing of a RAG source (Admin+)."""
@@ -1259,7 +1313,7 @@ async def reindex_source(
 @router.post("/api/rag-sources/batch-reindex", response_model=BatchReindexResponse)
 async def batch_reindex(
     body: BatchReindexRequest | None = None,
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1382,7 +1436,7 @@ async def _run_single_reindex(source: RAGSource):
 
 @router.get("/api/system-stats")
 async def get_system_stats(
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """Get system statistics (Admin+)."""
@@ -1446,7 +1500,7 @@ async def get_system_stats(
 
 @router.post("/api/system-stats/refresh")
 async def refresh_system_stats(
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """Refresh system statistics (Admin+)."""
@@ -1456,7 +1510,7 @@ async def refresh_system_stats(
 
 @router.get("/api/system-stats/server-performance")
 async def get_server_performance(
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
 ):
     """Get real-time server performance metrics for the application server (Admin+)."""
     import os
@@ -1616,7 +1670,7 @@ async def get_server_performance(
 
 @router.get("/api/system-stats/gpu-server")
 async def get_gpu_server_performance(
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
 ):
     """Get real-time GPU/LLM server performance metrics (Admin+)."""
     perf: dict = {"status": "unknown"}
@@ -1762,7 +1816,7 @@ async def health_check():
 @router.get("/api/query-logs/aggregated", response_model=QueryStatsOut)
 async def get_aggregated_query_stats(
     period: str = Query("day"),
-    _: User = Depends(require_role(RoleEnum.admin)),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
     db: AsyncSession = Depends(get_db),
 ):
     """Get aggregated query statistics (Admin+)."""

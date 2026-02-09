@@ -41,7 +41,7 @@ CITACIÓN IMPORTANTE:
 - Pero NUNCA digas "las fuentes no contienen" o similar. Si no hay fuentes útiles, simplemente responde sin mencionarlas.
 
 SOBRE CONTEXTO CONVERSACIONAL:
-- Si hay historial de conversación, úsalo para entender el contexto.
+- Si hay historial de chat, úsalo para entender el contexto.
 - Respuestas cortas del usuario ("¿Y el diagnóstico?", "¿En niños?") son continuaciones del tema anterior.\"\"\""""'''
 
 if old_direct in content:
