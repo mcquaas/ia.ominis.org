@@ -1970,31 +1970,20 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         </div>
                       )}
 
-                      <div className="flex items-end gap-2 bg-white/[0.07] backdrop-blur-md border border-white/15 rounded-2xl px-2 py-1.5 shadow-lg shadow-black/10">
+                      <div className="flex flex-col gap-2 bg-white/[0.07] backdrop-blur-md border border-white/15 rounded-2xl px-3 py-2.5 shadow-lg shadow-black/10 focus-within:border-white/30 transition-all">
                         <input ref={fileInputRef} type="file" accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx" multiple onChange={handleFileUpload} className="hidden" />
-                        <div className="relative" ref={plusMenuRef}>
-                          <button
-                            onClick={() => setShowPlusMenu(!showPlusMenu)}
-                            className={`text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-full transition-colors ${showPlusMenu ? "bg-white/10 text-white" : ""}`}
-                            title="Opciones" disabled={isLoading}
-                          >
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-                          </button>
-                          {showPlusMenu && renderPlusMenu()}
-                        </div>
-                        <div className="flex-1 flex flex-col md:flex-row md:items-end gap-2 min-w-0">
-                          <textarea
-                            ref={inputRef}
-                            value={input}
-                            onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
-                            onKeyDown={handleKeyDown} onPaste={handlePaste}
-                            placeholder="Pregunta sobre salud en México..."
-                            className="flex-1 min-w-0 min-h-[2.5rem] flex-shrink-0 bg-transparent border-none px-2 py-1.5 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
-                            style={{ maxHeight: "300px" }}
-                            rows={1}
-                            disabled={isLoading}
-                          />
-                          <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-start md:justify-end w-full md:w-auto">
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <div className="relative" ref={plusMenuRef}>
+                            <button
+                              onClick={() => setShowPlusMenu(!showPlusMenu)}
+                              className={`text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-full transition-colors ${showPlusMenu ? "bg-white/10 text-white" : ""}`}
+                              title="Opciones" disabled={isLoading}
+                            >
+                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                            </button>
+                            {showPlusMenu && renderPlusMenu()}
+                          </div>
+                          <div className="flex-1 flex items-center gap-1 flex-wrap min-w-0">
                             {ragSearchEnabled && (
                               <span className="inline-flex items-center gap-0.5 text-cyan-400 bg-cyan-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
                                 Ominis
@@ -2020,14 +2009,25 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                               </span>
                             )}
                           </div>
+                          <button
+                            onClick={sendMessage}
+                            disabled={isLoading || (!input.trim() && uploadedImages.length === 0 && uploadedFiles.length === 0)}
+                            className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                          >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+                          </button>
                         </div>
-                        <button
-                          onClick={sendMessage}
-                          disabled={isLoading || (!input.trim() && uploadedImages.length === 0 && uploadedFiles.length === 0)}
-                          className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-                        >
-                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
-                        </button>
+                        <textarea
+                          ref={inputRef}
+                          value={input}
+                          onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
+                          onKeyDown={handleKeyDown} onPaste={handlePaste}
+                          placeholder="Pregunta sobre salud en México..."
+                          className="w-full min-h-[2.5rem] bg-transparent border-none px-0 py-0 text-sm text-white placeholder-gray-400 focus:outline-none resize-none overflow-y-auto"
+                          style={{ maxHeight: "300px" }}
+                          rows={1}
+                          disabled={isLoading}
+                        />
                       </div>
                     </div>
 
@@ -2434,37 +2434,25 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   </div>
                 )}
 
-                {/* Input Row — full width including + and send */}
-                <div className="flex items-end gap-2 bg-white/5 border border-white/10 rounded-2xl px-2 py-2.5 focus-within:border-white/30 transition-all">
+                {/* Input Row — textarea full width, expands frame upward */}
+                <div className="flex flex-col gap-2 bg-white/5 border border-white/10 rounded-2xl px-3 py-2.5 focus-within:border-white/30 transition-all">
                   <input ref={fileInputRef} type="file" accept="image/*,.pdf,.csv,.xls,.xlsx,.doc,.docx" multiple onChange={handleFileUpload} className="hidden" />
-                  <div className="relative" ref={plusMenuRef}>
-                    <button
-                      onClick={() => setShowPlusMenu(!showPlusMenu)}
-                      className={`text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-full transition-colors ${showPlusMenu ? "bg-white/10 text-white" : ""}`}
-                      title="Opciones"
-                      disabled={isLoading}
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                      </svg>
-                    </button>
-                    {showPlusMenu && renderPlusMenu()}
-                  </div>
-
-                  <div className="flex-1 flex flex-col md:flex-row md:items-end gap-2 min-w-0">
-                    <textarea
-                      ref={inputRef}
-                      value={input}
-                      onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
-                      onKeyDown={handleKeyDown}
-                      onPaste={handlePaste}
-                      placeholder="Pregunta sobre salud en México..."
-                      className="flex-1 min-w-0 min-h-[2.5rem] flex-shrink-0 bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0 px-2"
-                      style={{ maxHeight: "300px" }}
-                      rows={1}
-                      disabled={isLoading}
-                    />
-                    <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-start md:justify-end w-full md:w-auto">
+                  {/* Row 1: + | tags | send */}
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <div className="relative" ref={plusMenuRef}>
+                      <button
+                        onClick={() => setShowPlusMenu(!showPlusMenu)}
+                        className={`text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-full transition-colors ${showPlusMenu ? "bg-white/10 text-white" : ""}`}
+                        title="Opciones"
+                        disabled={isLoading}
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                        </svg>
+                      </button>
+                      {showPlusMenu && renderPlusMenu()}
+                    </div>
+                    <div className="flex-1 flex items-center gap-1 flex-wrap min-w-0">
                       {ragSearchEnabled && (
                         <span className="inline-flex items-center gap-0.5 text-cyan-400 bg-cyan-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
                           Ominis
@@ -2490,16 +2478,29 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         </span>
                       )}
                     </div>
+                    <button
+                      onClick={sendMessage}
+                      disabled={isLoading || (!input.trim() && uploadedImages.length === 0 && uploadedFiles.length === 0)}
+                      className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                      </svg>
+                    </button>
                   </div>
-                  <button
-                    onClick={sendMessage}
-                    disabled={isLoading || (!input.trim() && uploadedImages.length === 0 && uploadedFiles.length === 0)}
-                    className="bg-blue-600 hover:bg-blue-700 text-white p-2.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-                  >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                    </svg>
-                  </button>
+                  {/* Row 2: full-width textarea (grows, expands frame upward) */}
+                  <textarea
+                    ref={inputRef}
+                    value={input}
+                    onChange={(e) => { setInput(e.target.value); e.target.style.height = "1px"; e.target.style.height = Math.min(Math.max(e.target.scrollHeight, 40), 300) + "px"; }}
+                    onKeyDown={handleKeyDown}
+                    onPaste={handlePaste}
+                    placeholder="Pregunta sobre salud en México..."
+                    className="w-full min-h-[2.5rem] bg-transparent border-none text-sm text-white placeholder-gray-500 focus:outline-none resize-none overflow-y-auto py-0"
+                    style={{ maxHeight: "300px" }}
+                    rows={1}
+                    disabled={isLoading}
+                  />
                 </div>
               </div>}
 
