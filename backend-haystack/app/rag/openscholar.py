@@ -111,7 +111,7 @@ def get_openscholar_128k_generator() -> OpenAIChatGenerator:
     base_url = url.rstrip("/")
     if not base_url.endswith("/v1"):
         base_url = f"{base_url}/v1"
-    timeout = getattr(settings, "openscholar_timeout", 120) or 120
+    timeout = getattr(settings, "openscholar_128k_timeout", 300) or getattr(settings, "openscholar_timeout", 120) or 300
     generator = OpenAIChatGenerator(
         model=getattr(settings, "openscholar_model", "openscholar"),
         api_key=Secret.from_token(settings.openscholar_api_key or "dummy"),

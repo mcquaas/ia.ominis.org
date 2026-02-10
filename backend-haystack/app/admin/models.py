@@ -116,3 +116,22 @@ class SystemStat(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+class ChatDefaults(Base):
+    """Singleton: default toggles for the chat (Investigación, Ominis/RAG, PubMed, Web). Applied when a user opens the chat."""
+
+    __tablename__ = "chat_defaults"
+
+    id = Column(Integer, primary_key=True, default=1)
+    research_mode = Column(Boolean, default=False, nullable=False)
+    rag_search = Column(Boolean, default=True, nullable=False)
+    web_search = Column(Boolean, default=True, nullable=False)
+    pubmed_search = Column(Boolean, default=True, nullable=False)
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )

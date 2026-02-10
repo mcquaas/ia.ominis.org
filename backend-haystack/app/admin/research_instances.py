@@ -41,7 +41,8 @@ def _get_ec2_client():
 def get_research_instance_status() -> dict[str, str | None]:
     """
     Return current EC2 state for each research instance.
-    Keys: "openscholar", "openscholar_128k". Values: "running" | "stopped" | "pending" | None (not configured).
+    Keys: "openscholar", "openscholar_128k".
+    Values: "running" | "stopped" | "pending" | "error" (ID set but AWS call failed) | None (not configured).
     """
     result: dict[str, str | None] = {"openscholar": None, "openscholar_128k": None}
     ids = {}
@@ -64,6 +65,8 @@ def get_research_instance_status() -> dict[str, str | None]:
             result[key] = state_by_id.get(iid, "unknown")
     except Exception as e:
         logger.warning("Failed to get research instance status: %s", e)
+        for key in ids:
+            result[key] = "error"
     return result
 
 
