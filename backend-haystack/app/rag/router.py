@@ -43,11 +43,43 @@ from app.rag.web_search import search_web
 from app.rag.pubmed_search import search_pubmed
 from app.rag.vision import analyze_image
 from app.rag.scraper import BROWSER_HEADERS
-from app.rag.openscholar import get_openscholar_generator, build_academic_messages
+from app.admin.research_instances import get_active_research_key
+from app.rag.openscholar import (
+    MODEL_CTX_LIMIT,
+    MODEL_CTX_LIMIT_128K,
+    build_academic_messages,
+    get_openscholar_128k_generator,
+    get_openscholar_generator,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 router = APIRouter(tags=["query"])
+
+# Approximate chars per token for input estimation (Spanish/English)
+CHARS_PER_TOKEN = 4
+# Reserve tokens so completion never exceeds model context
+OUTPUT_TOKEN_BUFFER = 128
+MIN_OUTPUT_TOKENS = 1024
+MAX_OUTPUT_TOKENS_CAP = 4096
+
+
+def _estimate_input_tokens_from_messages(messages) -> int:
+    """Estimate total input tokens from ChatMessage list (for context limit check)."""
+    total_chars = 0
+    for m in messages:
+        content = getattr(m, "content", None)
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if hasattr(block, "text"):
+                    total_chars += len(block.text or "")
+                else:
+                    total_chars += len(str(block))
+        else:
+            total_chars += len(str(content or ""))
+    return max(0, total_chars // CHARS_PER_TOKEN)
 
 
 # --- Request/Response schemas ---
@@ -974,19 +1006,37 @@ async def query_stream(body: QueryRequest, request: Request):
     )
 
 
-# Public model ID for academic/research mode (ominis-2.0-research)
+# Public model IDs
 ACADEMIC_MODEL_ID = "ominis-2.0-research"
+ACADEMIC_MODEL_ID_128K = "ominis-2.0-research-128k"
+
+
+def _get_research_generator_and_model_id():
+    """
+    Choose research generator and model id: 128K if running, else 8K if running, else Ollama (ominis-2.0).
+    Returns (generator, public_model_id).
+    """
+    manager = get_pipeline_manager()
+    active = get_active_research_key()
+    if active == "openscholar_128k":
+        try:
+            return get_openscholar_128k_generator(), ACADEMIC_MODEL_ID_128K
+        except ValueError:
+            pass
+    if active == "openscholar":
+        return get_openscholar_generator(), ACADEMIC_MODEL_ID
+    # Both research instances off: use normal Ollama (ominis-2.0)
+    return manager.get_generator(), "ominis-2.0"
 
 
 async def _research_stream_events(body: ResearchRequest):
     """
     Shared event generator for research/academic mode.
-    Uses ominis-2.0 (academic LLM) exclusively — per architecture doc.
+    Routes to 128K if that instance is running, else OpenScholar 8K if running, else Ollama (ominis-2.0).
     """
-    logger.info("Research mode: using ominis-2.0 (academic_query-stream)")
     manager = get_pipeline_manager()
-    generator = get_openscholar_generator()
-    public_model_id = ACADEMIC_MODEL_ID
+    generator, public_model_id = _get_research_generator_and_model_id()
+    logger.info("Research mode: using %s", public_model_id)
 
     start_time = time.time()
     full_answer = ""
@@ -1267,8 +1317,17 @@ async def _research_stream_events(body: ResearchRequest):
             excluded_topics=body.excluded_topics or None,
         )
 
-        # Phase 2 reports; max_tokens must fit in model ctx (8192) minus input
-        research_gen_kwargs = {"max_tokens": 4096, "temperature": 0.3} if is_phase2 else {}
+        # Phase 2: set max_tokens so input + output never exceed model context
+        if is_phase2:
+            ctx_limit = MODEL_CTX_LIMIT_128K if public_model_id == ACADEMIC_MODEL_ID_128K else MODEL_CTX_LIMIT
+            input_tokens = _estimate_input_tokens_from_messages(messages)
+            space_for_output = ctx_limit - input_tokens - OUTPUT_TOKEN_BUFFER
+            max_tokens_cap = 8192 if public_model_id == ACADEMIC_MODEL_ID_128K else MAX_OUTPUT_TOKENS_CAP
+            max_tokens = max(MIN_OUTPUT_TOKENS, min(max_tokens_cap, space_for_output))
+            research_gen_kwargs = {"max_tokens": max_tokens, "temperature": 0.3}
+            logger.info("Research report: input_tokens≈%s, max_tokens=%s", input_tokens, max_tokens)
+        else:
+            research_gen_kwargs = {}
 
         chunk_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
 
@@ -1397,7 +1456,7 @@ async def _research_stream_events(body: ResearchRequest):
                 answer=answer_for_client,
                 sources=sources_list,
                 elapsed_ms=elapsed_ms,
-                model_used=ACADEMIC_MODEL_ID,
+                model_used=public_model_id,
                 rag_search=body.rag_search,
                 web_search=body.web_search,
                 pubmed_search=body.pubmed_search,

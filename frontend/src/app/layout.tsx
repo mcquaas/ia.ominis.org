@@ -11,7 +11,10 @@ const inter = Inter({
   subsets: ["latin"],
 });
 
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://ai.ominis.org";
+
 export const metadata: Metadata = {
+  metadataBase: new URL(SITE_URL),
   title: "Ominis AI - Asistente para la Investigación en Salud",
   description: "Asistente de IA para investigadores en salud. Accede a fuentes de datos, estudios y documentación sobre el sistema de salud en México.",
   keywords: ["investigación en salud", "IA", "inteligencia artificial", "datos de salud", "México", "FUNSALUD", "OMINIS"],
@@ -23,6 +26,20 @@ export const metadata: Metadata = {
     siteName: "Ominis AI",
     locale: "es_MX",
     type: "website",
+    images: [
+      {
+        url: "/ominis-preview.png",
+        width: 1200,
+        height: 630,
+        alt: "Ominis AI",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Ominis AI - Asistente para la Investigación en Salud",
+    description: "Asistente de IA para investigadores en salud. Fuentes de datos y estudios sobre el sistema de salud en México.",
+    images: ["/ominis-preview.png"],
   },
 };
 

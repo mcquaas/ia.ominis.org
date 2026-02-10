@@ -13,6 +13,7 @@ from haystack.components.generators.chat import OpenAIChatGenerator
 
 # Model context limit; reserve tokens for system prompt and output
 MODEL_CTX_LIMIT = 8192
+MODEL_CTX_LIMIT_128K = 32768  # Long-context instance (can be 128000 if model supports it)
 TARGET_INPUT_TOKENS = 5500  # Leave ~600 system, ~2000 output
 CHARS_PER_TOKEN = 4  # Approximate for Spanish/English
 
@@ -94,6 +95,32 @@ def get_openscholar_generator() -> OpenAIChatGenerator:
             "temperature": settings.openscholar_temperature,
             "top_p": 0.9,
             "max_tokens": 4096,  # Model max ctx is 8192; leave room for input tokens
+        },
+    )
+    return generator
+
+
+def get_openscholar_128k_generator() -> OpenAIChatGenerator:
+    """
+    Create OpenScholar 128K generator (long-context research instance).
+    Uses openscholar_128k_api_url; same API shape as 8K.
+    """
+    url = getattr(settings, "openscholar_128k_api_url", "") or ""
+    if not url:
+        raise ValueError("openscholar_128k_api_url not configured")
+    base_url = url.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+    timeout = getattr(settings, "openscholar_timeout", 120) or 120
+    generator = OpenAIChatGenerator(
+        model=getattr(settings, "openscholar_model", "openscholar"),
+        api_key=Secret.from_token(settings.openscholar_api_key or "dummy"),
+        api_base_url=base_url,
+        timeout=timeout,
+        generation_kwargs={
+            "temperature": getattr(settings, "openscholar_temperature", 0.2),
+            "top_p": 0.9,
+            "max_tokens": 8192,  # Long context allows larger output
         },
     )
     return generator

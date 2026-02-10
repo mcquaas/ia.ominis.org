@@ -105,12 +105,23 @@ class Settings(BaseSettings):
     # SINBA OLAP Cubes
     sinba_xmla_url: str = ""  # XMLA endpoint URL (e.g., http://server/olap/msmdpump.dll)
 
-    # OpenScholar (Modo Investigación - academic research LLM)
+    # OpenScholar (Modo Investigación - academic research LLM, ominis-2.0-research)
     openscholar_api_url: str = "http://44.217.135.115:8000"  # OpenAI-compatible vLLM endpoint
     openscholar_model: str = "openscholar"  # Must match vLLM --served-model-name
     openscholar_temperature: float = 0.2
     openscholar_api_key: str = "dummy"  # vLLM often accepts any value
     openscholar_timeout: float = 120  # seconds before HTTP timeout (prevents indefinite hang)
+    openscholar_instance_id: str = ""  # EC2 instance ID for start/stop (e.g. i-xxx)
+
+    # OpenScholar 128K (long-context research, ominis-2.0-research-128k) — optional second GPU
+    openscholar_128k_api_url: str = ""  # e.g. http://<eip>:8000
+    openscholar_128k_instance_id: str = ""  # EC2 instance ID for start/stop
+    openscholar_128k_auto_stop_minutes: int = 60  # Auto-stop 128k instance after this many minutes
+
+    # AWS (for research instance start/stop; region where GPU instances live)
+    aws_region_gpu: str = "us-east-1"
+    aws_access_key_id: str = ""  # Optional; if empty, use default credential chain
+    aws_secret_access_key: str = ""
 
     # CORS
     frontend_url: str = "http://localhost:3000"

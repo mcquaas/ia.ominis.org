@@ -14,6 +14,9 @@ import {
   getStoreStats,
   getServerPerformance,
   getGpuServerPerformance,
+  getResearchInstanceStatus,
+  startResearchInstance,
+  stopResearchInstance,
 } from '@/services/auth';
 import { listFeedback, REASON_CATEGORIES } from '@/services/feedback';
 import type { FeedbackOut } from '@/services/feedback';
@@ -103,6 +106,8 @@ export default function DashboardPage() {
   const [loadingData, setLoadingData] = useState(true);
   const [error, setError] = useState('');
   const [actionMsg, setActionMsg] = useState('');
+  const [researchInstances, setResearchInstances] = useState<{ openscholar: string | null; openscholar_128k: string | null }>({ openscholar: null, openscholar_128k: null });
+  const [researchInstanceAction, setResearchInstanceAction] = useState<'openscholar' | 'openscholar_128k' | null>(null);
 
   // Feedback state (admin/superadmin)
   const [feedbackData, setFeedbackData] = useState<FeedbackOut[]>([]);
@@ -136,6 +141,13 @@ export default function DashboardPage() {
       if (perfRes.status === 'fulfilled') setServerPerf(perfRes.value as typeof serverPerf);
       if (gpuRes.status === 'fulfilled') setGpuPerf(gpuRes.value as typeof gpuPerf);
 
+      if (isAdmin) {
+        try {
+          const ri = await getResearchInstanceStatus();
+          setResearchInstances(ri);
+        } catch { /* non-critical */ }
+      }
+
       if (isSuperAdmin) {
         try {
           const u = await getUsers();
@@ -148,7 +160,7 @@ export default function DashboardPage() {
     } finally {
       setLoadingData(false);
     }
-  }, [isSuperAdmin]);
+  }, [isSuperAdmin, isAdmin]);
 
   const loadFeedback = useCallback(async () => {
     if (!isAdmin) return;
@@ -201,6 +213,34 @@ export default function DashboardPage() {
   const handleChangeRole = async (id: number, newRole: string) => {
     try { await updateUser(id, { role: newRole } as unknown as Partial<User>); showMsg(`Rol actualizado a ${newRole}`); loadData(); }
     catch { showMsg('Error al cambiar rol'); }
+  };
+
+  const handleResearchInstanceStart = async (key: 'openscholar' | 'openscholar_128k') => {
+    setResearchInstanceAction(key);
+    try {
+      await startResearchInstance(key);
+      showMsg(key === 'openscholar_128k' ? 'Iniciando modelo 128K. Se apagará en 60 min.' : 'Iniciando OpenScholar (ominis-2.0-research).');
+      const ri = await getResearchInstanceStatus();
+      setResearchInstances(ri);
+    } catch (e) {
+      showMsg(e instanceof Error ? e.message : 'Error al iniciar');
+    } finally {
+      setResearchInstanceAction(null);
+    }
+  };
+
+  const handleResearchInstanceStop = async (key: 'openscholar' | 'openscholar_128k') => {
+    setResearchInstanceAction(key);
+    try {
+      await stopResearchInstance(key);
+      showMsg('Apagando instancia.');
+      const ri = await getResearchInstanceStatus();
+      setResearchInstances(ri);
+    } catch (e) {
+      showMsg(e instanceof Error ? e.message : 'Error al apagar');
+    } finally {
+      setResearchInstanceAction(null);
+    }
   };
 
   // ---------- guard ----------
@@ -347,6 +387,73 @@ export default function DashboardPage() {
             </div>
           </section>
         )}
+
+        {/* ===== Modelos de investigación (Admin) ===== */}
+        <section className="mb-6">
+          <Section title="Modelos de investigación">
+            <p className="text-[11px] text-gray-500 mb-4">
+              Si ambos están apagados, las investigaciones usan el modelo normal (ominis-2.0). El modelo 128K se apaga solo a los 60 min.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* OpenScholar 8K — ominis-2.0-research */}
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-sm font-semibold text-white">ominis-2.0-research</h4>
+                  <StatusBadge status={researchInstances.openscholar || 'no configurado'} />
+                </div>
+                <p className="text-[10px] text-gray-500 mb-3">OpenScholar 8K (contexto 8K)</p>
+                <div className="flex gap-2">
+                  {(researchInstances.openscholar === 'stopped' || researchInstances.openscholar === 'stopping' || !researchInstances.openscholar) && (
+                    <button
+                      onClick={() => handleResearchInstanceStart('openscholar')}
+                      disabled={researchInstanceAction !== null}
+                      className="px-3 py-1.5 text-xs bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 rounded-lg hover:bg-cyan-500/30 disabled:opacity-50"
+                    >
+                      {researchInstanceAction === 'openscholar' ? 'Iniciando…' : 'Iniciar'}
+                    </button>
+                  )}
+                  {(researchInstances.openscholar === 'running' || researchInstances.openscholar === 'pending') && (
+                    <button
+                      onClick={() => handleResearchInstanceStop('openscholar')}
+                      disabled={researchInstanceAction !== null}
+                      className="px-3 py-1.5 text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg hover:bg-amber-500/30 disabled:opacity-50"
+                    >
+                      {researchInstanceAction === 'openscholar' ? 'Apagando…' : 'Apagar'}
+                    </button>
+                  )}
+                </div>
+              </div>
+              {/* 128K — ominis-2.0-research-128k */}
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-sm font-semibold text-white">ominis-2.0-research-128k</h4>
+                  <StatusBadge status={researchInstances.openscholar_128k || 'no configurado'} />
+                </div>
+                <p className="text-[10px] text-gray-500 mb-3">Contexto largo (se apaga a los 60 min)</p>
+                <div className="flex gap-2">
+                  {(researchInstances.openscholar_128k === 'stopped' || researchInstances.openscholar_128k === 'stopping' || !researchInstances.openscholar_128k) && (
+                    <button
+                      onClick={() => handleResearchInstanceStart('openscholar_128k')}
+                      disabled={researchInstanceAction !== null}
+                      className="px-3 py-1.5 text-xs bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 rounded-lg hover:bg-cyan-500/30 disabled:opacity-50"
+                    >
+                      {researchInstanceAction === 'openscholar_128k' ? 'Iniciando…' : 'Iniciar modelo 128K'}
+                    </button>
+                  )}
+                  {(researchInstances.openscholar_128k === 'running' || researchInstances.openscholar_128k === 'pending') && (
+                    <button
+                      onClick={() => handleResearchInstanceStop('openscholar_128k')}
+                      disabled={researchInstanceAction !== null}
+                      className="px-3 py-1.5 text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg hover:bg-amber-500/30 disabled:opacity-50"
+                    >
+                      {researchInstanceAction === 'openscholar_128k' ? 'Apagando…' : 'Apagar'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </Section>
+        </section>
 
         {/* ===== GPU Server Performance ===== */}
         {gpuPerf && (

@@ -15,7 +15,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status  # Query used for research-instances
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,6 +47,11 @@ from app.admin.schemas import (
     TainacanImportRequest,
     TainacanImportResponse,
     TainacanPreviewResponse,
+)
+from app.admin.research_instances import (
+    get_research_instance_status,
+    start_research_instance,
+    stop_research_instance,
 )
 from app.auth.dependencies import require_role
 from app.auth.models import RoleEnum, User
@@ -1808,6 +1813,45 @@ async def health_check():
         "servers": {"primary": inference_status, "secondary": secondary_status},
         "lastCheck": now.isoformat(),
     }
+
+
+# ==================== Research GPU Instances (Admin) ====================
+
+
+@router.get("/api/research-instances/status")
+async def research_instances_status(
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+):
+    """Get EC2 status for OpenScholar (ominis-2.0-research) and 128K (ominis-2.0-research-128k)."""
+    return get_research_instance_status()
+
+
+@router.post("/api/research-instances/start")
+async def research_instances_start(
+    key: str = Query(..., description="openscholar or openscholar_128k"),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+):
+    """Start the given research GPU instance. 128K auto-stops after configured minutes."""
+    if key not in ("openscholar", "openscholar_128k"):
+        raise HTTPException(status_code=400, detail="key must be openscholar or openscholar_128k")
+    result = start_research_instance(key)
+    if result["status"] == "error":
+        raise HTTPException(status_code=502, detail=result["message"])
+    return result
+
+
+@router.post("/api/research-instances/stop")
+async def research_instances_stop(
+    key: str = Query(..., description="openscholar or openscholar_128k"),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+):
+    """Stop the given research GPU instance."""
+    if key not in ("openscholar", "openscholar_128k"):
+        raise HTTPException(status_code=400, detail="key must be openscholar or openscholar_128k")
+    result = stop_research_instance(key)
+    if result["status"] == "error":
+        raise HTTPException(status_code=502, detail=result["message"])
+    return result
 
 
 # ==================== Query Logs ====================

@@ -666,6 +666,32 @@ export async function getServerPerformance(): Promise<{
 }
 
 /**
+ * Get research GPU instance status (OpenScholar 8K and 128K)
+ * Admin only.
+ */
+export async function getResearchInstanceStatus(): Promise<{
+  openscholar: string | null;
+  openscholar_128k: string | null;
+}> {
+  return fetchStrapi('/api/research-instances/status');
+}
+
+/**
+ * Start a research GPU instance (openscholar | openscholar_128k). 128K auto-stops after 60 min.
+ * Admin only.
+ */
+export async function startResearchInstance(key: 'openscholar' | 'openscholar_128k'): Promise<{ status: string; message: string }> {
+  return fetchStrapi(`/api/research-instances/start?key=${encodeURIComponent(key)}`, { method: 'POST' });
+}
+
+/**
+ * Stop a research GPU instance. Admin only.
+ */
+export async function stopResearchInstance(key: 'openscholar' | 'openscholar_128k'): Promise<{ status: string; message: string }> {
+  return fetchStrapi(`/api/research-instances/stop?key=${encodeURIComponent(key)}`, { method: 'POST' });
+}
+
+/**
  * Get GPU/LLM server performance metrics
  */
 export async function getGpuServerPerformance(): Promise<{
