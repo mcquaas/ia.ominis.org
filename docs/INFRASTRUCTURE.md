@@ -29,7 +29,30 @@ Complete inventory of servers, services, domains, and IPs for the ia.ominis.org 
 | **GPU Ollama** | `i-067dd350739288262` | 3.213.91.241 | us-east-1 | — | Ominis-2.0, mistral, vision models |
 | **OpenScholar** | `i-0bf5937dec0d1298f` | 44.217.135.115 | us-east-1 | g5.2xlarge | Academic LLM (vLLM) |
 | **Falcon GPU** | `i-00f7b0692c3219b46` | 18.235.182.22 | us-east-1 | g5.2xlarge | Falcon-40B (Ollama) |
+| **OpenScholar 128K** | `i-0c44f34ab8b001d5a` | 54.159.123.159 | us-east-1 | g5.2xlarge | Research LLM, contexto largo (vLLM) |
 | **XMLA Proxy** | `i-02122ca56de796e2e` | 78.12.97.79 | — | — | SINBA XMLA proxy (port 5001) |
+
+---
+
+## GPU servers — sizes and model capacities
+
+Los cuatro servidores con GPU que usamos para inferencia LLM:
+
+| Nombre | Instance ID | Tipo | GPU | VRAM | IP | Uso en Ominis |
+|--------|-------------|------|-----|------|-----|----------------|
+| **ominis-ollama-gpu** | `i-067dd350739288262` | g4dn.xlarge | 1× NVIDIA T4 | 16 GB | 3.213.91.241 | Ollama: Ominis 2.0 (Qwen) y Ominis 2.0 Clinic (BioMistral). Un solo servidor para ambos modelos. |
+| **ominis-falcon-gpu** | `i-00f7b0692c3219b46` | g5.2xlarge | 1× NVIDIA A10G | 24 GB | 18.235.182.22 | **Retirado** — Falcon no habla español; apagar y no usar en el chat. |
+| **ominis-openscholar** | `i-0bf5937dec0d1298f` | g5.2xlarge | 1× NVIDIA A10G | 24 GB | 44.217.135.115 | vLLM: OpenSciLM/Llama-3.1_OpenScholar-8B. Modo investigación 8K (ominis-2.0-research). |
+| **ominis-openscholar-128k** | `i-0c44f34ab8b001d5a` | g5.2xlarge | 1× NVIDIA A10G | 24 GB | 54.159.123.159 | vLLM: modelo contexto largo. Modo investigación 128K (ominis-2.0-research-128k). |
+
+**Capacidad por tipo de instancia:**
+
+- **g4dn.xlarge (T4 16 GB):** 7B en FP16/Q8; 7B–13B en Q4. Ideal para BioMistral, Mistral 7B, Llama 7B.
+- **g5.2xlarge (A10G 24 GB):** 7B–13B en FP16; hasta ~40B en Q4 (p. ej. Falcon-40B). OpenScholar 8B y variantes de contexto largo.
+
+**Config en repo:** `config/ollama_gpu_server.txt`, `config/falcon_gpu_server.txt`, `config/openscholar_server.txt`, `config/openscholar_128k_server.txt`.
+
+**Ruteo y conexión a cada LLM:** ver [LLM_ROUTING.md](LLM_ROUTING.md) (qué URL y modelo usa cada `model_id`, por qué a veces "no responden").
 
 ---
 
@@ -79,6 +102,13 @@ Complete inventory of servers, services, domains, and IPs for the ia.ominis.org 
 | Ollama | 11434 | http://18.235.182.22:11434 |
 | Model | — | falcon-40b-instruct |
 
+### OpenScholar 128K (54.159.123.159)
+
+| Service | Port | URL |
+|---------|------|-----|
+| vLLM OpenAI API | 8000 | http://54.159.123.159:8000 |
+| Model | — | Long-context research (ominis-2.0-research-128k) |
+
 ### XMLA Proxy (78.12.97.79)
 
 | Service | Port | URL |
@@ -106,7 +136,7 @@ Complete inventory of servers, services, domains, and IPs for the ia.ominis.org 
 | `config/frontend_server.txt` | Frontend IP, domain |
 | `config/haystack_backend.txt` | Haystack backend IP |
 | `config/ollama_server.txt` | Old RAG API (Mexico) |
-| `config/ollama_gpu_server.txt` | GPU Ollama (US) |
+| `config/ollama_gpu_server.txt` | GPU Ollama (US) — BioMistral / ominis-2.0-fast (puede estar apagado) |
 | `config/openscholar_server.txt` | OpenScholar server |
 | `config/falcon_gpu_server.txt` | Falcon GPU server |
 | `config/xmla_proxy_server.txt` | XMLA proxy |

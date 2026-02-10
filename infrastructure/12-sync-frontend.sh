@@ -20,6 +20,14 @@ else
     API_URL="https://api.ominis.org/query"
 fi
 
+# Backend URL for server-side API routes (query-stream, research, etc.)
+if [ -f "$SCRIPT_DIR/../config/haystack_backend.txt" ]; then
+    source "$SCRIPT_DIR/../config/haystack_backend.txt"
+    BACKEND_URL="${BACKEND_URL:-https://api.ominis.org}"
+else
+    BACKEND_URL="${BACKEND_URL:-https://api.ominis.org}"
+fi
+
 KEY_FILE="$SCRIPT_DIR/../config/ominis-frontend-key.pem"
 SSH_USER="ubuntu"
 REMOTE_DIR="/opt/ominis-frontend"
@@ -57,9 +65,6 @@ done
 
 # Strapi API URL (v1 prefix for Strapi endpoints)
 STRAPI_URL="${STRAPI_URL:-https://api.ominis.org}"
-
-# Backend URL for server-side API routes (Haystack backend)
-BACKEND_URL="${BACKEND_URL:-https://api.ominis.org}"
 
 # Create .env.local with correct API endpoint
 echo ""
