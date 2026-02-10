@@ -28,23 +28,39 @@ class ModelConfig:
 def _build_model_registry() -> dict[str, ModelConfig]:
     """
     Build the model registry. Called after Settings are loaded so that
-    env vars like OLLAMA_URL and FALCON_OLLAMA_URL are available.
+    env vars like OLLAMA_URL and OLLAMA_CLINIC_URL are available.
+    Chat models: ominis-2.0 (Qwen, general), ominis-2.0-clinic (BioMistral, medical).
+    Research models (ominis-2.0-research, ominis-2.0-research-128k) are not in the registry;
+    they are handled in the router and use OpenScholar.
     """
     settings = get_settings()
 
     return {
         "ominis-2.0": ModelConfig(
             id="ominis-2.0",
-            ollama_model="ominis-2.0",
+            ollama_model=settings.ollama_model,
             public_id="ominis-2.0",
             display_name="Ominis 2.0",
-            description="Modelo de IA especializado en salud, desarrollado por FUNSALUD.",
+            description="Uso general (Qwen). Modelo de IA especializado en salud, desarrollado por FUNSALUD.",
             ollama_url=settings.ollama_url,
             temperature=0.3,
             num_predict=2048,
             context_window=4096,
-            num_gpu=-1,  # All layers on GPU (14B fits entirely in A10G 24GB)
+            num_gpu=-1,
             is_default=True,
+        ),
+        "ominis-2.0-clinic": ModelConfig(
+            id="ominis-2.0-clinic",
+            ollama_model=settings.ollama_clinic_model,
+            public_id="ominis-2.0-clinic",
+            display_name="Ominis 2.0 Clinic",
+            description="Conocimiento médico (BioMistral 7B). Ideal para preguntas clínicas.",
+            ollama_url=(settings.ollama_clinic_url or settings.ollama_url).strip() or settings.ollama_url,
+            temperature=0.3,
+            num_predict=1024,
+            context_window=4096,
+            num_gpu=-1,
+            is_default=False,
         ),
     }
 
@@ -87,11 +103,13 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiration_minutes: int = 1440  # 24 hours
 
-    # Ollama - each model can run on a different Ollama server
-    ollama_url: str = "http://localhost:11434"           # Default server (ominis-2.0 / BioMistral)
-    falcon_ollama_url: str = "http://localhost:11434"    # Falcon-40B server (separate GPU)
-    ollama_model: str = "ominis-2.0"                     # Default model ID
-    vision_model: str = "minicpm-v"                      # Vision model for image analysis
+    # Ollama - chat models (g4dn typically serves both Qwen and BioMistral)
+    ollama_url: str = "http://localhost:11434"           # Main server for ominis-2.0 (Qwen) and vision
+    ollama_model: str = "qwen2.5:14b"                    # Ollama model name for ominis-2.0 (general use)
+    ollama_clinic_url: str = ""                          # Optional: separate URL for clinic. If empty, uses ollama_url (same g4dn)
+    ollama_clinic_model: str = "biomistral"              # Ollama model name for ominis-2.0-clinic (BioMistral 7B, medical)
+    ollama_timeout: float = 90                            # HTTP timeout (seconds) for Ollama calls
+    vision_model: str = "minicpm-v"                      # Vision model for image analysis (uses ollama_url)
 
     # Embeddings
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -117,8 +135,13 @@ class Settings(BaseSettings):
     openscholar_128k_api_url: str = ""  # e.g. http://<eip>:8000
     openscholar_128k_instance_id: str = ""  # EC2 instance ID for start/stop
     openscholar_128k_auto_stop_minutes: int = 60  # Auto-stop 128k instance after this many minutes
+    openscholar_128k_timeout: float = 300  # HTTP timeout for 128K (long reports need more than 120s)
 
-    # AWS (for research instance start/stop; region where GPU instances live)
+    # LLM GPU instance (start/stop from dashboard): g4dn runs both Qwen and BioMistral
+    ollama_instance_id: str = ""        # EC2 instance ID for Ominis server (ominis-2.0), e.g. g4dn from config/ollama_gpu_server.txt
+    ollama_clinic_instance_id: str = "" # EC2 instance ID for Ominis Clinic (ominis-2.0-clinic). Often same as ollama_instance_id (one g4dn)
+
+    # AWS (for research/LLM instance start/stop; region where GPU instances live)
     aws_region_gpu: str = "us-east-1"
     aws_access_key_id: str = ""  # Optional; if empty, use default credential chain
     aws_secret_access_key: str = ""
@@ -135,6 +158,7 @@ class Settings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": False,
+        "extra": "ignore",  # Ignore deprecated keys (e.g. falcon_ollama_url, ollama_fast_*) in existing .env
     }
 
     @property

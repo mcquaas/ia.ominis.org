@@ -434,9 +434,11 @@ class PipelineManager:
                 f"-> Ollama at {ollama_url}"
             )
 
+            timeout = getattr(settings, "ollama_timeout", 90) or 90
             generator = OllamaChatGenerator(
                 model=model_cfg.ollama_model,
                 url=ollama_url,
+                timeout=timeout,
                 generation_kwargs={
                     "temperature": model_cfg.temperature,
                     "num_predict": model_cfg.num_predict,
@@ -453,9 +455,11 @@ class PipelineManager:
                 f"Creating Vision OllamaChatGenerator "
                 f"(model={settings.vision_model}) -> {vision_url}"
             )
+            vision_timeout = getattr(settings, "ollama_timeout", 90) or 90
             self._vision_generator = OllamaChatGenerator(
                 model=settings.vision_model,
                 url=vision_url,
+                timeout=vision_timeout,
                 generation_kwargs={
                     "temperature": 0.3,
                     "num_predict": 1024,

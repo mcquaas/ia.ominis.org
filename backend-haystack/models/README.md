@@ -1,56 +1,32 @@
 # LLM Models for Ominis Health
 
-This directory contains Ollama Modelfiles for the LLM models used by the backend.
+Ollama model names and routing are configured in `app/config.py`, not by Modelfiles in this directory.
 
-## Available Models
+## Chat models (user selects in UI)
 
-### 1. ominis-2.0 (BioMistral) — Default
-- **Base**: BioMistral-7B (`cniongolo/biomistral`)
-- **Parameters**: 7B
-- **VRAM**: ~6GB (quantized)
-- **Strength**: Medical/health domain specialization, Spanish language
-- **Already deployed** on the existing Ollama instance
+| UI option | model_id | Ollama model name (env) | Typical server |
+|-----------|----------|-------------------------|----------------|
+| **Ominis 2.0** (uso general) | ominis-2.0 | OLLAMA_MODEL (default `qwen2.5:14b`) | g4dn |
+| **Ominis 2.0 Clinic** (conocimiento médico) | ominis-2.0-clinic | OLLAMA_CLINIC_MODEL (default `biomistral`) | g4dn (same) |
 
-### 2. falcon-40b-instruct (Falcon) — New
-- **Base**: Falcon-40B-Instruct by TII (Technology Innovation Institute)
-- **Parameters**: 40B
-- **VRAM**: ~24GB (Q4_K_M quantized) / ~80GB (FP16)
-- **Strength**: Strong general reasoning, multilingual, instruction-following
+Research options (Ominis 2.0 Research, Ominis 2.0 Research 128K) use OpenScholar vLLM, not Ollama.
 
-## Setup
+## g4dn setup (one server for both chat models)
 
-### Pull and create the Falcon model
+On the g4dn instance (see `config/ollama_gpu_server.txt`):
 
 ```bash
-# Option A: Pull the pre-built model from Ollama library
-ollama pull falcon:40b-instruct
+# Qwen for general use
+ollama pull qwen2.5:14b
 
-# Then create the customized version with our system prompt:
-ollama create falcon-40b-instruct -f models/falcon-40b-instruct.Modelfile
+# BioMistral for medical
+ollama pull biomistral   # or cniongolo/biomistral
 
-# Option B: If falcon:40b-instruct is not in the Ollama library,
-# use a quantized GGUF from HuggingFace:
-# 1. Download: https://huggingface.co/TheBloke/falcon-40b-instruct-GGUF
-# 2. Update the FROM line in the Modelfile to point to the .gguf file
-# 3. Run: ollama create falcon-40b-instruct -f models/falcon-40b-instruct.Modelfile
+ollama list   # should show both
 ```
 
-### Verify both models are available
+Backend .env: `OLLAMA_URL=http://<g4dn-ip>:11434`, `OLLAMA_MODEL=qwen2.5:14b`, `OLLAMA_CLINIC_MODEL=biomistral`. Leave `OLLAMA_CLINIC_URL` empty to use the same server.
 
-```bash
-ollama list
-# Should show both:
-#   ominis-2.0        ...
-#   falcon-40b-instruct  ...
+## Falcon (deprecated)
 
-# Quick test
-ollama run ominis-2.0 "Hola, ¿qué es la diabetes?"
-ollama run falcon-40b-instruct "Hola, ¿qué es la diabetes?"
-```
-
-## Adding new models
-
-1. Create a Modelfile in this directory
-2. Add the model to `MODEL_REGISTRY` in `app/config.py`
-3. Restart the backend — the new pipeline is built automatically at startup
-4. The frontend model selector picks up new models via `GET /v1/models`
+Falcon-40B is no longer in the chat registry. The Modelfile in this directory is kept for reference only. The Falcon GPU server can be shut down.

@@ -11,7 +11,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.admin.models import QueryLog, RAGSource, SourceStatus, SystemStat
+from app.admin.models import ChatDefaults, QueryLog, RAGSource, SourceStatus, SystemStat
 from app.admin.schemas import (
     BatchReindexRequest,
     BatchReindexResponse,
@@ -52,6 +52,12 @@ from app.admin.research_instances import (
     get_research_instance_status,
     start_research_instance,
     stop_research_instance,
+)
+from app.admin.llm_instances import (
+    LlmInstanceKey,
+    get_llm_instance_status,
+    start_llm_instance,
+    stop_llm_instance,
 )
 from app.auth.dependencies import require_role
 from app.auth.models import RoleEnum, User
@@ -1792,14 +1798,18 @@ async def health_check():
         pass
 
     secondary_status = "offline"
-    try:
-        import urllib.request
-        req = urllib.request.Request(f"{settings.falcon_ollama_url}/api/tags")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            if resp.status == 200:
-                secondary_status = "online"
-    except Exception:
-        pass
+    clinic_url = (getattr(settings, "ollama_clinic_url", None) or "").strip()
+    if clinic_url and clinic_url != settings.ollama_url.rstrip("/"):
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"{clinic_url.rstrip('/')}/api/tags")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    secondary_status = "online"
+        except Exception:
+            pass
+    else:
+        secondary_status = inference_status  # same server as primary
 
     if inference_status == "online" or secondary_status == "online":
         overall = "healthy"
@@ -1820,9 +1830,9 @@ async def health_check():
 
 @router.get("/api/research-instances/status")
 async def research_instances_status(
-    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+    _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
 ):
-    """Get EC2 status for OpenScholar (ominis-2.0-research) and 128K (ominis-2.0-research-128k)."""
+    """Get EC2 status for OpenScholar (ominis-2.0-research) and 128K. Any authenticated user can see which research models are available."""
     return get_research_instance_status()
 
 
@@ -1852,6 +1862,144 @@ async def research_instances_stop(
     if result["status"] == "error":
         raise HTTPException(status_code=502, detail=result["message"])
     return result
+
+
+# ==================== LLM GPU Instances (ominis-2.0, ominis-2.0-clinic) ====================
+
+
+@router.get("/api/llm-instances/status")
+async def llm_instances_status(
+    _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
+):
+    """Get EC2 status for ominis-2.0 (Qwen) and ominis-2.0-clinic (BioMistral) servers (often same g4dn)."""
+    return get_llm_instance_status()
+
+
+@router.post("/api/llm-instances/start")
+async def llm_instances_start(
+    key: str = Query(..., description="ominis-2.0 or ominis-2.0-clinic"),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+):
+    """Start the given LLM GPU instance."""
+    if key not in ("ominis-2.0", "ominis-2.0-clinic"):
+        raise HTTPException(status_code=400, detail="key must be ominis-2.0 or ominis-2.0-clinic")
+    result = start_llm_instance(cast(LlmInstanceKey, key))
+    if result["status"] == "error":
+        raise HTTPException(status_code=502, detail=result["message"])
+    return result
+
+
+@router.post("/api/llm-instances/stop")
+async def llm_instances_stop(
+    key: str = Query(..., description="ominis-2.0 or ominis-2.0-clinic"),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+):
+    """Stop the given LLM GPU instance."""
+    if key not in ("ominis-2.0", "ominis-2.0-clinic"):
+        raise HTTPException(status_code=400, detail="key must be ominis-2.0 or ominis-2.0-clinic")
+    result = stop_llm_instance(cast(LlmInstanceKey, key))
+    if result["status"] == "error":
+        raise HTTPException(status_code=502, detail=result["message"])
+    return result
+
+
+# ==================== LLM servers status (which Ollama URLs are up and which models they have) ====================
+
+
+@router.get("/api/llm-servers/status")
+async def llm_servers_status(
+    _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
+):
+    """
+    Check each configured Ollama server (OLLAMA_URL, OLLAMA_CLINIC_URL).
+    Returns reachable status and list of model names (Qwen, BioMistral, etc.).
+    """
+    servers = []
+    clinic_url = (getattr(settings, "ollama_clinic_url", None) or "").strip() or None
+    urls_to_check = [
+        ("OLLAMA_URL (ominis-2.0 / vision)", settings.ollama_url.strip() or None),
+        ("OLLAMA_CLINIC_URL (ominis-2.0-clinic)", clinic_url),
+    ]
+    seen = set()
+    for label, url in urls_to_check:
+        if not url:
+            note = "not set (ominis-2.0-clinic uses OLLAMA_URL)" if "CLINIC" in label else "not set"
+            servers.append({"label": label, "url": None, "reachable": False, "models": [], "note": note})
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        base = url.rstrip("/")
+        entry = {"label": label, "url": base, "reachable": False, "models": []}
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{base}/api/tags")
+                if r.status_code == 200:
+                    entry["reachable"] = True
+                    entry["models"] = [m.get("name", "") for m in r.json().get("models", []) if m.get("name")]
+        except Exception as e:
+            entry["error"] = str(e)[:120]
+        servers.append(entry)
+    return {"servers": servers}
+
+
+# ==================== Chat defaults (for all users) ====================
+
+
+@router.get("/api/chat-defaults")
+async def get_chat_defaults(db: AsyncSession = Depends(get_db)):
+    """Return default toggles for the chat (Investigación, Ominis, PubMed, Web). Public — used when the chat loads."""
+    result = await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        # First run: create default row
+        row = ChatDefaults(
+            id=1,
+            research_mode=False,
+            rag_search=True,
+            web_search=True,
+            pubmed_search=True,
+        )
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return {
+        "research_mode": row.research_mode,
+        "rag_search": row.rag_search,
+        "web_search": row.web_search,
+        "pubmed_search": row.pubmed_search,
+    }
+
+
+@router.patch("/api/chat-defaults")
+async def update_chat_defaults(
+    body: dict,
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update default toggles for the chat. Admin only."""
+    result = await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = ChatDefaults(id=1, research_mode=False, rag_search=True, web_search=True, pubmed_search=True)
+        db.add(row)
+        await db.flush()
+    if "research_mode" in body:
+        row.research_mode = bool(body["research_mode"])
+    if "rag_search" in body:
+        row.rag_search = bool(body["rag_search"])
+    if "web_search" in body:
+        row.web_search = bool(body["web_search"])
+    if "pubmed_search" in body:
+        row.pubmed_search = bool(body["pubmed_search"])
+    await db.commit()
+    await db.refresh(row)
+    return {
+        "research_mode": row.research_mode,
+        "rag_search": row.rag_search,
+        "web_search": row.web_search,
+        "pubmed_search": row.pubmed_search,
+    }
 
 
 # ==================== Query Logs ====================
