@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
         history: body.history,
         image: body.images && body.images.length > 0 ? body.images[0] : undefined,
         model: body.model || undefined,
+        research_model: body.research_model || undefined,
         rag_search: body.rag_search !== false,
         web_search: body.web_search !== false,
         pubmed_search: body.pubmed_search !== false,
@@ -68,9 +69,11 @@ export async function POST(request: NextRequest) {
       }
 
       await writer.close();
-    } catch (error) {
-      console.error('[academic-query-stream] Error:', error);
-      const errorEvent = `data: ${JSON.stringify({ type: 'error', message: 'Connection error' })}\n\n`;
+    } catch (error: unknown) {
+      const err = error as Error & { code?: string };
+      console.error('[academic-query-stream] Error:', err?.message || err, 'code=', (err as Error & { code?: string }).code, 'BACKEND_URL=', (process.env.BACKEND_URL || '').replace(/\d+\.\d+\.\d+\.\d+/, '***'));
+      const reason = err?.code === 'ECONNREFUSED' ? 'Backend no disponible (ECONNREFUSED)' : err?.code === 'ETIMEDOUT' ? 'Timeout al conectar con el backend' : err?.message || 'Connection error';
+      const errorEvent = `data: ${JSON.stringify({ type: 'error', message: reason })}\n\n`;
       try {
         await writer.write(encoder.encode(errorEvent));
         await writer.close();

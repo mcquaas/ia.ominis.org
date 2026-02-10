@@ -69,9 +69,11 @@ export async function POST(request: NextRequest) {
       }
 
       await writer.close();
-    } catch (error) {
-      console.error('[query-stream] Error:', error);
-      const errorEvent = `data: ${JSON.stringify({ type: 'error', message: 'Connection error' })}\n\n`;
+    } catch (error: unknown) {
+      const err = error as Error & { code?: string };
+      console.error('[query-stream] Error:', err);
+      const reason = err?.code === 'ECONNREFUSED' ? 'Backend no disponible (ECONNREFUSED)' : err?.code === 'ETIMEDOUT' ? 'Timeout al conectar con el backend' : err?.message || 'Connection error';
+      const errorEvent = `data: ${JSON.stringify({ type: 'error', message: reason })}\n\n`;
       try {
         await writer.write(encoder.encode(errorEvent));
         await writer.close();

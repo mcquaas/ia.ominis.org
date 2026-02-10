@@ -117,8 +117,14 @@ async function fetchStrapi<T>(
   });
   
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: 'Request failed' }));
-    throw new Error(error.error?.message || error.message || 'Request failed');
+    const error = await response.json().catch(() => ({ detail: null, message: null }));
+    let msg = 'Request failed';
+    if (error) {
+      if (typeof error.detail === 'string') msg = error.detail;
+      else if (Array.isArray(error.detail) && error.detail[0]?.msg) msg = error.detail.map((d: { msg?: string }) => d.msg).join('; ');
+      else if (error.error?.message || error.message) msg = error.error?.message || error.message;
+    }
+    throw new Error(msg);
   }
   
   return response.json();
@@ -689,6 +695,79 @@ export async function startResearchInstance(key: 'openscholar' | 'openscholar_12
  */
 export async function stopResearchInstance(key: 'openscholar' | 'openscholar_128k'): Promise<{ status: string; message: string }> {
   return fetchStrapi(`/api/research-instances/stop?key=${encodeURIComponent(key)}`, { method: 'POST' });
+}
+
+/**
+ * Get status of each configured Ollama server and the list of model names on each.
+ * Use to verify servers (e.g. BioMistral, Qwen, Falcon) and that config matches reality.
+ */
+export async function getLlmServersStatus(): Promise<{
+  servers: Array<{
+    label: string;
+    url: string | null;
+    reachable: boolean;
+    models: string[];
+    note?: string;
+    error?: string;
+  }>;
+}> {
+  return fetchStrapi('/api/llm-servers/status');
+}
+
+/**
+ * Get LLM GPU instance status (ominis-2.0 and ominis-2.0-clinic). Admin/researcher.
+ */
+export async function getLlmInstanceStatus(): Promise<{
+  'ominis-2.0': string | null;
+  'ominis-2.0-clinic': string | null;
+}> {
+  return fetchStrapi('/api/llm-instances/status');
+}
+
+/**
+ * Start an LLM GPU instance (ominis-2.0 | ominis-2.0-clinic). Admin only.
+ */
+export async function startLlmInstance(key: 'ominis-2.0' | 'ominis-2.0-clinic'): Promise<{ status: string; message: string }> {
+  return fetchStrapi(`/api/llm-instances/start?key=${encodeURIComponent(key)}`, { method: 'POST' });
+}
+
+/**
+ * Stop an LLM GPU instance (ominis-2.0 | ominis-2.0-clinic). Admin only.
+ */
+export async function stopLlmInstance(key: 'ominis-2.0' | 'ominis-2.0-clinic'): Promise<{ status: string; message: string }> {
+  return fetchStrapi(`/api/llm-instances/stop?key=${encodeURIComponent(key)}`, { method: 'POST' });
+}
+
+/**
+ * Get default chat toggles (Investigación, Ominis, PubMed, Web). Public — used when the chat loads.
+ */
+export async function getChatDefaults(): Promise<{
+  research_mode: boolean;
+  rag_search: boolean;
+  web_search: boolean;
+  pubmed_search: boolean;
+}> {
+  return fetchStrapi('/api/chat-defaults');
+}
+
+/**
+ * Update default chat toggles. Admin only.
+ */
+export async function updateChatDefaults(defaults: {
+  research_mode?: boolean;
+  rag_search?: boolean;
+  web_search?: boolean;
+  pubmed_search?: boolean;
+}): Promise<{
+  research_mode: boolean;
+  rag_search: boolean;
+  web_search: boolean;
+  pubmed_search: boolean;
+}> {
+  return fetchStrapi('/api/chat-defaults', {
+    method: 'PATCH',
+    body: JSON.stringify(defaults),
+  });
 }
 
 /**

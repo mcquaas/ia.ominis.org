@@ -17,6 +17,12 @@ import {
   getResearchInstanceStatus,
   startResearchInstance,
   stopResearchInstance,
+  getLlmInstanceStatus,
+  startLlmInstance,
+  stopLlmInstance,
+  getLlmServersStatus,
+  getChatDefaults,
+  updateChatDefaults,
 } from '@/services/auth';
 import { listFeedback, REASON_CATEGORIES } from '@/services/feedback';
 import type { FeedbackOut } from '@/services/feedback';
@@ -46,15 +52,16 @@ function StatCard({ label, value, sub, color = 'cyan' }: { label: string; value:
 // ---------- status badge ----------
 function StatusBadge({ status }: { status: string }) {
   const s = status?.toLowerCase();
+  const label = s === 'error' ? 'error AWS (permisos EC2)' : status;
   const cls =
-    s === 'online' || s === 'healthy' || s === 'active'
-      ? 'bg-green-500/20 text-green-300 border-green-500/30'
-      : s === 'degraded' || s === 'pending' || s === 'indexing'
+    s === 'online' || s === 'healthy' || s === 'active' || s === 'running' || s === 'stopped'
+      ? s === 'running' ? 'bg-green-500/20 text-green-300 border-green-500/30' : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+      : s === 'degraded' || s === 'pending' || s === 'indexing' || s === 'stopping'
         ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
         : 'bg-red-500/20 text-red-300 border-red-500/30';
   return <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border ${cls}`}>
-    <span className={`w-1.5 h-1.5 rounded-full ${s === 'online' || s === 'healthy' || s === 'active' ? 'bg-green-400' : s === 'degraded' || s === 'pending' || s === 'indexing' ? 'bg-amber-400 animate-pulse' : 'bg-red-400'}`} />
-    {status}
+    <span className={`w-1.5 h-1.5 rounded-full ${s === 'online' || s === 'healthy' || s === 'active' || s === 'running' ? 'bg-green-400' : s === 'degraded' || s === 'pending' || s === 'indexing' || s === 'stopping' || s === 'stopped' ? 'bg-amber-400' : 'bg-red-400'}`} />
+    {label}
   </span>;
 }
 
@@ -68,6 +75,48 @@ function Section({ title, children, action }: { title: string; children: React.R
       </div>
       <div className="p-5">{children}</div>
     </div>
+  );
+}
+
+// ---------- capsule On/Off switch for research instance ----------
+function ResearchInstanceSwitch({
+  status,
+  loading,
+  onToggle,
+  labelOff = 'Off',
+  labelOn = 'On',
+}: {
+  status: string | null;
+  loading: boolean;
+  onToggle: () => void;
+  labelOff?: string;
+  labelOn?: string;
+}) {
+  const isOn = status === 'running' || status === 'pending';
+  const isOff = status === 'stopped' || status === 'stopping' || status === null || status === 'error';
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      disabled={loading}
+      className="inline-flex rounded-full border border-white/20 bg-white/5 p-0.5 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 disabled:opacity-50"
+      aria-pressed={isOn}
+    >
+      <span
+        className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+          isOff ? 'bg-cyan-500/30 text-cyan-300' : 'text-gray-500'
+        }`}
+      >
+        {loading && !isOn ? '…' : labelOff}
+      </span>
+      <span
+        className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+          isOn ? 'bg-green-500/30 text-green-300' : 'text-gray-500'
+        }`}
+      >
+        {loading && isOn ? '…' : labelOn}
+      </span>
+    </button>
   );
 }
 
@@ -106,8 +155,16 @@ export default function DashboardPage() {
   const [loadingData, setLoadingData] = useState(true);
   const [error, setError] = useState('');
   const [actionMsg, setActionMsg] = useState('');
+  const [actionError, setActionError] = useState('');
   const [researchInstances, setResearchInstances] = useState<{ openscholar: string | null; openscholar_128k: string | null }>({ openscholar: null, openscholar_128k: null });
   const [researchInstanceAction, setResearchInstanceAction] = useState<'openscholar' | 'openscholar_128k' | null>(null);
+  const [llmInstances, setLlmInstances] = useState<{ 'ominis-2.0': string | null; 'ominis-2.0-clinic': string | null }>({ 'ominis-2.0': null, 'ominis-2.0-clinic': null });
+  const [llmInstanceAction, setLlmInstanceAction] = useState<'ominis-2.0' | 'ominis-2.0-clinic' | null>(null);
+  const [chatDefaults, setChatDefaults] = useState<{ research_mode: boolean; rag_search: boolean; web_search: boolean; pubmed_search: boolean } | null>(null);
+  const [chatDefaultsSaving, setChatDefaultsSaving] = useState(false);
+  const [llmServersStatus, setLlmServersStatus] = useState<{
+    servers: Array<{ label: string; url: string | null; reachable: boolean; models: string[]; note?: string; error?: string }>;
+  } | null>(null);
 
   // Feedback state (admin/superadmin)
   const [feedbackData, setFeedbackData] = useState<FeedbackOut[]>([]);
@@ -143,8 +200,16 @@ export default function DashboardPage() {
 
       if (isAdmin) {
         try {
-          const ri = await getResearchInstanceStatus();
+          const [ri, li, cd, lss] = await Promise.all([
+            getResearchInstanceStatus(),
+            getLlmInstanceStatus(),
+            getChatDefaults(),
+            getLlmServersStatus(),
+          ]);
           setResearchInstances(ri);
+          setLlmInstances(li);
+          setChatDefaults(cd);
+          setLlmServersStatus(lss);
         } catch { /* non-critical */ }
       }
 
@@ -199,7 +264,8 @@ export default function DashboardPage() {
   }, [authLoading, isAdmin, loadData]);
 
   // ---------- User actions ----------
-  const showMsg = (msg: string) => { setActionMsg(msg); setTimeout(() => setActionMsg(''), 4000); };
+  const showMsg = (msg: string) => { setActionError(''); setActionMsg(msg); setTimeout(() => setActionMsg(''), 4000); };
+  const showError = (msg: string) => { setActionMsg(''); setActionError(msg); setTimeout(() => setActionError(''), 6000); };
 
   const handleToggleBlock = async (id: number, blocked: boolean) => {
     try { await toggleUserBlock(id, blocked); showMsg(blocked ? 'Usuario bloqueado' : 'Usuario desbloqueado'); loadData(); }
@@ -223,7 +289,9 @@ export default function DashboardPage() {
       const ri = await getResearchInstanceStatus();
       setResearchInstances(ri);
     } catch (e) {
-      showMsg(e instanceof Error ? e.message : 'Error al iniciar');
+      const msg = e instanceof Error ? e.message : String(e);
+      showError(msg || 'Error al iniciar');
+      console.error('Research instance start failed:', e);
     } finally {
       setResearchInstanceAction(null);
     }
@@ -237,9 +305,54 @@ export default function DashboardPage() {
       const ri = await getResearchInstanceStatus();
       setResearchInstances(ri);
     } catch (e) {
-      showMsg(e instanceof Error ? e.message : 'Error al apagar');
+      showError(e instanceof Error ? e.message : 'Error al apagar');
     } finally {
       setResearchInstanceAction(null);
+    }
+  };
+
+  const handleLlmInstanceStart = async (key: 'ominis-2.0' | 'ominis-2.0-clinic') => {
+    setLlmInstanceAction(key);
+    try {
+      await startLlmInstance(key);
+      showMsg(key === 'ominis-2.0-clinic' ? 'Iniciando Ominis 2.0 Clinic (BioMistral).' : 'Iniciando servidor Ominis 2.0 (Qwen).');
+      const li = await getLlmInstanceStatus();
+      setLlmInstances(li);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : 'Error al iniciar');
+    } finally {
+      setLlmInstanceAction(null);
+    }
+  };
+
+  const handleLlmInstanceStop = async (key: 'ominis-2.0' | 'ominis-2.0-clinic') => {
+    setLlmInstanceAction(key);
+    try {
+      await stopLlmInstance(key);
+      showMsg('Apagando servidor LLM.');
+      const li = await getLlmInstanceStatus();
+      setLlmInstances(li);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : 'Error al apagar');
+    } finally {
+      setLlmInstanceAction(null);
+    }
+  };
+
+  const handleChatDefaultToggle = async (key: 'research_mode' | 'rag_search' | 'web_search' | 'pubmed_search') => {
+    if (!chatDefaults) return;
+    const next = !chatDefaults[key];
+    setChatDefaults((prev) => (prev ? { ...prev, [key]: next } : prev));
+    setChatDefaultsSaving(true);
+    try {
+      const updated = await updateChatDefaults({ [key]: next });
+      setChatDefaults(updated);
+      showMsg('Opciones por defecto guardadas.');
+    } catch (e) {
+      setChatDefaults(chatDefaults);
+      showError(e instanceof Error ? e.message : 'Error al guardar');
+    } finally {
+      setChatDefaultsSaving(false);
     }
   };
 
@@ -281,6 +394,7 @@ export default function DashboardPage() {
         </div>
 
         {error && <div className="mb-4 p-3 bg-red-500/20 border border-red-500/30 rounded-lg text-red-300 text-sm">{error}</div>}
+        {actionError && <div className="mb-4 p-3 bg-red-500/20 border border-red-500/30 rounded-lg text-red-300 text-sm">{actionError}</div>}
         {actionMsg && <div className="mb-4 p-3 bg-green-500/20 border border-green-500/30 rounded-lg text-green-300 text-sm">{actionMsg}</div>}
 
         {/* ===== System Health ===== */}
@@ -388,67 +502,215 @@ export default function DashboardPage() {
           </section>
         )}
 
+        {/* ===== Servidores LLM (ominis-2.0, ominis-2.0-clinic) ===== */}
+        <section className="mb-6">
+          <Section title="Servidores LLM">
+            {llmServersStatus && llmServersStatus.servers.length > 0 && (
+              <div className="mb-4 p-3 bg-white/5 border border-white/10 rounded-lg">
+                <p className="text-[10px] text-gray-400 uppercase tracking-wider mb-2">Estado real de cada servidor Ollama (modelos disponibles)</p>
+                <ul className="space-y-2 text-sm">
+                  {llmServersStatus.servers.map((s) => (
+                    <li key={s.label} className="flex flex-wrap items-baseline gap-2">
+                      <span className="font-medium text-white">{s.label}</span>
+                      {s.url != null ? (
+                        <>
+                          <span className={`text-xs ${s.reachable ? 'text-green-400' : 'text-red-400'}`}>
+                            {s.reachable ? '✓' : '✗'} {s.url.replace(/^https?:\/\//, '')}
+                          </span>
+                          {s.reachable && s.models.length > 0 && (
+                            <span className="text-gray-400 text-xs">→ {s.models.join(', ')}</span>
+                          )}
+                          {s.error && <span className="text-red-400 text-xs">{s.error}</span>}
+                        </>
+                      ) : (
+                        <span className="text-gray-500 text-xs">{s.note ?? 'no configurado'}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[10px] text-gray-500 mt-2">Ominis 2.0 (Qwen) y Ominis 2.0 Clinic (BioMistral). Config en app/config.py.</p>
+              </div>
+            )}
+            <p className="text-[11px] text-gray-500 mb-4">
+              Prender/apagar el GPU g4dn que sirve Ominis 2.0 y Ominis 2.0 Clinic. Configura OLLAMA_INSTANCE_ID y OLLAMA_CLINIC_INSTANCE_ID en el backend (suelen ser el mismo).
+              {(llmInstances['ominis-2.0'] === null || llmInstances['ominis-2.0-clinic'] === null) && (
+                <span className="block mt-1 text-amber-400/90">
+                  «No configurado» = el backend no tiene el ID de la instancia EC2. Añádelos al .env del servidor.
+                </span>
+              )}
+              {(llmInstances['ominis-2.0'] === 'error' || llmInstances['ominis-2.0-clinic'] === 'error') && (
+                <span className="block mt-1 text-amber-400/90">
+                  «Error AWS» = ID configurado pero el backend no puede llamar a EC2. Revisa credenciales en us-east-1.
+                </span>
+              )}
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-sm font-semibold text-white">Ominis 2.0</h4>
+                  <StatusBadge status={llmInstances['ominis-2.0'] ?? 'no configurado'} />
+                </div>
+                <p className="text-[10px] text-gray-500 mb-3">Uso general (Qwen)</p>
+                <div className="flex items-center gap-2">
+                  <ResearchInstanceSwitch
+                    status={llmInstances['ominis-2.0']}
+                    loading={llmInstanceAction === 'ominis-2.0'}
+                    onToggle={() =>
+                      llmInstances['ominis-2.0'] === 'running' || llmInstances['ominis-2.0'] === 'pending'
+                        ? handleLlmInstanceStop('ominis-2.0')
+                        : handleLlmInstanceStart('ominis-2.0')
+                    }
+                    labelOff="Off"
+                    labelOn="On"
+                  />
+                </div>
+              </div>
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-sm font-semibold text-white">Ominis 2.0 Clinic</h4>
+                  <StatusBadge status={llmInstances['ominis-2.0-clinic'] ?? 'no configurado'} />
+                </div>
+                <p className="text-[10px] text-gray-500 mb-3">Conocimiento médico (BioMistral 7B)</p>
+                <div className="flex items-center gap-2">
+                  <ResearchInstanceSwitch
+                    status={llmInstances['ominis-2.0-clinic']}
+                    loading={llmInstanceAction === 'ominis-2.0-clinic'}
+                    onToggle={() =>
+                      llmInstances['ominis-2.0-clinic'] === 'running' || llmInstances['ominis-2.0-clinic'] === 'pending'
+                        ? handleLlmInstanceStop('ominis-2.0-clinic')
+                        : handleLlmInstanceStart('ominis-2.0-clinic')
+                    }
+                    labelOff="Off"
+                    labelOn="On"
+                  />
+                </div>
+              </div>
+            </div>
+          </Section>
+        </section>
+
+        {/* ===== Opciones por defecto del chat (Admin) ===== */}
+        <section className="mb-6">
+          <Section title="Opciones por defecto del chat">
+            <p className="text-[11px] text-gray-500 mb-4">
+              Valores iniciales que verán todos los usuarios al abrir el chat. Cada usuario puede cambiarlos en el menú + durante la conversación.
+              {chatDefaultsSaving && <span className="ml-2 text-amber-400">Guardando…</span>}
+            </p>
+            {chatDefaults && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between py-2 border-b border-white/10">
+                  <div>
+                    <p className="text-sm font-medium text-white">Investigación</p>
+                    <p className="text-[10px] text-gray-500">Modo investigación (reporte académico)</p>
+                  </div>
+                  <ResearchInstanceSwitch
+                    status={chatDefaults.research_mode ? 'running' : 'stopped'}
+                    loading={chatDefaultsSaving}
+                    onToggle={() => handleChatDefaultToggle('research_mode')}
+                    labelOff="Off"
+                    labelOn="On"
+                  />
+                </div>
+                <div className="flex items-center justify-between py-2 border-b border-white/10">
+                  <div>
+                    <p className="text-sm font-medium text-white">Ominis (base de datos)</p>
+                    <p className="text-[10px] text-gray-500">Búsqueda en documentos indexados</p>
+                  </div>
+                  <ResearchInstanceSwitch
+                    status={chatDefaults.rag_search ? 'running' : 'stopped'}
+                    loading={chatDefaultsSaving}
+                    onToggle={() => handleChatDefaultToggle('rag_search')}
+                    labelOff="Off"
+                    labelOn="On"
+                  />
+                </div>
+                <div className="flex items-center justify-between py-2 border-b border-white/10">
+                  <div>
+                    <p className="text-sm font-medium text-white">PubMed</p>
+                    <p className="text-[10px] text-gray-500">Búsqueda en literatura médica</p>
+                  </div>
+                  <ResearchInstanceSwitch
+                    status={chatDefaults.pubmed_search ? 'running' : 'stopped'}
+                    loading={chatDefaultsSaving}
+                    onToggle={() => handleChatDefaultToggle('pubmed_search')}
+                    labelOff="Off"
+                    labelOn="On"
+                  />
+                </div>
+                <div className="flex items-center justify-between py-2">
+                  <div>
+                    <p className="text-sm font-medium text-white">Web</p>
+                    <p className="text-[10px] text-gray-500">Búsqueda en la web</p>
+                  </div>
+                  <ResearchInstanceSwitch
+                    status={chatDefaults.web_search ? 'running' : 'stopped'}
+                    loading={chatDefaultsSaving}
+                    onToggle={() => handleChatDefaultToggle('web_search')}
+                    labelOff="Off"
+                    labelOn="On"
+                  />
+                </div>
+              </div>
+            )}
+            {!chatDefaults && !chatDefaultsSaving && <p className="text-gray-500 text-sm">Cargando…</p>}
+          </Section>
+        </section>
+
         {/* ===== Modelos de investigación (Admin) ===== */}
         <section className="mb-6">
           <Section title="Modelos de investigación">
             <p className="text-[11px] text-gray-500 mb-4">
               Si ambos están apagados, las investigaciones usan el modelo normal (ominis-2.0). El modelo 128K se apaga solo a los 60 min.
+              {(researchInstances.openscholar === null || researchInstances.openscholar_128k === null) && (
+                <span className="block mt-1 text-amber-400/90">
+                  «No configurado» = el backend no tiene el ID de la instancia EC2 (OPENSCHOLAR_INSTANCE_ID / OPENSCHOLAR_128K_INSTANCE_ID). Configúralos en el servidor para poder usar el switch.
+                </span>
+              )}
+              {(researchInstances.openscholar === 'error' || researchInstances.openscholar_128k === 'error') && (
+                <span className="block mt-1 text-amber-400/90">
+                  «Error AWS» = el ID está configurado pero el backend no puede llamar a EC2 (región us-east-1). Añade AWS_ACCESS_KEY_ID y AWS_SECRET_ACCESS_KEY en el .env del backend, o un rol IAM con ec2:DescribeInstances, StartInstances, StopInstances en us-east-1.
+                </span>
+              )}
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* OpenScholar 8K — ominis-2.0-research */}
               <div className="bg-white/5 border border-white/10 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
                   <h4 className="text-sm font-semibold text-white">ominis-2.0-research</h4>
-                  <StatusBadge status={researchInstances.openscholar || 'no configurado'} />
+                  <StatusBadge status={researchInstances.openscholar ?? 'no configurado'} />
                 </div>
                 <p className="text-[10px] text-gray-500 mb-3">OpenScholar 8K (contexto 8K)</p>
-                <div className="flex gap-2">
-                  {(researchInstances.openscholar === 'stopped' || researchInstances.openscholar === 'stopping' || !researchInstances.openscholar) && (
-                    <button
-                      onClick={() => handleResearchInstanceStart('openscholar')}
-                      disabled={researchInstanceAction !== null}
-                      className="px-3 py-1.5 text-xs bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 rounded-lg hover:bg-cyan-500/30 disabled:opacity-50"
-                    >
-                      {researchInstanceAction === 'openscholar' ? 'Iniciando…' : 'Iniciar'}
-                    </button>
-                  )}
-                  {(researchInstances.openscholar === 'running' || researchInstances.openscholar === 'pending') && (
-                    <button
-                      onClick={() => handleResearchInstanceStop('openscholar')}
-                      disabled={researchInstanceAction !== null}
-                      className="px-3 py-1.5 text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg hover:bg-amber-500/30 disabled:opacity-50"
-                    >
-                      {researchInstanceAction === 'openscholar' ? 'Apagando…' : 'Apagar'}
-                    </button>
-                  )}
+                <div className="flex items-center gap-2">
+                  <ResearchInstanceSwitch
+                    status={researchInstances.openscholar}
+                    loading={researchInstanceAction === 'openscholar'}
+                    onToggle={() =>
+                      researchInstances.openscholar === 'running' || researchInstances.openscholar === 'pending'
+                        ? handleResearchInstanceStop('openscholar')
+                        : handleResearchInstanceStart('openscholar')
+                    }
+                  />
                 </div>
               </div>
               {/* 128K — ominis-2.0-research-128k */}
               <div className="bg-white/5 border border-white/10 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
                   <h4 className="text-sm font-semibold text-white">ominis-2.0-research-128k</h4>
-                  <StatusBadge status={researchInstances.openscholar_128k || 'no configurado'} />
+                  <StatusBadge status={researchInstances.openscholar_128k ?? 'no configurado'} />
                 </div>
                 <p className="text-[10px] text-gray-500 mb-3">Contexto largo (se apaga a los 60 min)</p>
-                <div className="flex gap-2">
-                  {(researchInstances.openscholar_128k === 'stopped' || researchInstances.openscholar_128k === 'stopping' || !researchInstances.openscholar_128k) && (
-                    <button
-                      onClick={() => handleResearchInstanceStart('openscholar_128k')}
-                      disabled={researchInstanceAction !== null}
-                      className="px-3 py-1.5 text-xs bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 rounded-lg hover:bg-cyan-500/30 disabled:opacity-50"
-                    >
-                      {researchInstanceAction === 'openscholar_128k' ? 'Iniciando…' : 'Iniciar modelo 128K'}
-                    </button>
-                  )}
-                  {(researchInstances.openscholar_128k === 'running' || researchInstances.openscholar_128k === 'pending') && (
-                    <button
-                      onClick={() => handleResearchInstanceStop('openscholar_128k')}
-                      disabled={researchInstanceAction !== null}
-                      className="px-3 py-1.5 text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg hover:bg-amber-500/30 disabled:opacity-50"
-                    >
-                      {researchInstanceAction === 'openscholar_128k' ? 'Apagando…' : 'Apagar'}
-                    </button>
-                  )}
+                <div className="flex items-center gap-2">
+                  <ResearchInstanceSwitch
+                    status={researchInstances.openscholar_128k}
+                    loading={researchInstanceAction === 'openscholar_128k'}
+                    onToggle={() =>
+                      researchInstances.openscholar_128k === 'running' || researchInstances.openscholar_128k === 'pending'
+                        ? handleResearchInstanceStop('openscholar_128k')
+                        : handleResearchInstanceStart('openscholar_128k')
+                    }
+                    labelOn="On"
+                    labelOff="Off"
+                  />
                 </div>
               </div>
             </div>

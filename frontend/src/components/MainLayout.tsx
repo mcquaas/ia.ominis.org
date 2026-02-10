@@ -9,6 +9,7 @@ import Footer from "@/components/Footer";
 import * as chatService from "@/services/chat";
 import type { ConversationSummary } from "@/services/chat";
 import * as feedbackService from "@/services/feedback";
+import { getResearchInstanceStatus, getChatDefaults } from "@/services/auth";
 
 interface Source {
   title: string;
@@ -82,6 +83,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState("");
+  const [loadingModel, setLoadingModel] = useState<string | null>(null);
   const [ragSearchEnabled, setRagSearchEnabled] = useState(true);
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const [pubmedSearchEnabled, setPubmedSearchEnabled] = useState(true);
@@ -96,9 +98,12 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const [excludedSources, setExcludedSources] = useState<Set<string>>(new Set());
   const [modalImage, setModalImage] = useState<string | null>(null);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([
-    { id: "ominis-2.0", displayName: "Ominis 2.0", description: "Modelo de IA especializado en salud", isDefault: true },
+    { id: "ominis-2.0", displayName: "Ominis 2.0", description: "Uso general (Qwen)", isDefault: true },
+    { id: "ominis-2.0-clinic", displayName: "Ominis 2.0 Clinic", description: "Conocimiento médico (BioMistral)", isDefault: false },
   ]);
   const [selectedModel, setSelectedModel] = useState<string>("ominis-2.0");
+  const [researchInstanceStatus, setResearchInstanceStatus] = useState<{ openscholar: string | null; openscholar_128k: string | null }>({ openscholar: null, openscholar_128k: null });
+  const [selectedResearchModel, setSelectedResearchModel] = useState<"openscholar" | "openscholar_128k" | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<string, "positive" | "negative">>({});
@@ -117,6 +122,18 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     if (typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches) {
       setSidebarOpen(true);
     }
+  }, []);
+
+  // Apply server-configured chat defaults on mount (Investigación, Ominis, PubMed, Web)
+  useEffect(() => {
+    getChatDefaults()
+      .then((d) => {
+        setResearchModeEnabled(d.research_mode);
+        setRagSearchEnabled(d.rag_search);
+        setWebSearchEnabled(d.web_search);
+        setPubmedSearchEnabled(d.pubmed_search);
+      })
+      .catch(() => { /* keep current defaults on error */ });
   }, []);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
@@ -1112,11 +1129,10 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     }
   };
 
-  // Fetch available models from backend
+  // Fetch available models from backend (chat + research)
   useEffect(() => {
     const fetchModels = async () => {
       try {
-        // Try fetching models list from the backend
         const modelsRes = await fetch(
           (process.env.NEXT_PUBLIC_STRAPI_URL || "http://localhost:8000") + "/v1/models"
         ).catch(() => null);
@@ -1133,6 +1149,29 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     };
     fetchModels();
   }, []);
+
+  // Sync research mode with model selection: research models enable research mode and set 8K/128K
+  useEffect(() => {
+    if (selectedModel === "ominis-2.0-research") {
+      setResearchModeEnabled(true);
+      setSelectedResearchModel("openscholar");
+    } else if (selectedModel === "ominis-2.0-research-128k") {
+      setResearchModeEnabled(true);
+      setSelectedResearchModel("openscholar_128k");
+    } else if (selectedModel === "ominis-2.0" || selectedModel === "ominis-2.0-clinic") {
+      setResearchModeEnabled(false);
+    }
+  }, [selectedModel]);
+
+  // Fetch research instance status when research mode is on (so user can choose 8K vs 128K)
+  useEffect(() => {
+    if (!researchModeEnabled || !isAuthenticated) return;
+    let cancelled = false;
+    getResearchInstanceStatus()
+      .then((status) => { if (!cancelled) setResearchInstanceStatus(status); })
+      .catch(() => { if (!cancelled) setResearchInstanceStatus({ openscholar: null, openscholar_128k: null }); });
+    return () => { cancelled = true; };
+  }, [researchModeEnabled, isAuthenticated]);
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -1185,6 +1224,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     clearAllImages(); // Clear all attachments after capturing
     setIsLoading(true);
     setLoadingStatus("Analizando...");
+    setLoadingModel(selectedModel);
     if (researchModeEnabled) {
       setResearchSteps([]);
       setResearchProgress(null);
@@ -1215,6 +1255,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
           history: history,
           images: currentImages.length > 0 ? currentImages : undefined,
           model: selectedModel,
+          research_model: researchModeEnabled ? selectedResearchModel ?? undefined : undefined,
           rag_search: currentRagSearch,
           web_search: currentWebSearch,
           pubmed_search: currentPubmedSearch,
@@ -1274,6 +1315,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
 
                 if (eventData.type === "status") {
                   setLoadingStatus(eventData.message);
+                  setLoadingModel(eventData.model ?? null);
 
                 } else if (eventData.type === "research_step") {
                   if (eventData.step) {
@@ -1294,6 +1336,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
                     messageAdded = true;
                     setIsLoading(false);
                     setLoadingStatus("");
+                    setLoadingModel(null);
                     const newMsg: Message = {
                       id: assistantId,
                       role: "assistant",
@@ -1364,6 +1407,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
 
                   setIsLoading(false);
                   setLoadingStatus("");
+                  setLoadingModel(null);
                   // Auto-disable research mode only after a report (flagged by backend)
                   if (researchModeEnabled && isReport) {
                     setResearchModeEnabled(false);
@@ -1425,6 +1469,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setLoadingStatus("");
+      setLoadingModel(null);
       setIsLoading(false);
       inputRef.current?.focus();
     }
@@ -1615,6 +1660,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
     setMessages([...newMessages, userMessage]);
     setIsLoading(true);
     setLoadingStatus("Analizando...");
+    setLoadingModel(selectedModel);
 
     try {
       const controller = new AbortController();
@@ -1634,6 +1680,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
           history: history,
           images: originalMessage.images || undefined,
           model: selectedModel,
+          research_model: researchModeEnabled ? selectedResearchModel ?? undefined : undefined,
           rag_search: ragSearchEnabled,
           web_search: webSearchEnabled,
           pubmed_search: pubmedSearchEnabled,
@@ -1690,6 +1737,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                 
                 if (eventData.type === "status") {
                   setLoadingStatus(eventData.message);
+                  setLoadingModel(eventData.model ?? null);
 
                 } else if (eventData.type === "chunk") {
                   streamedContent += eventData.text || "";
@@ -1697,6 +1745,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                     messageAdded = true;
                     setIsLoading(false);
                     setLoadingStatus("");
+                    setLoadingModel(null);
                     setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent }]);
                   } else {
                     setMessages((prev) =>
@@ -1740,6 +1789,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
 
                   setIsLoading(false);
                   setLoadingStatus("");
+                  setLoadingModel(null);
                   inputRef.current?.focus();
                   return;
 
@@ -1784,6 +1834,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setLoadingStatus("");
+      setLoadingModel(null);
       setIsLoading(false);
       inputRef.current?.focus();
     }
@@ -1835,6 +1886,27 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
         <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>Investigación</div>
         <div className={`w-8 h-5 rounded-full transition-colors ${researchModeEnabled ? "bg-emerald-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${researchModeEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
       </button>
+      {researchModeEnabled && (researchInstanceStatus.openscholar === "running" || researchInstanceStatus.openscholar_128k === "running") && (
+        <>
+          <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modelo de investigación</div>
+          <button onClick={() => setSelectedResearchModel(null)} className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedResearchModel === null ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"}`}>
+            <span>Automático</span>
+            {selectedResearchModel === null && <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+          </button>
+          {researchInstanceStatus.openscholar === "running" && (
+            <button onClick={() => setSelectedResearchModel("openscholar")} className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedResearchModel === "openscholar" ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"}`}>
+              <span>8K (OpenScholar)</span>
+              {selectedResearchModel === "openscholar" && <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+            </button>
+          )}
+          {researchInstanceStatus.openscholar_128k === "running" && (
+            <button onClick={() => setSelectedResearchModel("openscholar_128k")} className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedResearchModel === "openscholar_128k" ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"}`}>
+              <span>128K (contexto largo)</span>
+              {selectedResearchModel === "openscholar_128k" && <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+            </button>
+          )}
+        </>
+      )}
       <div className="border-t border-white/10 my-1" />
       <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Buscar en fuentes</div>
       <button onClick={() => setRagSearchEnabled(!ragSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
@@ -2294,9 +2366,15 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                     <div className="bg-white/10 backdrop-blur-md border border-white/10 text-gray-100 rounded-2xl rounded-bl-sm p-3 max-w-[85%]">
                       <div className="flex items-center gap-3">
                         <div className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
-                        <div className="flex items-center gap-2 min-w-0">
+                        <div className="flex items-center gap-2 min-w-0 flex-wrap">
                           {loadingStatus && (
                             <span className="text-gray-300 text-sm animate-pulse">{loadingStatus}</span>
+                          )}
+                          {loadingStatus && loadingModel && <span className="text-gray-500 mx-1">·</span>}
+                          {loadingModel && (
+                            <span className="text-[10px] text-cyan-300/90 font-medium whitespace-nowrap" title="LLM en uso">
+                              {availableModels.find(m => m.id === loadingModel)?.displayName ?? (loadingModel === "ominis-2.0-research" ? "OpenScholar 8K" : loadingModel === "ominis-2.0-research-128k" ? "128K" : loadingModel)}
+                            </span>
                           )}
                           {researchModeEnabled && (
                             <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 bg-amber-500/20 border border-amber-400/30 rounded" title="Motor académico exclusivo">
@@ -2421,7 +2499,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                 {/* Active features indicator (research, model, attachments — Ominis/Web/PubMed inside input) */}
                 {(researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
                   <div className="flex items-center gap-1.5 mb-2 text-xs flex-wrap">
-                    {selectedModel !== "ominis-2.0" && (
+                    {selectedModel !== "ominis-2.0-fast" && (
                       <span className="flex items-center gap-1 text-amber-400 bg-amber-500/10 px-2 py-1 rounded-full">
                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
