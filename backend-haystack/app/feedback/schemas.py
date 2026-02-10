@@ -42,6 +42,7 @@ class FeedbackOut(BaseModel):
     model_name: Optional[str] = None
     query_title: Optional[str] = None
     sources: Optional[list[dict[str, Any]]] = None  # RAG/web/PubMed sources used for response
+    created_at: datetime  # Serialized as ISO 8601 for dashboard "Hora" column
 
     model_config = {"from_attributes": True}
 

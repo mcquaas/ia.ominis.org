@@ -28,6 +28,13 @@ import { listFeedback, REASON_CATEGORIES } from '@/services/feedback';
 import type { FeedbackOut } from '@/services/feedback';
 
 const REASON_LABELS: Record<string, string> = Object.fromEntries(REASON_CATEGORIES.map((c) => [c.value, c.label]));
+
+function formatFeedbackDate(createdAt: string | undefined): string {
+  if (!createdAt) return '—';
+  const d = new Date(createdAt);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('es-MX');
+}
+
 import type { SystemStats, User } from '@/types/auth';
 
 // ---------- tiny stat card ----------
@@ -921,7 +928,7 @@ export default function DashboardPage() {
                       onClick={() => handleOpenFeedbackModal(f)}
                       className="hover:bg-white/10 cursor-pointer transition-colors"
                     >
-                      <td className="py-2.5 pr-3 text-gray-400 text-xs whitespace-nowrap">{new Date(f.created_at).toLocaleString('es-MX')}</td>
+                      <td className="py-2.5 pr-3 text-gray-400 text-xs whitespace-nowrap">{formatFeedbackDate(f.created_at)}</td>
                       <td className="py-2.5 pr-3">
                         {f.rating === 'positive' ? (
                           <svg className="w-4 h-4 text-green-400" fill="currentColor" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
@@ -980,7 +987,7 @@ export default function DashboardPage() {
               <div className="flex-1 overflow-y-auto p-5 space-y-4 custom-scrollbar">
                 {/* Feedback details */}
                 <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div><span className="text-gray-500">Fecha</span><p className="text-white">{new Date(feedbackModalItem.created_at).toLocaleString('es-MX')}</p></div>
+                  <div><span className="text-gray-500">Fecha</span><p className="text-white">{formatFeedbackDate(feedbackModalItem.created_at)}</p></div>
                   <div><span className="text-gray-500">Usuario</span><p className="text-white">{feedbackModalItem.user_email || '—'}</p></div>
                   <div><span className="text-gray-500">Modelo</span><p className="text-white">{feedbackModalItem.model_name || '—'}</p></div>
                   <div><span className="text-gray-500">Valoración</span>
