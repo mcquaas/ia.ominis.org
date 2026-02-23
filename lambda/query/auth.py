@@ -1,6 +1,6 @@
 """
 API Key Authentication Module for Ominis Health API
-Validates API keys against the Strapi backend
+Validates API keys against the Haystack backend API.
 """
 
 import os
@@ -15,12 +15,12 @@ import hashlib
 
 logger = logging.getLogger()
 
-# Configuration
-STRAPI_URL = os.environ.get('STRAPI_URL', 'http://localhost:1337')
-STRAPI_TIMEOUT = int(os.environ.get('STRAPI_TIMEOUT', '5'))
+# Configuration - Haystack backend API
+API_URL = os.environ.get('API_URL', os.environ.get('STRAPI_URL', 'http://localhost:8000'))
+API_TIMEOUT = int(os.environ.get('API_TIMEOUT', os.environ.get('STRAPI_TIMEOUT', '5')))
 AUTH_CACHE_TTL = int(os.environ.get('AUTH_CACHE_TTL', '300'))  # 5 minutes
 
-# In-memory cache for API key validation (reduces Strapi calls)
+# In-memory cache for API key validation (reduces backend calls)
 _auth_cache: Dict[str, Tuple[Dict, float]] = {}
 
 
@@ -31,7 +31,7 @@ def get_cache_key(api_key: str) -> str:
 
 def validate_api_key(api_key: str) -> Tuple[bool, Optional[Dict], Optional[str]]:
     """
-    Validate an API key against the Strapi backend.
+    Validate an API key against the Haystack backend API.
     
     Args:
         api_key: The API key to validate
@@ -50,17 +50,19 @@ def validate_api_key(api_key: str) -> Tuple[bool, Optional[Dict], Optional[str]]
             logger.debug(f"Using cached auth for key prefix: {api_key[:12]}")
             return True, cached_info, None
     
-    # Validate against Strapi
+    # Validate against backend API (Haystack uses /v1 prefix)
     try:
         payload = json.dumps({"apiKey": api_key}).encode('utf-8')
+        base = API_URL.rstrip('/').removesuffix('/v1')
+        url = f"{base}/v1/api/api-keys/validate"
         
         req = urllib.request.Request(
-            f"{STRAPI_URL}/api/api-keys/validate",
+            url,
             data=payload,
             headers={'Content-Type': 'application/json'}
         )
         
-        with urllib.request.urlopen(req, timeout=STRAPI_TIMEOUT) as response:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as response:
             result = json.loads(response.read().decode('utf-8'))
             
             if result.get('valid'):
@@ -83,12 +85,11 @@ def validate_api_key(api_key: str) -> Tuple[bool, Optional[Dict], Optional[str]]
         return False, None, f"Authentication service error: {e.code}"
     except urllib.error.URLError as e:
         logger.error(f"URL error validating API key: {e}")
-        # If Strapi is down, allow requests for 5 minutes using cache
+        # If backend is down, allow requests using cache
         if cache_key in _auth_cache:
             cached_info, cached_time = _auth_cache[cache_key]
-            # Extended grace period when Strapi is down
             if time.time() - cached_time < 3600:  # 1 hour grace
-                logger.warning("Using stale cache due to Strapi unavailability")
+                logger.warning("Using stale cache due to backend unavailability")
                 return True, cached_info, None
         return False, None, "Authentication service unavailable"
     except Exception as e:
@@ -114,7 +115,7 @@ def check_permission(key_info: Dict, permission: str) -> bool:
     return permissions.get(permission, False)
 
 
-def log_query_to_strapi(
+def log_query_to_backend(
     api_key: str,
     endpoint: str,
     response_time_ms: int,
@@ -126,7 +127,7 @@ def log_query_to_strapi(
     ip_address: str = None
 ) -> bool:
     """
-    Log a query to Strapi for analytics.
+    Log a query to the backend API for analytics.
     This is fire-and-forget - doesn't block the response.
     
     Args:
@@ -171,23 +172,24 @@ def log_query_to_strapi(
         }).encode('utf-8')
         
         # Get internal API token from environment
-        internal_token = os.environ.get('STRAPI_API_TOKEN')
+        internal_token = os.environ.get('API_INTERNAL_TOKEN', os.environ.get('STRAPI_API_TOKEN'))
         headers = {'Content-Type': 'application/json'}
         if internal_token:
             headers['Authorization'] = f'Bearer {internal_token}'
         
+        base = API_URL.rstrip('/').removesuffix('/v1')
         req = urllib.request.Request(
-            f"{STRAPI_URL}/api/query-logs",
+            f"{base}/v1/api/query-logs",
             data=payload,
             headers=headers
         )
         
-        with urllib.request.urlopen(req, timeout=STRAPI_TIMEOUT) as response:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as response:
             return response.status == 200
             
     except Exception as e:
         # Don't fail the main request if logging fails
-        logger.error(f"Failed to log query to Strapi: {e}")
+        logger.error(f"Failed to log query to backend: {e}")
         return False
 
 

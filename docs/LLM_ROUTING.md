@@ -7,7 +7,8 @@ How the backend routes each request to the correct LLM. User chooses one of four
 | Option | Backend model_id | Backend routing |
 |--------|------------------|------------------|
 | **Ominis 2.0** (uso general) | ominis-2.0 | Ollama at OLLAMA_URL, model OLLAMA_MODEL (e.g. qwen2.5:14b) |
-| **Ominis 2.0 Clinic** (conocimiento médico) | ominis-2.0-clinic | Ollama at OLLAMA_CLINIC_URL or OLLAMA_URL, model OLLAMA_CLINIC_MODEL (biomistral) |
+| **Ominis 2.0 Clinic** (conocimiento médico) | ominis-2.0-clinic | Ollama at OLLAMA_CLINIC_URL or OLLAMA_URL, model OLLAMA_CLINIC_MODEL (e.g. cniongolo/biomistral) |
+| **Ominis 2.0 Open** (opcional) | ominis-2.0-open | Ollama at OLLAMA_OPEN_URL or OLLAMA_URL, model OLLAMA_OPEN_MODEL (e.g. qwen3:14b). Only shown when OLLAMA_OPEN_MODEL is set. |
 | **Ominis 2.0 Research** (investigación general) | ominis-2.0-research | OpenScholar 8K (vLLM) or fallback to chat default |
 | **Ominis 2.0 Research 128K** (investigación profunda) | ominis-2.0-research-128k | OpenScholar 128K (vLLM) or fallback to chat default |
 
@@ -19,6 +20,7 @@ Falcon has been removed from options (server can be shut down).
 - **Registry** (`app/config.py`):
   - `ominis-2.0` → OLLAMA_URL, ollama_model=OLLAMA_MODEL (default `qwen2.5:14b`)
   - `ominis-2.0-clinic` → OLLAMA_CLINIC_URL or OLLAMA_URL, ollama_model=OLLAMA_CLINIC_MODEL (default `biomistral`)
+  - `ominis-2.0-open` → OLLAMA_OPEN_URL or OLLAMA_URL, ollama_model=OLLAMA_OPEN_MODEL (only if OLLAMA_OPEN_MODEL is set)
 
 Typically **one g4dn** runs Ollama with both Qwen and BioMistral; OLLAMA_URL and OLLAMA_CLINIC_URL point to the same host (or CLINIC_URL is empty). Dashboard has two switches (Ominis 2.0 and Ominis 2.0 Clinic) that can both control the same g4dn instance.
 

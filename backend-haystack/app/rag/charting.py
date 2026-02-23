@@ -96,11 +96,20 @@ def _build_chart_messages(
     answer: str,
     documents: list[Document],
     history: list[dict] | None = None,
+    for_research_report: bool = False,
 ) -> list[ChatMessage]:
     system = (
         "Eres un analista de visualización. Tu tarea es proponer datos para gráficas. "
         "Devuelve SOLO JSON válido sin texto extra. "
-        "Si no hay datos claros, responde con {\"charts\": []}.\n"
+        "Si no hay datos claros o la gráfica no sería relevante para la pregunta, responde con {\"charts\": []}.\n"
+        "Solo propón una gráfica cuando los datos apoyen directamente la respuesta y la visualización aporte valor (comparaciones, tendencias, proporciones). Si los datos son genéricos o no encajan, devuelve {\"charts\": []}.\n"
+    )
+    if for_research_report:
+        system += (
+            "En reportes de investigación: solo propón una gráfica si la respuesta contiene números EXPLÍCITOS de las fuentes (prevalencia %, N, sensibilidad, especificidad, valores de corte). "
+            "NUNCA propongas gráficas con categorías genéricas (ej. Sí/No, Diagnóstico vs Enfermedad) sin datos reales; en ese caso devuelve {\"charts\": []}.\n"
+        )
+    system += (
         "Formato JSON:\n"
         "{"
         "\"charts\": ["
@@ -116,11 +125,10 @@ def _build_chart_messages(
         "]"
         "}\n"
         "Reglas:\n"
-        "- Usa SOLO datos explícitos en la pregunta, respuesta o fuentes provistas.\n"
-        "- Máximo 12 puntos por serie.\n"
-        "- Para pie usa labels/values y deja series vacío.\n"
-        "- Para bar/line usa series y deja labels/values vacío.\n"
-        "- Números deben ser reales (no texto)."
+        "- x_label = eje horizontal (categorías: Año, Tipo, Tratamiento, etc.).\n"
+        "- y_label = eje vertical (magnitud: Número de estudios, Prevalencia (%), Proporción, etc.). NUNCA pongas \"Año\" en y_label si los valores en Y son números; y_label debe describir qué mide ese número.\n"
+        "- Usa SOLO datos explícitos en la pregunta, respuesta o fuentes.\n"
+        "- Máximo 12 puntos por serie. Para pie: labels/values; para bar/line: series. Números reales (no texto)."
     )
 
     user_parts: list[str] = []
@@ -244,6 +252,7 @@ async def generate_chart_specs(
         answer=answer,
         documents=documents,
         history=history,
+        for_research_report=force,
     )
 
     try:

@@ -1,6 +1,8 @@
 import Image from 'next/image';
+import { Suspense } from 'react';
 import { LoginForm } from '@/components/auth';
 import Header from '@/components/Header';
+import LoginPageClient from './LoginPageClient';
 
 export const metadata = {
   title: 'Iniciar Sesión | Ominis AI',
@@ -26,7 +28,9 @@ export default function LoginPage() {
       
       <main className="relative z-10 flex-1 flex items-center justify-center px-4 pt-20 pb-8">
         <div className="w-full max-w-md animate-fade-in">
-          <LoginForm />
+          <Suspense fallback={<LoginForm />}>
+            <LoginPageClient />
+          </Suspense>
         </div>
       </main>
       

@@ -29,21 +29,44 @@ export async function POST(request: NextRequest) {
         rag_search: body.rag_search !== false,
         web_search: body.web_search !== false,
         pubmed_search: body.pubmed_search !== false,
+        openscholar_search: body.openscholar_search === true,
         file_context: body.file_context || undefined,
       };
 
       console.log('[query-stream] Request:', apiBody.question?.slice(0, 50), 'model:', apiBody.model || 'default');
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 130_000); // 130s, slightly above backend 120s
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const auth = request.headers.get('Authorization');
+      if (auth) headers['Authorization'] = auth;
+
       const response = await fetch(GPU_API, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify(apiBody),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
-        const errorEvent = `data: ${JSON.stringify({ type: 'error', message: `GPU API error: ${response.status}` })}\n\n`;
+        let message = `GPU API error: ${response.status}`;
+        let reason: string | undefined;
+        try {
+          const errBody = await response.json();
+          if (errBody?.detail?.code === 'model_not_allowed' && errBody?.detail?.reason) {
+            reason = errBody.detail.reason;
+            message = reason === 'login_required'
+              ? 'Inicia sesión para usar este modelo.'
+              : reason === 'request_superadmin'
+                ? 'Este modelo requiere autorización del SuperAdmin. Solicita acceso.'
+                : message;
+          }
+        } catch {
+          // ignore
+        }
+        const errorEvent = `data: ${JSON.stringify({ type: 'error', message, reason: reason ?? null })}\n\n`;
         await writer.write(encoder.encode(errorEvent));
         await writer.close();
         return;
@@ -70,9 +93,15 @@ export async function POST(request: NextRequest) {
 
       await writer.close();
     } catch (error: unknown) {
-      const err = error as Error & { code?: string };
+      const err = error as Error & { code?: string; name?: string };
       console.error('[query-stream] Error:', err);
-      const reason = err?.code === 'ECONNREFUSED' ? 'Backend no disponible (ECONNREFUSED)' : err?.code === 'ETIMEDOUT' ? 'Timeout al conectar con el backend' : err?.message || 'Connection error';
+      const reason = err?.name === 'AbortError'
+        ? 'El servidor tardó demasiado en responder. Intenta de nuevo.'
+        : err?.code === 'ECONNREFUSED'
+          ? 'Backend no disponible (ECONNREFUSED)'
+          : err?.code === 'ETIMEDOUT'
+            ? 'Timeout al conectar con el backend'
+            : err?.message || 'Connection error';
       const errorEvent = `data: ${JSON.stringify({ type: 'error', message: reason })}\n\n`;
       try {
         await writer.write(encoder.encode(errorEvent));

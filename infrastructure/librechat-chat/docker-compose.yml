@@ -1,0 +1,41 @@
+# Minimal LibreChat for chat.ominis.org (api + mongodb only)
+# Override with docker-compose.override.yml for .env and librechat.yaml
+services:
+  api:
+    container_name: librechat-ominis
+    image: ${CHAT_IMAGE:-ghcr.io/danny-avila/librechat:latest}
+    ports:
+      - "${PORT:-3080}:${PORT:-3080}"
+    depends_on:
+      - mongodb
+    restart: always
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=${PORT:-3080}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/Ominis}
+      - CONFIG_PATH=/app/librechat.yaml
+    volumes:
+      - type: bind
+        source: ./.env
+        target: /app/.env
+      - type: bind
+        source: ./librechat.yaml
+        target: /app/librechat.yaml
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      # Ominis logo (LibreChat may use /app/client/public/images/ or assets/)
+      - ./images:/app/client/public/images
+    env_file:
+      - .env
+
+  mongodb:
+    container_name: chat-mongodb
+    image: mongo:7
+    restart: always
+    volumes:
+      - mongodb_data:/data/db
+    command: mongod --noauth
+
+volumes:
+  mongodb_data:

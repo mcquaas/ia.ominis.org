@@ -1,0 +1,6 @@
+# Ollama on Vast.ai: Qwen3 (chat) + Qwen2.5-VL (vision)
+# Instance 31901944 (OLLAMA_HOST=0.0.0.0)
+
+OLLAMA_QWEN_VAST_URL=http://207.180.148.74:45094
+OLLAMA_MODEL=qwen3:14b
+VISION_MODEL=qwen2.5vl:7b

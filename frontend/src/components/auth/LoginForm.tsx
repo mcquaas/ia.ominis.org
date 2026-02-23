@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/hooks/useAuth';
-import { getGoogleAuthUrl } from '@/services/auth';
+import { getGoogleAuthUrl, getToken } from '@/services/auth';
 import Link from 'next/link';
 
 interface LoginFormProps {
@@ -16,6 +16,16 @@ export function LoginForm({ onSuccess, redirectTo = '/' }: LoginFormProps) {
   const [isLoading, setIsLoading] = useState(false);
   const { login, error, clearError } = useAuth();
 
+  // If already logged in and we have an OIDC return URL, redirect immediately (no form)
+  useEffect(() => {
+    const target = redirectTo ?? '/';
+    if (!target || !target.includes('/oidc/authorize')) return;
+    const token = getToken();
+    if (!token) return;
+    const sep = target.includes('?') ? '&' : '?';
+    window.location.replace(target + sep + 'token=' + encodeURIComponent(token));
+  }, [redirectTo]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     clearError();
@@ -26,7 +36,16 @@ export function LoginForm({ onSuccess, redirectTo = '/' }: LoginFormProps) {
       if (onSuccess) {
         onSuccess();
       } else if (typeof window !== 'undefined') {
-        window.location.href = redirectTo;
+        let target = redirectTo ?? '/';
+        // If redirecting back to OIDC authorize (e.g. LibreChat), append JWT so backend can issue code
+        if (target && target.includes('/oidc/authorize')) {
+          const token = getToken();
+          if (token) {
+            const sep = target.includes('?') ? '&' : '?';
+            target = `${target}${sep}token=${encodeURIComponent(token)}`;
+          }
+        }
+        window.location.href = target;
       }
     } catch {
       // Error is handled by useAuth

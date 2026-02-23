@@ -15,6 +15,7 @@ export async function POST(request: NextRequest) {
       rag_search: body.rag_search !== false, // Default to true
       web_search: body.web_search !== false, // Default to true
       pubmed_search: body.pubmed_search !== false, // Default to true
+      openscholar_search: body.openscholar_search === true, // Default off
       num_sources: body.num_sources || 5,
     };
     

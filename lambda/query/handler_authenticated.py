@@ -20,7 +20,7 @@ from handler import (
 # Import authentication module
 from auth import (
     require_auth,
-    log_query_to_strapi,
+    log_query_to_backend,
     extract_api_key_from_event
 )
 
@@ -132,7 +132,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         # Fire and forget - don't block the response
         try:
-            log_query_to_strapi(
+            log_query_to_backend(
                 api_key=api_key or '',
                 endpoint='query',
                 response_time_ms=response_time_ms,

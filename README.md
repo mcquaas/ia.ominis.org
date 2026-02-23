@@ -41,7 +41,7 @@ Ominis Health LLM is an AI-powered health information assistant that provides ac
 - **1,400+ Curated Sources**: Including IMSS/ISSSTE guidelines, maintained by FUNSALUD
 - **User Authentication**: JWT-based auth with role-based access control
 - **API Key Management**: Generate and manage API keys for external access
-- **Admin Dashboard**: Strapi V5 backend for source and user management
+- **Admin API**: Haystack backend for source and user management
 - **Self-hosted LLM**: ominis-2.0 model — no third-party AI APIs
 - **Hybrid GPU Inference**: CPU in Mexico, optional GPU acceleration in US
 - **Modern Frontend**: Next.js 16 + React 19 responsive interface in Spanish
@@ -67,8 +67,8 @@ Ominis Health LLM is an AI-powered health information assistant that provides ac
           │                                       │
           ▼                                       ▼
 ┌─────────────────────────┐         ┌─────────────────────────┐
-│   Ominis RAG API        │         │   Strapi Admin Backend  │
-│   (Query Processing)    │         │   (admin.ominis.org)    │
+│   Ominis RAG API        │         │   Haystack Backend API  │
+│   (Query Processing)    │         │   (api.ominis.org)      │
 │                         │         │                         │
 │  - RAG search           │         │  - User management      │
 │  - Web search           │         │  - API key management   │
@@ -230,9 +230,9 @@ pip install -r requirements.txt
 cd frontend
 npm install
 
-# Admin Backend (Strapi)
-cd ../backend
-npm install
+# Haystack backend (Python)
+cd ../backend-haystack
+pip install -r requirements.txt
 ```
 
 ### 2. Configure Environment
@@ -246,7 +246,7 @@ nano config/settings.sh
 cp frontend/.env.example frontend/.env.local
 
 # Backend env
-cp backend/.env.example backend/.env
+cp backend-haystack/.env.example backend-haystack/.env
 ```
 
 ### 3. Run Services
@@ -255,8 +255,8 @@ cp backend/.env.example backend/.env
 # Frontend
 cd frontend && npm run dev
 
-# Admin Backend
-cd backend && npm run develop
+# Haystack Backend
+cd backend-haystack && uvicorn app.main:app --reload
 
 # RAG Server (requires Ollama with ominis-2.0)
 python scripts/rag/query_engine.py
@@ -266,10 +266,9 @@ python scripts/rag/query_engine.py
 
 ```
 ia.ominis.org/
-├── backend/                     # Strapi V5 admin backend
-│   ├── src/api/                 # Content types (api-key, rag-source, etc.)
-│   ├── config/                  # Strapi configuration
-│   └── scripts/                 # Seed scripts
+├── backend-haystack/            # FastAPI + Haystack (auth, API keys, RAG)
+│   ├── app/                     # API routes, RAG pipeline
+│   └── config/                  # Backend configuration
 ├── frontend/                    # Next.js frontend
 │   ├── src/app/                 # Pages and API routes
 │   ├── src/components/          # React components
@@ -278,7 +277,7 @@ ia.ominis.org/
 ├── infrastructure/              # AWS deployment scripts
 │   ├── 09-deploy-ollama-ec2.sh  # CPU inference (Mexico)
 │   ├── 13-deploy-gpu-ollama-us.sh # GPU inference (US)
-│   ├── 14-deploy-strapi-backend.sh # Strapi deployment
+│   ├── 17-deploy-haystack-backend.sh # Haystack backend deployment
 │   └── status_watchdog.py       # Health monitoring
 ├── lambda/query/                # Lambda handlers
 │   ├── handler.py               # Basic handler
@@ -325,9 +324,9 @@ curl -X POST 'https://api.ominis.org/query' \
   -d '{"question": "¿Qué es la diabetes?"}'
 ```
 
-### Admin API (Strapi)
+### Admin API (Haystack backend)
 
-See [docs/API_STRAPI.md](docs/API_STRAPI.md) for complete API documentation.
+See [docs/API_STRAPI.md](docs/API_STRAPI.md) for backend API documentation.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -342,10 +341,11 @@ See [docs/API_STRAPI.md](docs/API_STRAPI.md) for complete API documentation.
 | Document | Description |
 |----------|-------------|
 | [MODEL.md](docs/MODEL.md) | ominis-2.0 specifications and training data |
+| [OPEN_SOURCE_LLM.md](docs/OPEN_SOURCE_LLM.md) | Using the latest open-source LLM (Qwen 3, Llama 3.3, etc.) via Ollama |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and components |
 | [DATA_PRIVACY.md](docs/DATA_PRIVACY.md) | Privacy policy and data handling |
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Development setup and contribution |
-| [API_STRAPI.md](docs/API_STRAPI.md) | Strapi admin API documentation |
+| [API_STRAPI.md](docs/API_STRAPI.md) | Backend API documentation |
 
 ## License
 

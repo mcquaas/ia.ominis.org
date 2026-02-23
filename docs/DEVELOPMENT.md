@@ -10,7 +10,7 @@ Released by [Fundación Mexicana para la Salud A.C.](https://funsalud.org.mx/) t
 - [Development Setup](#development-setup)
 - [Project Structure](#project-structure)
 - [Frontend Development](#frontend-development)
-- [Backend Development (Strapi)](#backend-development-strapi)
+- [Backend Development (Haystack)](#backend-development-haystack)
 - [RAG Engine Development](#rag-engine-development)
 - [Running Locally](#running-locally)
 - [Testing](#testing)
@@ -24,7 +24,7 @@ Released by [Fundación Mexicana para la Salud A.C.](https://funsalud.org.mx/) t
 
 | Software | Version | Purpose |
 |----------|---------|---------|
-| Node.js | 18+ | Frontend & Strapi |
+| Node.js | 18+ | Frontend |
 | Python | 3.11+ | RAG engine |
 | AWS CLI | 2.x | AWS operations |
 | Git | Latest | Version control |
@@ -34,7 +34,7 @@ Released by [Fundación Mexicana para la Salud A.C.](https://funsalud.org.mx/) t
 | Software | Version | Purpose |
 |----------|---------|---------|
 | Ollama | Latest | Local LLM inference |
-| PostgreSQL | 14+ | Strapi production database |
+| PostgreSQL | 14+ | Backend database |
 
 ## Development Setup
 
@@ -71,16 +71,17 @@ cp .env.example .env.local
 # Edit with your API URLs
 ```
 
-### 4. Setup Backend (Strapi)
+### 4. Setup Backend (Haystack)
 
 ```bash
-cd backend
-npm install
+cd backend-haystack
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
 # Create environment file
 cp .env.example .env
-# Generate secrets and edit configuration
-node scripts/generate-secrets.js
+# Edit with database URL and secrets
 ```
 
 ### 5. Setup Local LLM (Optional)
@@ -102,8 +103,8 @@ ollama create ominis-2.0 -f /tmp/Modelfile
 
 ```
 ia.ominis.org/
-├── backend/                     # Strapi V5 admin
-│   ├── config/                  # Strapi config
+├── backend-haystack/            # FastAPI + Haystack (auth, RAG)
+│   ├── app/                     # API, config
 │   ├── src/
 │   │   ├── api/                 # Content types
 │   │   │   ├── api-key/         # API key management
@@ -136,8 +137,7 @@ ia.ominis.org/
 ├── infrastructure/              # Deployment scripts
 │   ├── 09-deploy-ollama-ec2.sh  # CPU inference
 │   ├── 13-deploy-gpu-ollama-us.sh # GPU inference
-│   ├── 14-deploy-strapi-backend.sh # Strapi
-│   ├── 15-setup-strapi-nginx-ssl.sh
+│   ├── 17-deploy-haystack-backend.sh # Haystack backend
 │   └── status_watchdog.py       # Health monitor
 │
 ├── lambda/query/                # Lambda handlers
@@ -158,7 +158,7 @@ ia.ominis.org/
 │   │   ├── vector_store.py
 │   │   ├── build_index.py
 │   │   └── query_engine.py
-│   └── sync_rag_to_strapi.py    # Sync to Strapi
+│   └── (RAG sources via backend API)
 │
 ├── docs/                        # Documentation
 │   ├── ARCHITECTURE.md
@@ -237,7 +237,7 @@ const { user, login, logout, isAdmin, isSuperAdmin, loading } = useAuth();
 
 ```env
 # frontend/.env.local
-NEXT_PUBLIC_STRAPI_URL=https://admin.ominis.org
+NEXT_PUBLIC_API_URL=https://api.ominis.org
 NEXT_PUBLIC_OMINIS_API_URL=https://api.ominis.org
 MEXICO_API_URL=http://mexico-server:8080/query
 GPU_API_URL=http://gpu-server:8080/query
@@ -266,34 +266,28 @@ export default function NewPage() {
 }
 ```
 
-## Backend Development (Strapi)
+## Backend Development (Haystack)
 
 ### Tech Stack
 
 | Technology | Purpose |
 |------------|---------|
-| Strapi V5 | Headless CMS |
+| FastAPI | API server |
+| Haystack | RAG pipeline |
 | PostgreSQL | Production database |
-| SQLite | Development database |
 | JWT | Authentication |
 
-### Running Strapi
+### Running the backend
 
 ```bash
-cd backend
+cd backend-haystack
+source venv/bin/activate
 
 # Development (hot reload)
-npm run develop
+uvicorn app.main:app --reload
 
 # Production
-npm run build
-npm run start
-
-# Seed roles
-npm run seed:roles
-
-# Full seed
-npm run seed
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 ### Content Types
@@ -423,7 +417,7 @@ results = store.search(query_embedding, k=5)
 # Terminal 1: Frontend
 cd frontend && npm run dev
 
-# Terminal 2: Strapi
+# Terminal 2: Backend
 cd backend && npm run develop
 
 # Terminal 3: Ollama
@@ -443,7 +437,7 @@ curl http://localhost:11434/api/generate -d '{
   "stream": false
 }'
 
-# Test Strapi
+# Test backend
 curl http://localhost:1337/v1/system-stats/health
 
 # Test Frontend
@@ -494,11 +488,10 @@ python scripts/test_query.py
 aws ec2 stop-instances --instance-ids i-xxx --region us-east-1
 ```
 
-### Deploy Strapi
+### Deploy Haystack backend
 
 ```bash
-./infrastructure/14-deploy-strapi-backend.sh
-./infrastructure/15-setup-strapi-nginx-ssl.sh
+./infrastructure/17-deploy-haystack-backend.sh
 ```
 
 ### Deploy Frontend
@@ -522,10 +515,10 @@ rm -rf frontend/.next frontend/node_modules
 cd frontend && npm install && npm run build
 ```
 
-#### Strapi connection errors
+#### Backend connection errors
 ```bash
-# Check database
-cd backend && npm run develop -- --watch-admin
+# Check backend
+cd backend-haystack && uvicorn app.main:app --reload
 ```
 
 #### FAISS import error
@@ -546,8 +539,8 @@ ollama create ominis-2.0 -f /tmp/Modelfile
 # Check S3
 aws s3 ls s3://ominis-health-embeddings-mx/vectors/
 
-# Check Strapi health
-curl http://localhost:1337/v1/system-stats/health
+# Check backend health
+curl http://localhost:8000/v1/system-stats/health
 
 # Check GPU
 ssh -i config/ominis-ollama-gpu-key.pem ubuntu@IP 'nvidia-smi'

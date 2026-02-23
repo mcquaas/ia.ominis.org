@@ -1,0 +1,6 @@
+# Ominis Chat (chat.ominis.org)
+CHAT_INSTANCE_ID=i-035b92e0a334cfc52
+CHAT_ELASTIC_IP=78.13.191.29
+CHAT_DOMAIN=chat.ominis.org
+CHAT_URL=https://chat.ominis.org
+CHAT_KEY_NAME=ominis-chat-key

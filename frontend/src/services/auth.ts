@@ -18,9 +18,8 @@ import type {
   TaxonomyDict,
 } from '@/types/auth';
 
-// Configuration - Backend API URL
-// Supports both the new Haystack backend and legacy Strapi backend
-const STRAPI_URL = process.env.NEXT_PUBLIC_STRAPI_URL || 'http://localhost:8000';
+// Configuration - Haystack backend API URL
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const API_PREFIX = '/v1';
 
 // Token storage key
@@ -94,9 +93,9 @@ export function hasRole(role: 'researcher' | 'developer' | 'admin' | 'superadmin
 }
 
 /**
- * Make authenticated request to Strapi
+ * Make authenticated request to the backend API (Haystack).
  */
-async function fetchStrapi<T>(
+async function fetchApi<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
@@ -111,7 +110,7 @@ async function fetchStrapi<T>(
     (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
   }
   
-  const response = await fetch(`${STRAPI_URL}${API_PREFIX}${endpoint}`, {
+  const response = await fetch(`${API_URL}${API_PREFIX}${endpoint}`, {
     ...options,
     headers,
   });
@@ -136,7 +135,7 @@ async function fetchStrapi<T>(
  * Login with email/username and password
  */
 export async function login(credentials: LoginCredentials): Promise<AuthResponse> {
-  const response = await fetchStrapi<AuthResponse>('/api/auth/local', {
+  const response = await fetchApi<AuthResponse>('/api/auth/local', {
     method: 'POST',
     body: JSON.stringify(credentials),
   });
@@ -149,7 +148,7 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
  * Register a new user
  */
 export async function register(data: RegisterData): Promise<AuthResponse> {
-  const response = await fetchStrapi<AuthResponse>('/api/auth/local/register', {
+  const response = await fetchApi<AuthResponse>('/api/auth/local/register', {
     method: 'POST',
     body: JSON.stringify(data),
   });
@@ -163,7 +162,7 @@ export async function register(data: RegisterData): Promise<AuthResponse> {
  * Redirect user to this URL to initiate Google sign-in
  */
 export function getGoogleAuthUrl(): string {
-  const base = STRAPI_URL.replace(/\/$/, '');
+  const base = API_URL.replace(/\/$/, '');
   return `${base}${API_PREFIX}/api/connect/google`;
 }
 
@@ -178,7 +177,7 @@ export function logout(): void {
  * Get current user profile
  */
 export async function getProfile(): Promise<User> {
-  const response = await fetchStrapi<User>('/api/users/me?populate=role');
+  const response = await fetchApi<User>('/api/users/me?populate=role');
   
   // Update stored user
   const token = getToken();
@@ -196,7 +195,7 @@ export async function updateProfile(data: Partial<User>): Promise<User> {
   const user = getUser();
   if (!user) throw new Error('Not authenticated');
   
-  const updated = await fetchStrapi<User>(`/api/users/${user.id}`, {
+  const updated = await fetchApi<User>(`/api/users/${user.id}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   });
@@ -216,7 +215,7 @@ export async function changePassword(
   currentPassword: string,
   newPassword: string
 ): Promise<void> {
-  await fetchStrapi<void>('/api/auth/change-password', {
+  await fetchApi<void>('/api/auth/change-password', {
     method: 'POST',
     body: JSON.stringify({
       currentPassword,
@@ -230,7 +229,7 @@ export async function changePassword(
  * Request password reset email
  */
 export async function forgotPassword(email: string): Promise<{ ok: boolean }> {
-  await fetchStrapi<{ ok: boolean }>('/api/auth/forgot-password', {
+  await fetchApi<{ ok: boolean }>('/api/auth/forgot-password', {
     method: 'POST',
     body: JSON.stringify({ email }),
   });
@@ -241,7 +240,7 @@ export async function forgotPassword(email: string): Promise<{ ok: boolean }> {
  * Request password reset via SMS (requires Twilio)
  */
 export async function forgotPasswordPhone(phone: string): Promise<{ ok: boolean }> {
-  await fetchStrapi<{ ok: boolean }>('/api/auth/forgot-password-phone', {
+  await fetchApi<{ ok: boolean }>('/api/auth/forgot-password-phone', {
     method: 'POST',
     body: JSON.stringify({ phone }),
   });
@@ -256,7 +255,7 @@ export async function resetPassword(
   password: string,
   passwordConfirmation: string
 ): Promise<AuthResponse> {
-  const response = await fetchStrapi<AuthResponse>('/api/auth/reset-password', {
+  const response = await fetchApi<AuthResponse>('/api/auth/reset-password', {
     method: 'POST',
     body: JSON.stringify({
       code,
@@ -275,7 +274,7 @@ export async function resetPassword(
  * Get user's API keys
  */
 export async function getApiKeys(): Promise<ApiKey[]> {
-  const response = await fetchStrapi<{ data: ApiKey[] }>('/api/api-keys?populate=owner');
+  const response = await fetchApi<{ data: ApiKey[] }>('/api/api-keys?populate=owner');
   return response.data;
 }
 
@@ -283,7 +282,7 @@ export async function getApiKeys(): Promise<ApiKey[]> {
  * Create a new API key
  */
 export async function createApiKey(data: CreateApiKeyData): Promise<CreateApiKeyResponse> {
-  return fetchStrapi<CreateApiKeyResponse>('/api/api-keys', {
+  return fetchApi<CreateApiKeyResponse>('/api/api-keys', {
     method: 'POST',
     body: JSON.stringify({ data }),
   });
@@ -293,7 +292,7 @@ export async function createApiKey(data: CreateApiKeyData): Promise<CreateApiKey
  * Revoke an API key
  */
 export async function revokeApiKey(id: number): Promise<void> {
-  await fetchStrapi<void>(`/api/api-keys/${id}/revoke`, {
+  await fetchApi<void>(`/api/api-keys/${id}/revoke`, {
     method: 'POST',
   });
 }
@@ -310,7 +309,7 @@ export async function getApiKeyUsage(id: number): Promise<{
   rateLimitWindow: string;
   status: string;
 }> {
-  return fetchStrapi(`/api/api-keys/${id}/usage`);
+  return fetchApi(`/api/api-keys/${id}/usage`);
 }
 
 // ==================== RAG Sources (Admin+) ====================
@@ -335,14 +334,14 @@ export async function getRagSources(params?: {
   if (params?.taxonomy && Object.keys(params.taxonomy).length > 0) {
     query.set('filters[taxonomy]', JSON.stringify(params.taxonomy));
   }
-  return fetchStrapi(`/api/rag-sources?${query.toString()}`);
+  return fetchApi(`/api/rag-sources?${query.toString()}`);
 }
 
 /**
  * Get taxonomy schema (dimensions and valid values)
  */
 export async function getTaxonomySchema(): Promise<{ taxonomy: Record<string, string[]> }> {
-  return fetchStrapi('/api/rag-sources/taxonomy-schema');
+  return fetchApi('/api/rag-sources/taxonomy-schema');
 }
 
 /**
@@ -351,14 +350,14 @@ export async function getTaxonomySchema(): Promise<{ taxonomy: Record<string, st
 export async function getTaxonomyStats(): Promise<{
   taxonomyStats: Record<string, Record<string, number>>;
 }> {
-  return fetchStrapi('/api/rag-sources/taxonomy-stats');
+  return fetchApi('/api/rag-sources/taxonomy-stats');
 }
 
 /**
  * Run LLM classification for a single source
  */
 export async function classifySource(id: number): Promise<{ data: RagSource; message: string }> {
-  return fetchStrapi(`/api/rag-sources/${id}/classify`, { method: 'POST' });
+  return fetchApi(`/api/rag-sources/${id}/classify`, { method: 'POST' });
 }
 
 /**
@@ -368,7 +367,7 @@ export async function batchReindex(options?: {
   onlyWithTaxonomy?: boolean;
   maxConcurrent?: number;
 }): Promise<{ message: string; totalQueued: number }> {
-  return fetchStrapi('/api/rag-sources/batch-reindex', {
+  return fetchApi('/api/rag-sources/batch-reindex', {
     method: 'POST',
     body: JSON.stringify({
       onlyWithTaxonomy: options?.onlyWithTaxonomy ?? true,
@@ -381,14 +380,14 @@ export async function batchReindex(options?: {
  * Get a single RAG source
  */
 export async function getRagSource(id: number): Promise<{ data: RagSource }> {
-  return fetchStrapi(`/api/rag-sources/${id}`);
+  return fetchApi(`/api/rag-sources/${id}`);
 }
 
 /**
  * Create a new RAG source
  */
 export async function createRagSource(data: Partial<RagSource>): Promise<{ data: RagSource }> {
-  return fetchStrapi('/api/rag-sources', {
+  return fetchApi('/api/rag-sources', {
     method: 'POST',
     body: JSON.stringify({ data }),
   });
@@ -398,7 +397,7 @@ export async function createRagSource(data: Partial<RagSource>): Promise<{ data:
  * Update a RAG source
  */
 export async function updateRagSource(id: number, data: Partial<RagSource>): Promise<{ data: RagSource }> {
-  return fetchStrapi(`/api/rag-sources/${id}`, {
+  return fetchApi(`/api/rag-sources/${id}`, {
     method: 'PUT',
     body: JSON.stringify({ data }),
   });
@@ -408,16 +407,28 @@ export async function updateRagSource(id: number, data: Partial<RagSource>): Pro
  * Delete a RAG source
  */
 export async function deleteRagSource(id: number): Promise<void> {
-  await fetchStrapi(`/api/rag-sources/${id}`, {
+  await fetchApi(`/api/rag-sources/${id}`, {
     method: 'DELETE',
   });
+}
+
+/**
+ * Mark sources stuck in "indexing" (no update for older_than_minutes) as error so they can be retried.
+ */
+export async function markStuckIndexingAsFailed(
+  olderThanMinutes: number = 30,
+): Promise<{ marked: number; olderThanMinutes: number }> {
+  return fetchApi(
+    `/api/rag-sources/mark-stuck-indexing?older_than_minutes=${encodeURIComponent(olderThanMinutes)}`,
+    { method: 'POST' },
+  );
 }
 
 /**
  * Trigger re-indexing of a source
  */
 export async function reindexSource(id: number): Promise<{ message: string; sourceId: number; status: string }> {
-  return fetchStrapi(`/api/rag-sources/${id}/reindex`, {
+  return fetchApi(`/api/rag-sources/${id}/reindex`, {
     method: 'POST',
   });
 }
@@ -435,7 +446,7 @@ export async function getSourceStats(): Promise<{
   };
   totalChunks: number;
 }> {
-  return fetchStrapi('/api/rag-sources/stats');
+  return fetchApi('/api/rag-sources/stats');
 }
 
 /**
@@ -452,15 +463,19 @@ export async function uploadRagFile(
   if (metadata.category) formData.append('category', metadata.category);
   formData.append('language', metadata.language || 'es');
 
-  const response = await fetch(`${STRAPI_URL}${API_PREFIX}/api/rag-sources/upload`, {
+  const response = await fetch(`${API_URL}${API_PREFIX}/api/rag-sources/upload`, {
     method: 'POST',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: formData,
   });
 
   if (!response.ok) {
+    if (response.status === 413) {
+      throw new Error('File too large. Maximum size is 50MB. If the server was recently set up, ask the admin to run infrastructure/20g-backend-nginx-upload-size.sh.');
+    }
     const err = await response.json().catch(() => ({ detail: 'Upload failed' }));
-    throw new Error(err.detail || `Upload failed: ${response.status}`);
+    const msg = typeof err.detail === 'string' ? err.detail : Array.isArray(err.detail) ? (err.detail as { msg?: string }[]).map((x) => x?.msg).filter(Boolean).join('; ') : null;
+    throw new Error(msg || `Upload failed: ${response.status}`);
   }
 
   return response.json();
@@ -484,7 +499,7 @@ export async function getSourceChunks(
   }>;
   meta: { pagination: { total: number; page: number; pageSize: number } };
 }> {
-  return fetchStrapi(`/api/rag-sources/${sourceId}/chunks?page=${page}&page_size=${pageSize}`);
+  return fetchApi(`/api/rag-sources/${sourceId}/chunks?page=${page}&page_size=${pageSize}`);
 }
 
 /**
@@ -496,25 +511,27 @@ export async function getStoreStats(): Promise<{
   embeddingDimension: number;
   storageType: string;
 }> {
-  return fetchStrapi('/api/rag-sources/store-stats');
+  return fetchApi('/api/rag-sources/store-stats');
 }
 
 /**
- * Preview: scrape a URL for PDF links without indexing
+ * Preview: scrape a URL for PDF, CSV, XLS, XLSX links without indexing
  */
 export async function scrapePreview(url: string): Promise<{
   url: string;
   totalPdfs: number;
   pdfs: Array<{ title: string; pdfUrl: string; sourcePage: string }>;
+  totalFiles: number;
+  files: Array<{ title: string; fileUrl: string; sourcePage: string; format: string }>;
 }> {
-  return fetchStrapi('/api/rag-sources/scrape-preview', {
+  return fetchApi('/api/rag-sources/scrape-preview', {
     method: 'POST',
     body: JSON.stringify({ url }),
   });
 }
 
 /**
- * Scrape PDFs from a URL and index them all
+ * Scrape files (PDF, CSV, XLS, XLSX) from a URL and index selected
  */
 export async function scrapeAndIndex(
   url: string,
@@ -522,19 +539,21 @@ export async function scrapeAndIndex(
     category?: string;
     language?: string;
     pdfs?: Array<{ title: string; pdfUrl: string; sourcePage: string }>;
+    files?: Array<{ title: string; fileUrl: string; sourcePage: string; format: string }>;
   }
 ): Promise<{
   message: string;
   totalQueued: number;
-  sources: Array<{ sourceId: number; title: string; pdfUrl: string; status: string }>;
+  sources: Array<{ sourceId: number; title: string; pdfUrl: string; fileUrl?: string; format?: string; status: string }>;
 }> {
-  return fetchStrapi('/api/rag-sources/scrape-index', {
+  return fetchApi('/api/rag-sources/scrape-index', {
     method: 'POST',
     body: JSON.stringify({
       url,
       category: options?.category || '',
       language: options?.language || 'es',
       pdfs: options?.pdfs || null,
+      files: options?.files || null,
     }),
   });
 }
@@ -557,7 +576,7 @@ export async function datasetPreview(url: string): Promise<{
     sourcePage: string;
   }>;
 }> {
-  return fetchStrapi('/api/rag-sources/dataset-preview', {
+  return fetchApi('/api/rag-sources/dataset-preview', {
     method: 'POST',
     body: JSON.stringify({ url }),
   });
@@ -587,7 +606,7 @@ export async function datasetIndex(
   totalQueued: number;
   sources: Array<{ sourceId: number; title: string; url: string; format: string; status: string }>;
 }> {
-  return fetchStrapi('/api/rag-sources/dataset-index', {
+  return fetchApi('/api/rag-sources/dataset-index', {
     method: 'POST',
     body: JSON.stringify({
       url,
@@ -611,7 +630,7 @@ export async function tainacanPreview(): Promise<{
   metadataOnly: number;
   byExtension: Record<string, number>;
 }> {
-  return fetchStrapi('/api/rag-sources/tainacan-preview');
+  return fetchApi('/api/rag-sources/tainacan-preview');
 }
 
 /**
@@ -627,7 +646,7 @@ export async function tainacanImport(options?: {
   totalQueued: number;
   skipped: number;
 }> {
-  return fetchStrapi('/api/rag-sources/tainacan-import', {
+  return fetchApi('/api/rag-sources/tainacan-import', {
     method: 'POST',
     body: JSON.stringify({
       category: options?.category || 'tainacan',
@@ -644,14 +663,14 @@ export async function tainacanImport(options?: {
  * Get system statistics
  */
 export async function getSystemStats(): Promise<{ data: SystemStats }> {
-  return fetchStrapi('/api/system-stats');
+  return fetchApi('/api/system-stats');
 }
 
 /**
  * Refresh system statistics
  */
 export async function refreshSystemStats(): Promise<{ message: string; stats: SystemStats }> {
-  return fetchStrapi('/api/system-stats/refresh', {
+  return fetchApi('/api/system-stats/refresh', {
     method: 'POST',
   });
 }
@@ -668,7 +687,7 @@ export async function getServerPerformance(): Promise<{
   database?: { activeConnections: number; idleConnections: number; totalConnections: number } | null;
   uptimeHours?: number;
 }> {
-  return fetchStrapi('/api/system-stats/server-performance');
+  return fetchApi('/api/system-stats/server-performance');
 }
 
 /**
@@ -678,8 +697,9 @@ export async function getServerPerformance(): Promise<{
 export async function getResearchInstanceStatus(): Promise<{
   openscholar: string | null;
   openscholar_128k: string | null;
+  details?: Record<'openscholar' | 'openscholar_128k', InstanceDetails>;
 }> {
-  return fetchStrapi('/api/research-instances/status');
+  return fetchApi('/api/research-instances/status');
 }
 
 /**
@@ -687,14 +707,14 @@ export async function getResearchInstanceStatus(): Promise<{
  * Admin only.
  */
 export async function startResearchInstance(key: 'openscholar' | 'openscholar_128k'): Promise<{ status: string; message: string }> {
-  return fetchStrapi(`/api/research-instances/start?key=${encodeURIComponent(key)}`, { method: 'POST' });
+  return fetchApi(`/api/research-instances/start?key=${encodeURIComponent(key)}`, { method: 'POST' });
 }
 
 /**
  * Stop a research GPU instance. Admin only.
  */
 export async function stopResearchInstance(key: 'openscholar' | 'openscholar_128k'): Promise<{ status: string; message: string }> {
-  return fetchStrapi(`/api/research-instances/stop?key=${encodeURIComponent(key)}`, { method: 'POST' });
+  return fetchApi(`/api/research-instances/stop?key=${encodeURIComponent(key)}`, { method: 'POST' });
 }
 
 /**
@@ -711,31 +731,108 @@ export async function getLlmServersStatus(): Promise<{
     error?: string;
   }>;
 }> {
-  return fetchStrapi('/api/llm-servers/status');
+  return fetchApi('/api/llm-servers/status');
 }
 
+/** Instance details returned for LLM and research instances (dashboard). */
+export type InstanceDetails = {
+  instanceId: string | null;
+  instanceType: string | null;
+  publicIp: string | null;
+  state: string | null;
+  vramGb: number | null;
+  ramGb: number | null;
+  modelBase: string;
+  modelDescription: string;
+};
+
 /**
- * Get LLM GPU instance status (ominis-2.0 and ominis-2.0-clinic). Admin/researcher.
+ * Get LLM GPU instance status (ominis-2.0 and optionally ominis-2.0-med). Admin/researcher.
  */
 export async function getLlmInstanceStatus(): Promise<{
   'ominis-2.0': string | null;
-  'ominis-2.0-clinic': string | null;
+  'ominis-2.0-med'?: string | null;
+  details?: Record<string, InstanceDetails>;
 }> {
-  return fetchStrapi('/api/llm-instances/status');
+  return fetchApi('/api/llm-instances/status');
 }
 
 /**
- * Start an LLM GPU instance (ominis-2.0 | ominis-2.0-clinic). Admin only.
+ * Start an LLM GPU instance (ominis-2.0 | ominis-2.0-med). Admin only.
  */
-export async function startLlmInstance(key: 'ominis-2.0' | 'ominis-2.0-clinic'): Promise<{ status: string; message: string }> {
-  return fetchStrapi(`/api/llm-instances/start?key=${encodeURIComponent(key)}`, { method: 'POST' });
+export async function startLlmInstance(key: 'ominis-2.0' | 'ominis-2.0-med'): Promise<{ status: string; message: string }> {
+  return fetchApi(`/api/llm-instances/start?key=${encodeURIComponent(key)}`, { method: 'POST' });
 }
 
 /**
- * Stop an LLM GPU instance (ominis-2.0 | ominis-2.0-clinic). Admin only.
+ * Stop an LLM GPU instance (ominis-2.0 | ominis-2.0-med). Admin only.
  */
-export async function stopLlmInstance(key: 'ominis-2.0' | 'ominis-2.0-clinic'): Promise<{ status: string; message: string }> {
-  return fetchStrapi(`/api/llm-instances/stop?key=${encodeURIComponent(key)}`, { method: 'POST' });
+export async function stopLlmInstance(key: 'ominis-2.0' | 'ominis-2.0-med'): Promise<{ status: string; message: string }> {
+  return fetchApi(`/api/llm-instances/stop?key=${encodeURIComponent(key)}`, { method: 'POST' });
+}
+
+/** One EC2 server with its instance details and models (for dashboard grouped view). */
+export type ServerWithModels = {
+  instanceId: string;
+  instanceType: string | null;
+  publicIp: string | null;
+  state: string;
+  vramGb: number | null;
+  ramGb: number | null;
+  /** Approximate on-demand USD/month (24/7) when known */
+  estimatedMonthlyUsd?: number | null;
+  primaryKey: string;
+  primaryKeyType: 'llm' | 'research';
+  models: Array<{ key: string; label: string; modelBase: string; modelDescription: string }>;
+  isRemote?: boolean;
+};
+
+/**
+ * Get all LLM servers grouped by EC2 instance (Ominis 2.0 and Ominis 2.0 Med). One on/off per server.
+ */
+export async function getServersStatus(): Promise<{ servers: ServerWithModels[]; error?: string }> {
+  return fetchApi('/api/servers/status');
+}
+
+/** LLM model config (dashboard: assignments, prompts, version, params) */
+export type LLMModelConfigItem = {
+  model_id: string;
+  display_name: string;
+  version_label: string;
+  description: string;
+  backend_type: 'ollama' | 'openai';
+  backend_model: string;
+  backend_url_override: string | null;
+  system_prompt: string | null;
+  temperature: number | null;
+  num_predict: number | null;
+  extra_params: Record<string, unknown> | null;
+  is_default: boolean;
+  overridden: string[];
+  available_for_researcher?: boolean;
+};
+
+export async function getLLMModelsConfig(): Promise<LLMModelConfigItem[]> {
+  return fetchApi('/api/llm-models/config');
+}
+
+export async function updateLLMModelConfig(
+  modelId: string,
+  body: Partial<{
+    display_name: string;
+    version_label: string;
+    description: string;
+    backend_model: string;
+    backend_url_override: string;
+    system_prompt: string;
+    temperature: number;
+    num_predict: number;
+    extra_params: Record<string, unknown>;
+    is_default: boolean;
+    available_for_researcher: boolean;
+  }>
+): Promise<{ status: string; model_id: string }> {
+  return fetchApi(`/api/llm-models/config/${encodeURIComponent(modelId)}`, { method: 'PUT', body: JSON.stringify(body) });
 }
 
 /**
@@ -746,8 +843,9 @@ export async function getChatDefaults(): Promise<{
   rag_search: boolean;
   web_search: boolean;
   pubmed_search: boolean;
+  openscholar_search: boolean;
 }> {
-  return fetchStrapi('/api/chat-defaults');
+  return fetchApi('/api/chat-defaults');
 }
 
 /**
@@ -758,15 +856,34 @@ export async function updateChatDefaults(defaults: {
   rag_search?: boolean;
   web_search?: boolean;
   pubmed_search?: boolean;
+  openscholar_search?: boolean;
 }): Promise<{
   research_mode: boolean;
   rag_search: boolean;
   web_search: boolean;
   pubmed_search: boolean;
+  openscholar_search: boolean;
 }> {
-  return fetchStrapi('/api/chat-defaults', {
+  return fetchApi('/api/chat-defaults', {
     method: 'PATCH',
     body: JSON.stringify(defaults),
+  });
+}
+
+/**
+ * Get site config (e.g. global banner message). Public — used to show notification at top of app.
+ */
+export async function getSiteConfig(): Promise<{ banner_message: string | null }> {
+  return fetchApi('/api/site-config');
+}
+
+/**
+ * Update site config (e.g. global banner). Superadmin only.
+ */
+export async function updateSiteConfig(config: { banner_message?: string | null }): Promise<{ banner_message: string | null }> {
+  return fetchApi('/api/site-config', {
+    method: 'PATCH',
+    body: JSON.stringify(config),
   });
 }
 
@@ -783,7 +900,7 @@ export async function getGpuServerPerformance(): Promise<{
   inference?: { latencyMs: number; tokensPerSecond: number; evalCount: number; evalDurationMs: number; loadDurationMs: number };
   error?: string;
 }> {
-  return fetchStrapi('/api/system-stats/gpu-server');
+  return fetchApi('/api/system-stats/gpu-server');
 }
 
 /**
@@ -800,7 +917,7 @@ export async function getHealth(): Promise<{
   servers: { cpu: string; gpu: string };
   lastCheck?: string;
 }> {
-  const response = await fetch(`${STRAPI_URL}${API_PREFIX}/system-stats/health`);
+  const response = await fetch(`${API_URL}${API_PREFIX}/system-stats/health`);
   return response.json();
 }
 
@@ -810,14 +927,14 @@ export async function getHealth(): Promise<{
  * Get aggregated query statistics
  */
 export async function getQueryStats(period: 'hour' | 'day' | 'week' | 'month' = 'day'): Promise<QueryStats> {
-  return fetchStrapi(`/api/query-logs/aggregated?period=${period}`);
+  return fetchApi(`/api/query-logs/aggregated?period=${period}`);
 }
 
 /**
  * Get usage stats for the current user
  */
 export async function getUserUsage(period: 'day' | 'week' | 'month' = 'month'): Promise<UserUsage> {
-  return fetchStrapi(`/api/users/me/usage?period=${period}`);
+  return fetchApi(`/api/users/me/usage?period=${period}`);
 }
 
 // ==================== User Management (SuperAdmin) ====================
@@ -826,14 +943,14 @@ export async function getUserUsage(period: 'day' | 'week' | 'month' = 'month'): 
  * Get all users (SuperAdmin only)
  */
 export async function getUsers(): Promise<User[]> {
-  return fetchStrapi('/api/users?populate=role');
+  return fetchApi('/api/users?populate=role');
 }
 
 /**
  * Update a user (SuperAdmin only)
  */
 export async function updateUser(id: number, data: Partial<User>): Promise<User> {
-  return fetchStrapi(`/api/users/${id}`, {
+  return fetchApi(`/api/users/${id}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   });
@@ -843,7 +960,7 @@ export async function updateUser(id: number, data: Partial<User>): Promise<User>
  * Block/unblock a user (SuperAdmin only)
  */
 export async function toggleUserBlock(id: number, blocked: boolean): Promise<User> {
-  return fetchStrapi(`/api/users/${id}`, {
+  return fetchApi(`/api/users/${id}`, {
     method: 'PUT',
     body: JSON.stringify({ blocked }),
   });
@@ -853,7 +970,7 @@ export async function toggleUserBlock(id: number, blocked: boolean): Promise<Use
  * Delete a user (SuperAdmin only)
  */
 export async function deleteUser(id: number): Promise<void> {
-  await fetchStrapi(`/api/users/${id}`, {
+  await fetchApi(`/api/users/${id}`, {
     method: 'DELETE',
   });
 }

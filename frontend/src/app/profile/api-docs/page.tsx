@@ -7,7 +7,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { getToken } from '@/services/auth';
 
 // Docs endpoint is at the app root (not under /v1)
-const API_DOCS_BASE = (process.env.NEXT_PUBLIC_STRAPI_URL || 'https://api.ominis.org').replace(/\/v1$/, '');
+const API_DOCS_BASE = (process.env.NEXT_PUBLIC_API_URL || 'https://api.ominis.org').replace(/\/v1$/, '');
 
 export default function ApiDocsPage() {
   const { user, loading: authLoading, isAuthenticated } = useAuth();

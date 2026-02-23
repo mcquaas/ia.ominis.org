@@ -28,6 +28,7 @@ export async function POST(request: NextRequest) {
         rag_search: body.rag_search !== false,
         web_search: body.web_search !== false,
         pubmed_search: body.pubmed_search !== false,
+        openscholar_search: body.openscholar_search === true,
         file_context: body.file_context || undefined,
         iterations: body.iterations || 4,
         max_total_sources: body.max_total_sources || 30,
@@ -37,16 +38,29 @@ export async function POST(request: NextRequest) {
         excluded_sources: body.excluded_sources || [],
       };
 
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const auth = request.headers.get('Authorization');
+      if (auth) headers['Authorization'] = auth;
+
       const response = await fetch(ACADEMIC_API, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify(apiBody),
       });
 
       if (!response.ok) {
-        const errorEvent = `data: ${JSON.stringify({ type: 'error', message: `Academic API error: ${response.status}` })}\n\n`;
+        let message = `Academic API error: ${response.status}`;
+        let reason: string | undefined;
+        try {
+          const errBody = await response.json();
+          if (errBody?.detail?.code === 'model_not_allowed' && errBody?.detail?.reason === 'login_required') {
+            reason = 'login_required';
+            message = 'Inicia sesión para usar el modo Investigación.';
+          }
+        } catch {
+          // ignore
+        }
+        const errorEvent = `data: ${JSON.stringify({ type: 'error', message, reason: reason ?? null })}\n\n`;
         await writer.write(encoder.encode(errorEvent));
         await writer.close();
         return;

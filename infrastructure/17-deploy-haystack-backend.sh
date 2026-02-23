@@ -2,7 +2,7 @@
 # =============================================================================
 # Deploy Haystack Backend (FastAPI + Haystack) on EC2
 #
-# Replaces the Strapi Node.js backend with the new Python backend.
+# Python backend (FastAPI + Haystack) for API and admin.
 # Instance: t3.large (2 vCPU, 8GB RAM) - enough for FastAPI + sentence-transformers
 #
 # This instance does NOT run LLM inference - it connects to:
@@ -35,7 +35,7 @@ FALCON_OLLAMA_IP="${FALCON_ELASTIC_IP:-18.235.182.22}"
 
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║   Deploying Haystack Backend (FastAPI + RAG)                 ║"
-echo "║   Replaces Strapi - Python backend with full RBAC            ║"
+echo "║   Python backend with full RBAC (auth, API keys, RAG)        ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Instance Type: $INSTANCE_TYPE (2 vCPU, 8GB RAM)"
@@ -154,7 +154,7 @@ AWS_REGION=mx-central-1
 EMBEDDINGS_BUCKET=ominis-health-embeddings-mx
 VECTOR_PREFIX=vectors
 FRONTEND_URL=https://ominis.org
-ALLOWED_ORIGINS=https://ominis.org,http://localhost:3000
+ALLOWED_ORIGINS=https://ominis.org,https://ia.ominis.org,https://la.ominis.org,https://ai.ominis.org,http://localhost:3000
 RATE_LIMIT_REQUESTS=100
 RATE_LIMIT_WINDOW_SECONDS=60
 ENVFILE
@@ -181,11 +181,18 @@ SERVICEEOF
 systemctl daemon-reload
 systemctl enable ominis-backend
 
-# Nginx reverse proxy
+# Nginx reverse proxy (allow uploads 50MB; CORS for dashboard origins)
 cat << 'NGINXEOF' > /etc/nginx/sites-available/ominis-backend
+map \$http_origin \$cors_origin {
+    default "";
+    "~^https://(ia|la|ai)\.ominis\.org\$" \$http_origin;
+    "https://ominis.org" \$http_origin;
+    "http://localhost:3000" \$http_origin;
+}
 server {
     listen 80;
     server_name _;
+    client_max_body_size 50M;
 
     location / {
         proxy_pass http://127.0.0.1:8000;
@@ -194,13 +201,25 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
+        # CORS: ensure dashboard (ia.ominis.org, etc.) can call API from browser
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Credentials;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        if (\$cors_origin != "") {
+            add_header Access-Control-Allow-Origin \$cors_origin always;
+            add_header Access-Control-Allow-Credentials "true" always;
+            add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization" always;
+        }
+
         # SSE streaming support
         proxy_buffering off;
         proxy_cache off;
         proxy_http_version 1.1;
         proxy_set_header Connection '';
         chunked_transfer_encoding off;
-        proxy_read_timeout 120s;
+        proxy_read_timeout 600s;
     }
 }
 NGINXEOF
@@ -335,7 +354,7 @@ echo "5. Start the service:"
 echo "   sudo systemctl start ominis-backend"
 echo "   sudo systemctl status ominis-backend"
 echo ""
-echo "6. Update frontend NEXT_PUBLIC_STRAPI_URL to:"
+echo "6. Update frontend NEXT_PUBLIC_API_URL to:"
 echo "   http://$BACKEND_IP"
 echo ""
 echo "Configuration saved to config/haystack_backend.txt"

@@ -1,6 +1,6 @@
 """
 API Key service: create, validate, revoke.
-Uses the same ominis_<64-hex> format as the existing Strapi implementation.
+Uses the ominis_<64-hex> format for API keys.
 """
 
 import json

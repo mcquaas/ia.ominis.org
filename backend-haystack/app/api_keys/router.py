@@ -1,6 +1,6 @@
 """
 API Key management routes.
-Paths match the Strapi-compatible format the frontend expects.
+Paths match the format the frontend expects.
 """
 
 import json

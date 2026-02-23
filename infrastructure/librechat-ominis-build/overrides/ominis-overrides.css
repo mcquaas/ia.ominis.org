@@ -1,0 +1,1197 @@
+/* Ominis theme for LibreChat — aligned with ia.ominis.org (globals.css). Glassmorphism, molecular background. Light = default, Dark = .dark */
+:root {
+  /* Light theme (default when LibreChat has no .dark): white/light blue bg, dark blue foreground */
+  --background: #e8f4f8;
+  --background-end: #d4ebf2;
+  --foreground: #0f2744;
+  --foreground-muted: #4a5568;
+  --primary: #1e3a5f;
+  --primary-dark: #0f2744;
+  --primary-glass: rgba(255, 255, 255, 0.5);
+  --accent: #2563eb;
+  --accent-light: #1d4ed8;
+  --accent-dim: rgba(37, 99, 235, 0.12);
+  --border-subtle: rgba(15, 39, 68, 0.18);
+  --border-accent: rgba(37, 99, 235, 0.5);
+  --bubble-user: rgba(37, 99, 235, 0.18);
+  --bubble-assistant: rgba(255, 255, 255, 0.72);
+  --control-bg: rgba(15, 39, 68, 0.08);
+  --control-checked: rgba(37, 99, 235, 0.65);
+  --slider-track: rgba(37, 99, 235, 0.35);
+  /* Glass: frosted white over background */
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --modal-bg: rgba(255, 255, 255, 0.88);
+  --popover-bg: rgba(255, 255, 255, 0.92);
+  --toggle-bg: rgba(255, 255, 255, 0.78);
+  --button-hover-bg: rgba(15, 39, 68, 0.06);
+  --button-hover-border: rgba(15, 39, 68, 0.2);
+  --button-active-bg: rgba(37, 99, 235, 0.18);
+  --heading: #0c1929;
+  --tw-backdrop-blur: 0;
+}
+
+/* ---- Dark theme (when LibreChat adds .dark to html) ---- */
+html.dark,
+.dark {
+  --background: #0a1628;
+  --background-end: #0f172a;
+  --foreground: #f8fafc;
+  --foreground-muted: #94a3b8;
+  --primary: #1e3a5f;
+  --primary-dark: #0f2744;
+  --primary-glass: rgba(15, 39, 68, 0.45);
+  --accent: #3b82f6;
+  --accent-light: #60a5fa;
+  --accent-dim: rgba(59, 130, 246, 0.15);
+  --border-subtle: rgba(248, 250, 252, 0.08);
+  --border-accent: rgba(59, 130, 246, 0.35);
+  --bubble-user: rgba(59, 130, 246, 0.22);
+  --bubble-assistant: rgba(255, 255, 255, 0.06);
+  --control-bg: rgba(255, 255, 255, 0.07);
+  --control-checked: rgba(59, 130, 246, 0.6);
+  --slider-track: rgba(59, 130, 246, 0.4);
+  --glass-bg: rgba(15, 39, 68, 0.48);
+  --modal-bg: rgba(15, 39, 68, 0.72);
+  --popover-bg: rgba(15, 39, 68, 0.78);
+  --toggle-bg: rgba(15, 39, 68, 0.6);
+  --button-hover-bg: rgba(255, 255, 255, 0.06);
+  --button-hover-border: rgba(248, 250, 252, 0.15);
+  --button-active-bg: rgba(59, 130, 246, 0.2);
+  --heading: #f8fafc;
+}
+
+/* ---- 1. Background: sharp, no blur — same image as ia.ominis.org (molecular mesh) ---- */
+html,
+body {
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html {
+  background: var(--background) !important;
+}
+
+body {
+  background-color: var(--background) !important;
+  background-image: url("/background-light.png") !important;
+  background-size: cover !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-attachment: fixed !important;
+  color: var(--foreground) !important;
+  min-height: 100vh !important;
+}
+
+/* Dark theme: molecular background from ia.ominis.org */
+html.dark body,
+.dark body {
+  background-image: url("https://ia.ominis.org/_next/image?url=%2Fbackground.jpg&w=3840&q=75") !important;
+}
+
+/* Overlay so text contrast is OK; no blur — background stays sharp */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  /* Light theme default: soft white veil over image */
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0.4) 50%, rgba(255, 255, 255, 0.65) 100%);
+  pointer-events: none;
+  z-index: 0;
+  filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* Dark theme: dark overlay so background is darker (match ia.ominis.org) */
+html.dark body::before,
+.dark body::before {
+  background: linear-gradient(180deg, rgba(10, 22, 40, 0.72) 0%, rgba(10, 22, 40, 0.55) 50%, rgba(15, 23, 42, 0.78) 100%);
+}
+
+/* Let body background show through: force all app content transparent by default */
+#root,
+[data-testid="app-container"],
+main {
+  position: relative;
+  z-index: 1;
+}
+
+/* Dark: force any opaque panel/sidebar backgrounds to glass (match ia.ominis.org) */
+html.dark #root [class*="bg-gray-9"],
+html.dark #root [class*="bg-slate-9"],
+html.dark #root [class*="bg-gray-8"],
+html.dark #root [class*="bg-slate-8"],
+.dark #root [class*="bg-gray-9"],
+.dark #root [class*="bg-slate-9"],
+.dark #root [class*="bg-gray-8"],
+.dark #root [class*="bg-slate-8"] {
+  background-color: var(--primary-glass) !important;
+  background: var(--primary-glass) !important;
+  backdrop-filter: saturate(180%) blur(12px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
+}
+
+/* No blur anywhere under body (catches any wrapper/overlay LibreChat adds); pseudo-elements too */
+body *,
+body *::before,
+body *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+}
+
+/* LibreChat background overlay: remove blur so our body background stays sharp */
+[class*="background-root"],
+[class*="_next-static-media-bg"],
+[class*="static-media-bg"],
+[class*="tw-backdrop-blur"],
+[class*="background"],
+[class*="Background"],
+[id*="background"] {
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Transparent so body background shows — but keep form controls visible and clickable */
+#root {
+  background-color: transparent !important;
+}
+#root * {
+  background-color: transparent !important;
+}
+/* Restore visible unchecked state: switches (wide pill) vs checkboxes (small round) */
+#root [role="switch"],
+#root [class*="Switch"]:not(button):not([role="button"]) {
+  background-color: var(--control-bg) !important;
+  background: var(--control-bg) !important;
+  border: 1px solid var(--border-subtle) !important;
+  min-width: 2.25rem !important;
+  min-height: 1.25rem !important;
+  border-radius: 9999px !important;
+  pointer-events: auto !important;
+  position: relative !important;
+  z-index: 2 !important;
+}
+#root [role="checkbox"],
+#root [class*="Checkbox"]:not(button):not([role="button"]) {
+  background-color: var(--control-bg) !important;
+  background: var(--control-bg) !important;
+  border: 1px solid var(--border-subtle) !important;
+  width: 1.25rem !important;
+  min-width: 1.25rem !important;
+  max-width: 1.25rem !important;
+  height: 1.25rem !important;
+  min-height: 1.25rem !important;
+  max-height: 1.25rem !important;
+  border-radius: 50% !important;
+  flex: 0 0 1.25rem !important;
+  flex-shrink: 0 !important;
+  pointer-events: auto !important;
+  position: relative !important;
+  z-index: 2 !important;
+}
+/* Checked/on state: visible fill (only on the control, not wrapper divs) */
+#root [role="switch"][data-state="checked"],
+#root [role="switch"][aria-checked="true"],
+#root [role="checkbox"][data-state="checked"],
+#root [role="checkbox"][aria-checked="true"],
+#root [class*="switch"][data-state="checked"],
+#root [class*="Checkbox"][data-state="checked"],
+#root input[type="checkbox"]:checked,
+#root input[type="radio"]:checked {
+  background-color: var(--control-checked) !important;
+  background: var(--control-checked) !important;
+  border-color: var(--accent) !important;
+}
+/* Switch thumb (the moving part) */
+#root [role="switch"] > span,
+#root [class*="Switch"] > span:last-child {
+  background-color: var(--foreground) !important;
+  background: var(--foreground) !important;
+  border-radius: 50% !important;
+  pointer-events: none !important;
+}
+#root [role="switch"][data-state="checked"] > span,
+#root [role="switch"][aria-checked="true"] > span,
+#root [class*="switch"][data-state="checked"] > span:last-child {
+  transform: translateX(100%) !important;
+}
+/* Native inputs: ensure they stay visible and clickable */
+#root input[type="checkbox"],
+#root input[type="radio"] {
+  background-color: var(--control-bg) !important;
+  pointer-events: auto !important;
+  position: relative !important;
+  z-index: 2 !important;
+}
+#root input[type="checkbox"]:checked,
+#root input[type="radio"]:checked {
+  background-color: var(--control-checked) !important;
+}
+
+/* Sliders / range inputs: visible track and thumb (Temperatura, Top P, penalties) */
+#root input[type="range"],
+#root [role="slider"],
+#root [class*="Slider"],
+#root [class*="slider"] {
+  pointer-events: auto !important;
+  position: relative !important;
+  z-index: 2 !important;
+}
+#root input[type="range"] {
+  background: transparent !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  height: 6px !important;
+  border-radius: 3px !important;
+}
+#root input[type="range"]::-webkit-slider-runnable-track {
+  background: var(--slider-track) !important;
+  height: 6px !important;
+  border-radius: 3px !important;
+}
+#root input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  width: 16px !important;
+  height: 16px !important;
+  border-radius: 50% !important;
+  background: var(--foreground) !important;
+  border: 1px solid var(--border-subtle) !important;
+  cursor: pointer !important;
+  margin-top: -5px !important;
+}
+#root input[type="range"]::-moz-range-track {
+  background: var(--slider-track) !important;
+  height: 6px !important;
+  border-radius: 3px !important;
+}
+#root input[type="range"]::-moz-range-thumb {
+  width: 16px !important;
+  height: 16px !important;
+  border-radius: 50% !important;
+  background: var(--foreground) !important;
+  border: 1px solid var(--border-subtle) !important;
+  cursor: pointer !important;
+}
+/* Radix/custom slider track and thumb */
+#root [role="slider"] ~ [class*="track"],
+#root [role="slider"] ~ [class*="Track"],
+#root [class*="Slider"] [class*="track"],
+#root [class*="Slider"] [class*="Track"],
+#root [class*="slider"] [class*="track"],
+#root [class*="Slider"] > div:first-child {
+  background-color: var(--slider-track) !important;
+  background: var(--slider-track) !important;
+  border-radius: 9999px !important;
+  pointer-events: none !important;
+}
+#root [role="slider"] ~ [class*="thumb"],
+#root [role="slider"] ~ [class*="Thumb"],
+#root [class*="Slider"] [class*="thumb"],
+#root [class*="Slider"] [class*="Thumb"],
+#root [class*="slider"] [class*="thumb"],
+#root [class*="Slider"] > div:last-child,
+#root [class*="Slider"] > span,
+#root [role="slider"] + span,
+#root [role="slider"] + div {
+  background-color: var(--foreground) !important;
+  background: var(--foreground) !important;
+  border-radius: 50% !important;
+  border: 1px solid var(--border-subtle) !important;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1) !important;
+  pointer-events: none !important;
+}
+/* Radix Slider: track and thumb by data-orientation */
+#root [data-orientation="horizontal"] > span:first-child,
+#root [data-orientation="horizontal"] [class*="Track"] {
+  background-color: var(--slider-track) !important;
+  background: var(--slider-track) !important;
+  border-radius: 9999px !important;
+  min-height: 6px !important;
+}
+#root [data-orientation="horizontal"] > span:last-child,
+#root [data-orientation="horizontal"] [class*="Thumb"],
+#root [data-orientation="horizontal"] [class*="thumb"] {
+  background-color: var(--foreground) !important;
+  background: var(--foreground) !important;
+  border-radius: 50% !important;
+  border: 1px solid var(--border-subtle) !important;
+  min-width: 16px !important;
+  min-height: 16px !important;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* ---- Titles and subtitles: dark blue (navy) ---- */
+#root h1, #root h2, #root h3, #root h4, #root h5, #root h6,
+#root [class*="title"], #root [class*="Title"],
+#root [class*="subtitle"], #root [class*="Subtitle"],
+#root [class*="heading"], #root [class*="Heading"],
+#root [class*="label"], #root label,
+#root aside [class*="text"]:first-child,
+main [class*="text-"]:first-child {
+  color: var(--heading) !important;
+}
+
+/* ---- 2. Buttons: dark blue text, no black; light blue bg when active ---- */
+button:not([role="switch"]):not([role="checkbox"]),
+[role="button"]:not([role="switch"]):not([role="checkbox"]),
+a[role="button"],
+[class*="Button"]:not([class*="Switch"]):not([class*="Checkbox"]),
+[class*="button"]:not([class*="switch"]):not([class*="checkbox"]) {
+  background: transparent !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--foreground) !important;
+}
+
+button:hover,
+[role="button"]:hover,
+[class*="Button"]:hover,
+[class*="button"]:hover {
+  background: var(--button-hover-bg) !important;
+  border-color: var(--button-hover-border) !important;
+}
+
+/* Active/selected button: light blue background, dark blue text */
+button[aria-selected="true"],
+button[data-state="active"],
+button[class*="active"],
+[role="button"][aria-selected="true"],
+[role="button"][data-state="active"],
+#root a[class*="active"],
+#root [class*="Button"][class*="active"],
+#root aside a[href].bg-opacity-10,
+#root aside [class*="chat"] > a[class*="rounded"],
+#root [class*="conversation"] a[class*="rounded"] {
+  background: var(--button-active-bg) !important;
+  border-color: var(--border-accent) !important;
+  color: var(--foreground) !important;
+}
+
+/* Primary action (e.g. send): outline accent, dark blue text */
+button[class*="primary"],
+button[class*="Primary"],
+[role="button"][class*="primary"],
+[class*="btn-primary"],
+button[type="submit"] {
+  border-color: var(--border-accent) !important;
+  color: var(--foreground) !important;
+  background: transparent !important;
+}
+
+button[class*="primary"]:hover,
+[role="button"][class*="primary"]:hover,
+[class*="btn-primary"]:hover,
+button[type="submit"]:hover {
+  background: var(--button-active-bg) !important;
+  border-color: var(--accent) !important;
+  color: var(--foreground) !important;
+}
+
+/* Icon-only / round buttons: keep outline */
+button svg,
+[role="button"] svg {
+  color: inherit;
+}
+
+/* ---- 3. Chat bubbles: translucent + blur + padding (higher specificity to override #root *) ---- */
+#root [class*="message-content"],
+#root [class*="MessageContent"],
+#root [class*="message-group"],
+#root [class*="bubble"],
+#root [class*="Bubble"],
+#root [data-message-id] > div,
+#root [class*="conversation"] [class*="group"] > div {
+  background: var(--bubble-assistant) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 1rem !important;
+  padding: 1rem 1.25rem !important;
+}
+
+#root [class*="message"][class*="user"] > div,
+#root [class*="Message"][class*="user"] > div,
+#root [class*="group"][class*="user"] [class*="message-content"],
+#root [class*="group"][class*="user"] [class*="bubble"],
+#root [data-sender="user"] [class*="message-content"],
+#root [data-sender="user"] [class*="bubble"],
+#root [class*="justify-end"] [class*="message-content"],
+#root [class*="justify-end"] [class*="bubble"],
+#root [class*="justify-end"] > div[class*="rounded"] {
+  background: var(--bubble-user) !important;
+  border-color: rgba(59, 130, 246, 0.25) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  padding: 1rem 1.25rem !important;
+}
+
+/* Message row content (user or assistant): generous padding like ia.ominis.org */
+[class*="justify-end"] > div:first-child,
+[class*="justify-start"] > div:first-child {
+  padding: 1rem 1.25rem !important;
+}
+
+/* Glass panels: sidebar and nav (same blur as chat bubbles) — transparent glass */
+#root aside,
+#root [data-testid="sidebar"],
+#root nav,
+#root .nav,
+#root [class*="sidebar"],
+#root [class*="Sidebar"],
+#root > div > aside,
+#root > div > nav,
+#root aside [class*="panel"],
+#root aside [class*="card"],
+#root [class*="SlidePanel"],
+#root [class*="slide-panel"],
+#root [class*="Drawer"],
+#root [class*="drawer"],
+#root [class*="Constructor"],
+#root [class*="constructor"],
+#root [class*="slide-over"],
+#root [data-testid="slide-over"] {
+  background: var(--primary-glass) !important;
+  backdrop-filter: saturate(180%) blur(12px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--foreground) !important;
+}
+
+/* Left sidebar only: darker like header (no border on right so it blends) */
+html.dark #root > div > aside:first-of-type,
+html.dark #root [data-testid="sidebar"],
+.dark #root > div > aside:first-of-type,
+.dark #root [data-testid="sidebar"] {
+  background: rgba(10, 22, 40, 0.72) !important;
+  backdrop-filter: saturate(180%) blur(12px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
+  border: none !important;
+  border-right: 1px solid var(--border-subtle) !important;
+}
+
+/* Right panel (Constructor de Agentes): no border, semi-transparent */
+#root [class*="Constructor"],
+#root [class*="constructor"],
+#root [class*="slide-over"][class*="right"],
+#root [data-testid="slide-over"] {
+  border: none !important;
+  border-left: none !important;
+  box-shadow: none !important;
+}
+
+/* Chat list items and nav links: translucent glass (not solid white) */
+#root aside a,
+#root aside [class*="chat"] > div,
+#root aside [class*="conversation"] > a,
+#root aside [class*="rounded"]:not(button),
+#root [class*="sidebar"] a[class*="rounded"],
+#root aside .bg-white,
+#root aside [class*="bg-white"],
+#root aside .bg-gray-50,
+#root [class*="sidebar"] .bg-white,
+#root [class*="SlidePanel"] .bg-white,
+#root [class*="slide-panel"] .bg-white,
+#root [class*="Drawer"] .bg-white,
+#root [class*="panel"] .bg-white,
+#root [class*="Modal"] .bg-white,
+#root [class*="modal"] .bg-white,
+#root [class*="Popover"] .bg-white,
+#root [class*="popover"] .bg-white {
+  background: var(--glass-bg) !important;
+  backdrop-filter: saturate(180%) blur(12px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
+  border-color: var(--border-subtle) !important;
+  color: var(--foreground) !important;
+}
+
+/* Left panel conversation items only: no borders, no gradients — only name + time */
+#root aside a[href*="/c/"],
+#root aside a[href*="/chat/"],
+#root [data-testid="sidebar"] a[href*="/c/"],
+#root [data-testid="sidebar"] a[href*="/chat/"],
+#root [class*="sidebar"] a[href*="/c/"],
+#root [class*="sidebar"] a[href*="/chat/"] {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+#root aside a[href*="/c/"]:hover,
+#root aside a[href*="/chat/"]:hover,
+#root [data-testid="sidebar"] a[href*="/c/"]:hover,
+#root [data-testid="sidebar"] a[href*="/chat/"]:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* Agent cards in Comunidad: blur so card text is readable */
+#root [class*="AgentCard"],
+#root [class*="agent-card"],
+#root [class*="Marketplace"] [class*="card"],
+#root [class*="marketplace"] [class*="card"],
+#root [class*="Agents"] [class*="card"],
+#root [class*="agents"] [class*="card"] {
+  background: var(--glass-bg) !important;
+  backdrop-filter: saturate(180%) blur(14px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(14px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--foreground) !important;
+}
+
+/* Remove blur veil: main content area and full-area wrappers must not have blur so modals/panels appear on top */
+#root main,
+#root [role="main"],
+#root > div > div[class*="flex-1"],
+#root > div > div[class*="flex-grow"],
+#root [class*="overflow-hidden"][class*="flex"]:not([class*="sidebar"]):not(aside),
+#root [class*="conversation"]:not([class*="message"]),
+#root [class*="chat"]:not([class*="message"]):not([class*="bubble"]):not([class*="input"]) {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+}
+
+/* Modals & dialogs: glass frame, subtle border */
+#root [role="dialog"],
+#root [role="dialog"] > div,
+#root [class*="Modal"],
+#root [class*="modal"],
+#root [class*="Dialog"],
+#root [class*="dialog"],
+#root [class*="DialogContent"],
+#root [class*="ModalContent"],
+#root [class*="drawer-content"],
+#root [class*="DrawerContent"],
+#root [data-state="open"][class*="content"] {
+  background: var(--modal-bg) !important;
+  backdrop-filter: saturate(180%) blur(16px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(16px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04) !important;
+  color: var(--foreground) !important;
+}
+
+/* Modal/dialog overlay (backdrop) — subtle blur so the modal pops */
+#root [role="dialog"]::before,
+#root [class*="Modal"][class*="overlay"],
+#root [class*="modal"][class*="overlay"],
+#root [class*="DialogOverlay"],
+#root [class*="dialog-overlay"],
+body [data-state="open"] ~ [data-radix-popper-content-wrapper] {
+  backdrop-filter: blur(6px) !important;
+  -webkit-backdrop-filter: blur(6px) !important;
+}
+
+/* Popovers, dropdowns, preset menus: glass, subtle border */
+#root [role="menu"],
+#root [role="listbox"],
+#root [class*="Popover"],
+#root [class*="popover"],
+#root [class*="Dropdown"],
+#root [class*="dropdown"],
+#root [class*="PopoverContent"],
+#root [class*="DropdownContent"],
+#root [class*="MenuContent"],
+#root [class*="Preset"],
+#root [class*="preset"],
+#root [data-radix-popper-content-wrapper],
+#root [data-state="open"] + [data-radix-popper-content-wrapper],
+body [data-radix-popper-content-wrapper] {
+  background: var(--popover-bg) !important;
+  backdrop-filter: saturate(180%) blur(16px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(16px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.04) !important;
+  color: var(--foreground) !important;
+}
+
+/* Chat area background (let molecular show through) */
+[class*="chat"]:not([class*="message"]):not([class*="bubble"]),
+[class*="conversation"] {
+  background: transparent !important;
+}
+
+/* Inputs: translucent + blur (higher specificity) */
+#root input,
+#root textarea,
+#root [contenteditable="true"],
+#root [class*="input"],
+#root [class*="Input"],
+#root .bg-gray-100,
+#root .bg-gray-200 {
+  background: var(--glass-bg) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--foreground) !important;
+}
+
+/* Prompt editor: blur on text/variable boxes and their wrappers (Texto, Variables desplegables) */
+#root main textarea,
+#root main input[type="text"],
+#root main input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]),
+#root [class*="Prompt"] textarea,
+#root [class*="prompt"] textarea,
+#root [class*="Prompt"] input[type="text"],
+#root [class*="prompt"] input[type="text"],
+#root [class*="Prompt"] [class*="content"],
+#root [class*="prompt"] [class*="content"],
+#root [class*="Prompt"] [class*="form"],
+#root [class*="prompt"] [class*="form"],
+#root [class*="Prompt"] [class*="card"],
+#root [class*="prompt"] [class*="card"],
+#root [class*="Prompt"] [class*="section"],
+#root [class*="prompt"] [class*="section"],
+#root [class*="Prompt"] [class*="body"],
+#root [class*="prompt"] [class*="body"],
+#root main [class*="rounded"]:has(textarea),
+#root main [class*="border"]:has(textarea) {
+  background: var(--glass-bg) !important;
+  backdrop-filter: saturate(180%) blur(14px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(14px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--foreground) !important;
+}
+
+/* Message input: inner field fits the rounded box (padding, box-sizing); container keeps original width */
+#root form textarea,
+#root [class*="composer"] textarea,
+#root [class*="input"] textarea,
+main form textarea {
+  border-radius: 12px !important;
+  min-height: 2.5rem !important;
+  box-sizing: border-box !important;
+  padding-left: 0.875rem !important;
+  padding-right: 0.875rem !important;
+}
+#root form [class*="rounded"] textarea,
+#root [class*="composer"] [class*="rounded"] textarea {
+  border-radius: inherit !important;
+  width: 100% !important;
+  max-width: 100% !important;
+}
+/* Container of message input: glass + clip inner field to rounded shape */
+#root form [class*="rounded"],
+#root [class*="composer"] [class*="rounded"],
+#root [class*="composer"],
+#root main form:has(textarea) {
+  background: var(--glass-bg) !important;
+  backdrop-filter: saturate(180%) blur(12px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  overflow: hidden !important;
+  border-radius: 12px !important;
+  box-sizing: border-box !important;
+}
+
+/* Space between agent description and message input so they don't overlap */
+#root [class*="composer"],
+#root main form[class*="rounded"],
+#root main > div > form,
+#root [class*="chat"] form:has(textarea),
+#root [class*="conversation"] + form,
+#root [class*="flex"] form:has(button[type="submit"]) {
+  margin-top: 1.5rem !important;
+  padding-top: 0.5rem !important;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--foreground-muted) !important;
+}
+
+input:focus,
+textarea:focus {
+  border-color: var(--border-accent) !important;
+  box-shadow: 0 0 0 2px var(--accent-dim) !important;
+  outline: none !important;
+}
+
+/* Send button: always visible, min size */
+#root form button[type="submit"],
+#root form [type="submit"],
+#root [class*="send"] button,
+#root button[aria-label*="Send"],
+#root button[aria-label*="Enviar"] {
+  min-width: 2.5rem !important;
+  min-height: 2.5rem !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+/* Right panel expand/collapse toggle: visible glass style and always clickable */
+#root .ominis-right-toggle,
+#root [class*="collapse"],
+#root [class*="expand"],
+#root [class*="panel-toggle"],
+#root [class*="right-panel"] button,
+#root [class*="RightPanel"] button,
+#root [class*="slide-panel"],
+#root button[aria-label*="panel"],
+#root button[aria-label*="Panel"],
+#root [class*="fixed"][class*="right"] > button,
+#root [data-testid="slide-over"] button:first-child,
+#root [class*="chevron"][class*="right"],
+#root a[class*="collapse"],
+#root a[class*="expand"] {
+  min-width: 2rem !important;
+  min-height: 2.5rem !important;
+  background: var(--toggle-bg) !important;
+  backdrop-filter: saturate(180%) blur(12px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 8px !important;
+  color: var(--foreground) !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  z-index: 25 !important;
+  pointer-events: auto !important;
+}
+#root .ominis-right-toggle:hover,
+#root [class*="collapse"]:hover,
+#root [class*="expand"]:hover,
+#root [class*="panel-toggle"]:hover,
+#root [class*="fixed"][class*="right"] > button:hover {
+  background: var(--popover-bg) !important;
+  border-color: var(--button-hover-border) !important;
+}
+
+/* Links */
+a {
+  color: var(--accent) !important;
+}
+
+a:hover {
+  color: var(--accent-light) !important;
+}
+
+[class*="border"],
+hr {
+  border-color: var(--border-subtle) !important;
+}
+
+/* Dark: unify borders to subtle (no heavy or multiple borders) */
+html.dark [class*="border"],
+.dark [class*="border"] {
+  border-color: var(--border-subtle) !important;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--primary-dark);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--primary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+img[alt*="Logo"],
+img[alt*="logo"],
+[class*="logo"] img,
+[class*="Logo"] img {
+  max-height: 2rem;
+  object-fit: contain;
+}
+
+/* Top bar: glass like ia.ominis.org (transparent, not opaque) */
+.ominis-top-bar {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  height: 4rem !important;
+  z-index: 9998 !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 1rem !important;
+  padding: 0 1.5rem !important;
+  background: rgba(10, 22, 40, 0.72) !important;
+  backdrop-filter: saturate(180%) blur(10px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(10px) !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+}
+.ominis-top-bar-brand {
+  display: inline-flex !important;
+  align-items: center !important;
+  text-decoration: none !important;
+}
+.ominis-top-bar-logo {
+  height: 28px !important;
+  width: auto !important;
+  max-height: 32px !important;
+  object-fit: contain !important;
+}
+.ominis-top-bar-subtitle {
+  font-size: 0.75rem !important;
+  color: var(--foreground-muted) !important;
+  border-left: 1px solid var(--border-subtle) !important;
+  padding-left: 1rem !important;
+  margin-left: 0.25rem !important;
+}
+@media (max-width: 768px) {
+  .ominis-top-bar-subtitle { display: none !important; }
+}
+.ominis-top-bar-nav {
+  display: flex !important;
+  align-items: center !important;
+  gap: 1.5rem !important;
+  margin-left: 1rem !important;
+}
+.ominis-top-bar-link {
+  font-size: 0.875rem !important;
+  color: var(--foreground-muted) !important;
+  text-decoration: none !important;
+  transition: color 0.15s !important;
+}
+.ominis-top-bar-link:hover {
+  color: var(--accent-light) !important;
+}
+@media (max-width: 900px) {
+  .ominis-top-bar-nav { display: none !important; }
+}
+.ominis-top-bar-back {
+  font-size: 0.875rem !important;
+  color: var(--accent-light) !important;
+  text-decoration: none !important;
+}
+.ominis-top-bar-back:hover {
+  color: var(--foreground) !important;
+}
+
+/* Top bar right: profile button + dropdown (like ia.ominis.org header) */
+.ominis-top-bar-right {
+  position: relative !important;
+  margin-left: auto !important;
+}
+.ominis-top-bar-profile-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 0.5rem !important;
+  padding: 0.25rem 0.5rem !important;
+  background: transparent !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 9999px !important;
+  color: var(--foreground) !important;
+  font-size: 0.875rem !important;
+  cursor: pointer !important;
+}
+.ominis-top-bar-profile-btn:hover {
+  background: var(--button-hover-bg) !important;
+  border-color: var(--button-hover-border) !important;
+}
+.ominis-top-bar-avatar {
+  width: 2rem !important;
+  height: 2rem !important;
+  border-radius: 50% !important;
+  background: var(--accent-dim) !important;
+  color: var(--accent-light) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 0.875rem !important;
+  font-weight: 600 !important;
+}
+.ominis-top-bar-name {
+  max-width: 8rem !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+@media (max-width: 480px) {
+  .ominis-top-bar-name { display: none !important; }
+}
+.ominis-top-bar-chevron {
+  flex-shrink: 0 !important;
+  opacity: 0.8 !important;
+}
+.ominis-top-bar-profile-btn[aria-expanded="true"] .ominis-top-bar-chevron {
+  transform: rotate(180deg) !important;
+}
+
+.ominis-top-bar-dropdown {
+  position: absolute !important;
+  top: 100% !important;
+  right: 0 !important;
+  margin-top: 0.5rem !important;
+  min-width: 14rem !important;
+  background: var(--popover-bg) !important;
+  backdrop-filter: saturate(180%) blur(16px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(16px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 0.75rem !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.06) !important;
+  z-index: 10000 !important;
+  padding: 0.25rem 0 !important;
+}
+.ominis-top-bar-dropdown-header {
+  padding: 0.5rem 1rem !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+}
+.ominis-top-bar-dropdown-name {
+  font-weight: 600 !important;
+  color: var(--foreground) !important;
+  font-size: 0.875rem !important;
+}
+.ominis-top-bar-dropdown-item {
+  display: block !important;
+  width: 100% !important;
+  text-align: left !important;
+  padding: 0.5rem 1rem !important;
+  font-size: 0.875rem !important;
+  color: var(--foreground-muted) !important;
+  text-decoration: none !important;
+  background: none !important;
+  border: none !important;
+  cursor: pointer !important;
+  font: inherit !important;
+}
+.ominis-top-bar-dropdown-item:hover {
+  color: var(--foreground) !important;
+  background: var(--button-hover-bg) !important;
+}
+.ominis-top-bar-logout {
+  color: #f87171 !important;
+}
+.ominis-top-bar-logout:hover {
+  color: #fca5a5 !important;
+  background: rgba(248, 113, 113, 0.1) !important;
+}
+
+/* Push main content below the top bar */
+body:has(.ominis-top-bar) #root,
+body:has(.ominis-top-bar) [data-testid="app-container"] {
+  padding-top: 4rem !important;
+}
+
+/* Hide LibreChat header when Ominis top bar is shown (match ia.ominis.org exactly) */
+body:has(.ominis-top-bar) #root > div > header,
+body:has(.ominis-top-bar) #root [role="banner"] {
+  display: none !important;
+}
+
+#root header,
+#root [role="banner"],
+#root [class*="header"],
+#root [class*="Header"] {
+  background: var(--primary-glass) !important;
+  backdrop-filter: saturate(180%) blur(12px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+}
+
+/* Ominis logo in header (left of share button) */
+.ominis-header-logo {
+  display: inline-flex !important;
+  align-items: center !important;
+  margin-right: 0.5rem !important;
+  padding: 0.25rem 0 !important;
+  line-height: 1 !important;
+}
+.ominis-header-logo img {
+  height: 28px !important;
+  width: auto !important;
+  max-height: 32px !important;
+  object-fit: contain !important;
+  vertical-align: middle !important;
+}
+
+/* ---- Ominis footer bar and expandable overlay (replaces LibreChat footer) ---- */
+.ominis-footer-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  text-align: center;
+  padding: 6px 12px;
+  background: var(--modal-bg);
+  backdrop-filter: saturate(180%) blur(12px);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  border-top: 1px solid var(--border-subtle);
+  font-size: 11px;
+}
+.ominis-footer-text {
+  color: var(--foreground-muted);
+}
+.ominis-footer-text a {
+  color: var(--foreground-muted);
+  text-decoration: none;
+}
+.ominis-footer-text a:hover {
+  color: var(--foreground);
+}
+.ominis-footer-text #ominis-footer-mas-info {
+  background: none;
+  border: none;
+  color: var(--foreground-muted);
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  font: inherit;
+}
+.ominis-footer-text #ominis-footer-mas-info:hover {
+  color: var(--foreground);
+}
+
+.ominis-footer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.4);
+  max-height: 70vh;
+  overflow-y: auto;
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+}
+.ominis-footer-overlay.ominis-footer-overlay-visible {
+  display: flex;
+}
+.ominis-footer-overlay-inner {
+  width: 100%;
+  max-width: 1280px;
+  background: var(--popover-bg);
+  backdrop-filter: saturate(180%) blur(16px);
+  -webkit-backdrop-filter: saturate(180%) blur(16px);
+  border-top: 1px solid var(--border-subtle);
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.ominis-footer-overlay-inner #ominis-footer-close {
+  width: 100%;
+  padding: 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--foreground-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ominis-footer-overlay-inner #ominis-footer-close:hover {
+  color: var(--foreground);
+  background: var(--button-hover-bg);
+}
+.ominis-footer-content {
+  padding: 24px;
+  color: var(--foreground-muted);
+  font-size: 12px;
+}
+.ominis-footer-content h3 {
+  color: var(--foreground);
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+.ominis-footer-content a {
+  color: var(--accent-light);
+  text-decoration: none;
+}
+.ominis-footer-content a:hover {
+  text-decoration: underline;
+}
+.ominis-footer-content ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.ominis-footer-content li { margin-bottom: 6px; }
+.ominis-footer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 24px;
+  margin-bottom: 20px;
+}
+.ominis-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  font-size: 11px;
+  margin-top: 8px;
+}
+.ominis-footer-bottom {
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--foreground-muted);
+  font-size: 11px;
+}
+
+/* ---- Force no blur on page background (must win over any glass rules) ---- */
+body [class*="background-root"],
+body [class*="_next-static-media-bg"],
+body [class*="static-media-bg"],
+body [class*="background"]:not([class*="Modal"]):not([class*="modal"]),
+body [class*="Background"]:not([class*="Modal"]):not([class*="modal"]) {
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* No blur on layout content column (veil layer) — only the wrapper that sits next to the sidebar */
+#root > div > div[class*="relative"]:not([role="dialog"]):not([class*="Modal"]):not([class*="Dialog"]) {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+  background: transparent !important;
+}
+
+/* ---- Initial chat page: title + suggested prompts (Ominis style) ---- */
+.ominis-initial-wrap {
+  width: 100%;
+  max-width: 42rem;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 0 1rem;
+  flex-shrink: 0;
+}
+.ominis-initial-wrap.ominis-initial-hidden {
+  display: none !important;
+}
+.ominis-initial-title {
+  color: var(--foreground) !important;
+  font-size: 1.5rem !important;
+  font-weight: 600 !important;
+  text-align: center !important;
+  margin-bottom: 2rem !important;
+}
+@media (min-width: 640px) {
+  .ominis-initial-title { font-size: 1.875rem !important; }
+}
+.ominis-suggestions {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  justify-content: center !important;
+  gap: 0.5rem !important;
+  margin-top: 1rem !important;
+}
+.ominis-suggestion-btn {
+  font-size: 0.75rem !important;
+  color: var(--foreground-muted) !important;
+  background: var(--bubble-assistant) !important;
+  backdrop-filter: saturate(180%) blur(12px) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 9999px !important;
+  padding: 0.375rem 0.75rem !important;
+  cursor: pointer !important;
+  transition: color 0.15s, background 0.15s, border-color 0.15s !important;
+}
+.ominis-suggestion-btn:hover {
+  color: var(--foreground) !important;
+  background: var(--primary-glass) !important;
+  border-color: var(--border-accent) !important;
+}

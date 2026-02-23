@@ -47,6 +47,7 @@ ssh -o StrictHostKeyChecking=no -i "$KEY_FILE" "$SSH_USER@$BACKEND_IP" << 'REMOT
 cd /opt/ominis-backend
 source venv/bin/activate
 pip install -r requirements.txt -q 2>/dev/null || true
+alembic upgrade head
 sudo systemctl restart ominis-backend
 sleep 2
 sudo systemctl status ominis-backend --no-pager

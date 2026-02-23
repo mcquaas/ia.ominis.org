@@ -1,0 +1,7 @@
+# Med42 on Vast.ai (OpenAI-compatible, e.g. vLLM)
+# Copy to config/med42_vast.txt and set the URL from Vast instance → IP & Port Info.
+# Example: internal 8080 exposed as 50.217.254.161:41474 → MED42_API_URL=http://50.217.254.161:41474
+
+MED42_API_URL=http://REPLACE_IP:REPLACE_EXTERNAL_PORT
+# MED42_MODEL=med42
+# MED42_TIMEOUT=60

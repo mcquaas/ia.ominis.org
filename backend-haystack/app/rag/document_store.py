@@ -102,12 +102,14 @@ async def migrate_chunks_from_s3() -> int:
 
         if documents:
             # Documents need to be embedded before writing to pgvector
-            from haystack.components.embedders import SentenceTransformersDocumentEmbedder
-
-            embedder = SentenceTransformersDocumentEmbedder(
-                model=settings.embedding_model,
-            )
-            embedder.warm_up()
+            if (getattr(settings, "embedding_service_url", None) or "").strip():
+                from app.rag.embedder import ExternalDocumentEmbedder
+                embedder = ExternalDocumentEmbedder()
+                embedder.warm_up()
+            else:
+                from haystack.components.embedders import SentenceTransformersDocumentEmbedder
+                embedder = SentenceTransformersDocumentEmbedder(model=settings.embedding_model)
+                embedder.warm_up()
             result = embedder.run(documents=documents)
             embedded_docs = result["documents"]
 

@@ -1,0 +1,4 @@
+# LiveAvatar + Ominis Clinical LLM demo
+pipecat-ai[heygen,openai,daily,cartesia,deepgram]
+python-dotenv
+loguru

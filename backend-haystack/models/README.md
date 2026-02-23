@@ -8,6 +8,7 @@ Ollama model names and routing are configured in `app/config.py`, not by Modelfi
 |-----------|----------|-------------------------|----------------|
 | **Ominis 2.0** (uso general) | ominis-2.0 | OLLAMA_MODEL (default `qwen2.5:14b`) | g4dn |
 | **Ominis 2.0 Clinic** (conocimiento médico) | ominis-2.0-clinic | OLLAMA_CLINIC_MODEL (default `biomistral`) | g4dn (same) |
+| **Ominis 2.0 Open** (opcional) | ominis-2.0-open | OLLAMA_OPEN_MODEL (e.g. `qwen3:14b`). Only if set. | g4dn (same) or OLLAMA_OPEN_URL |
 
 Research options (Ominis 2.0 Research, Ominis 2.0 Research 128K) use OpenScholar vLLM, not Ollama.
 
@@ -19,13 +20,13 @@ On the g4dn instance (see `config/ollama_gpu_server.txt`):
 # Qwen for general use
 ollama pull qwen2.5:14b
 
-# BioMistral for medical
-ollama pull biomistral   # or cniongolo/biomistral
+# BioMistral for medical (Ollama library uses cniongolo/biomistral)
+ollama pull cniongolo/biomistral
 
 ollama list   # should show both
 ```
 
-Backend .env: `OLLAMA_URL=http://<g4dn-ip>:11434`, `OLLAMA_MODEL=qwen2.5:14b`, `OLLAMA_CLINIC_MODEL=biomistral`. Leave `OLLAMA_CLINIC_URL` empty to use the same server.
+Backend .env: `OLLAMA_URL=http://<g4dn-ip>:11434`, `OLLAMA_MODEL=qwen2.5:14b`, `OLLAMA_CLINIC_MODEL=cniongolo/biomistral` (or `biomistral` if you use a local Modelfile). Leave `OLLAMA_CLINIC_URL` empty to use the same server.
 
 ## Falcon (deprecated)
 

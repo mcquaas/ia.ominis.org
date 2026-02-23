@@ -1,0 +1,18 @@
+# GPT (gpt-oss, código abierto) vía vLLM — Backend .env
+# Si POWER_API_URL está definida, "GPT" aparece en el chat y en el dashboard.
+# Ejecuta: ./infrastructure/20m-update-backend-env-power-gpt.sh
+
+# URL base del servidor vLLM que sirve gpt-oss (sin /v1). Vast.ai instance 31653671; 8000/tcp -> 39244.
+POWER_API_URL=http://74.48.140.178:39244
+
+# Modelo que sirve vLLM (debe coincidir con --served-model-name o el nombre del modelo)
+POWER_MODEL=openai/gpt-oss-20b
+
+# vLLM suele aceptar cualquier valor
+POWER_API_KEY=EMPTY
+
+# Timeout en segundos
+POWER_TIMEOUT=120
+
+# Vacío para Vast.ai (sin start/stop desde dashboard; se muestra como "API remota").
+POWER_INSTANCE_ID=

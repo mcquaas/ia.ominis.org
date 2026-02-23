@@ -1,0 +1,26 @@
+---
+description: Always deploy all affected components after code changes
+alwaysApply: true
+---
+
+# Deploy Everything After Changes
+
+When making changes to the ia.ominis.org codebase, **always run deployment** for all affected components. Do not leave deployments to the user.
+
+## Deployment Commands
+
+| Component | Script | When to run |
+|-----------|--------|-------------|
+| Backend | `./infrastructure/20-sync-backend.sh` | After changes in `backend-haystack/**` |
+| Frontend | `./infrastructure/12-sync-frontend.sh` | After changes in `frontend/**` |
+| Pipecat agent | `./infrastructure/23a-deploy-liveavatar-production.sh` | After changes in `liveavatar-demo/**` |
+
+## Deployment Order
+
+1. **Backend** → `20-sync-backend.sh`
+2. **Frontend** → `12-sync-frontend.sh`
+3. **Pipecat agent** → `23a-deploy-liveavatar-production.sh` (bump image tag in `pcc-deploy.toml` if agent code changed)
+
+## Bump Pipecat Image
+
+When changing `liveavatar-demo/`, increment the image version in `liveavatar-demo/pcc-deploy.toml` before deploy (e.g., `0.2` → `0.3`).

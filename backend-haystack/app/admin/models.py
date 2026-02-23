@@ -78,6 +78,7 @@ class QueryLog(Base):
     model_used = Column(String(100), nullable=True)
     response_time_ms = Column(Integer, nullable=True)
     tokens_used = Column(Integer, nullable=True)
+    tokens_per_second = Column(Float, nullable=True)
     user_id = Column(Integer, nullable=True)  # nullable for anonymous queries
     api_key_id = Column(Integer, nullable=True)
 
@@ -118,6 +119,22 @@ class SystemStat(Base):
     )
 
 
+class SiteConfig(Base):
+    """Singleton: site-wide config (e.g. global banner message). id=1."""
+
+    __tablename__ = "site_config"
+
+    id = Column(Integer, primary_key=True, default=1)
+    banner_message = Column(Text, nullable=True)  # Yellow notification at top of app (superadmin only to set)
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class ChatDefaults(Base):
     """Singleton: default toggles for the chat (Investigación, Ominis/RAG, PubMed, Web). Applied when a user opens the chat."""
 
@@ -128,7 +145,36 @@ class ChatDefaults(Base):
     rag_search = Column(Boolean, default=True, nullable=False)
     web_search = Column(Boolean, default=True, nullable=False)
     pubmed_search = Column(Boolean, default=True, nullable=False)
+    openscholar_search = Column(Boolean, default=False, nullable=False)  # Semantic Scholar (default off)
 
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class LLMModelConfig(Base):
+    """
+    Per-model overrides for chat LLMs (ominis-2.0, ominis-2.0-med, ominis-2.0-open, ominis-2.0-power).
+    Which models exist is still defined by env; this table overrides display name, version, assignment, prompt, params.
+    """
+    __tablename__ = "llm_model_config"
+
+    model_id = Column(String(80), primary_key=True)
+    display_name = Column(String(255), nullable=True)
+    version_label = Column(String(64), nullable=True)
+    description = Column(Text(), nullable=True)
+    backend_model = Column(String(255), nullable=True)
+    backend_url_override = Column(String(512), nullable=True)
+    system_prompt = Column(Text(), nullable=True)
+    temperature = Column(Float(), nullable=True)
+    num_predict = Column(Integer(), nullable=True)
+    extra_params = Column(JSONB, nullable=True)
+    is_default = Column(Boolean(), nullable=True)
+    available_for_researcher = Column(Boolean(), nullable=True)  # SuperAdmin: allow researchers to use this model (default True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

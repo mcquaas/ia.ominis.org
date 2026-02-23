@@ -1,0 +1,56 @@
+"""
+Optional Med42 (A100) for clinical translation step in research.
+OpenAI-compatible API. When MED42_API_URL is set, use for implications/risks/recommendations.
+"""
+
+from typing import Optional
+
+from haystack.components.generators.chat import OpenAIChatGenerator
+from haystack.dataclasses import ChatMessage
+from haystack.utils import Secret
+
+from app.config import get_settings
+
+
+def get_med42_generator() -> Optional[OpenAIChatGenerator]:
+    """Return Med42 OpenAIChatGenerator when MED42_API_URL is set, else None."""
+    settings = get_settings()
+    url = (getattr(settings, "med42_api_url", None) or "").strip().rstrip("/")
+    if not url:
+        return None
+    if not url.endswith("/v1"):
+        url = f"{url}/v1"
+    model = getattr(settings, "med42_model", "med42") or "med42"
+    timeout = getattr(settings, "med42_timeout", 60) or 60
+    return OpenAIChatGenerator(
+        model=model,
+        api_key=Secret.from_token("dummy"),
+        api_base_url=url,
+        timeout=timeout,
+        generation_kwargs={"temperature": 0.3, "max_tokens": 1024},
+    )
+
+
+def run_clinical_translator_sync(generator: OpenAIChatGenerator, synthesis: str) -> str:
+    """
+    Given a research synthesis, produce clinical implications, risks, and prudent recommendations.
+    Returns the appended section text (Spanish).
+    """
+    prompt = (
+        "Eres un experto en traducción de evidencia a práctica clínica. "
+        "A partir del siguiente reporte de investigación, escribe una sección breve (8-12 líneas) que incluya:\n"
+        "1. Implicaciones clínicas (qué debe considerar el profesional)\n"
+        "2. Riesgos o limitaciones a tener en cuenta\n"
+        "3. Recomendaciones prudentes (sin sustituir el criterio clínico)\n"
+        "Responde solo en español. Sé conservador y evita afirmaciones que vayan más allá de la evidencia.\n\n"
+        "REPORTE:\n" + (synthesis[:8000] or "")
+    )
+    messages = [ChatMessage.from_user(prompt)]
+    try:
+        result = generator.run(messages=messages)
+        replies = result.get("replies", [])
+        return (replies[0].text or "").strip() if replies else ""
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Med42 clinical translator failed: %s", e)
+        return ""

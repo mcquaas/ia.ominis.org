@@ -1,0 +1,5 @@
+# Optional: override env or mounts; base docker-compose.yml already has .env + librechat.yaml
+services:
+  api:
+    environment:
+      - CONFIG_PATH=/app/librechat.yaml

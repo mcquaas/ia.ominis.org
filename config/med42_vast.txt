@@ -1,0 +1,4 @@
+# Med42 on Vast.ai (OpenAI-compatible)
+# Instance IP from Vast dashboard; port from IP & Port Info (internal 8080 → external)
+
+MED42_API_URL=http://50.217.254.161:41474

@@ -1,24 +1,37 @@
 """
-EC2 start/stop and status for LLM GPU instances: ominis-2.0 (Qwen) and ominis-2.0-clinic (BioMistral).
-Both typically use the same g4dn instance; dashboard shows two switches for clarity.
+EC2 start/stop and status for LLM GPU instances: ominis-2.0 (Qwen) and ominis-2.0-med (Med42-v2).
+Both may share the same g4dn when ollama_med_instance_id is empty.
 """
 
 import logging
-from typing import Literal
+from typing import Any, Literal, cast
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-LlmInstanceKey = Literal["ominis-2.0", "ominis-2.0-clinic"]
+LlmInstanceKey = Literal["ominis-2.0", "ominis-2.0-med"]
+
+# Instance type -> GPU VRAM (GB) and system RAM (GB) for dashboard display
+INSTANCE_SPECS: dict[str, dict[str, int]] = {
+    "g4dn.xlarge": {"vram_gb": 16, "ram_gb": 16},
+    "g4dn.2xlarge": {"vram_gb": 16, "ram_gb": 32},
+    "g4dn.4xlarge": {"vram_gb": 16, "ram_gb": 64},
+    "g5.xlarge": {"vram_gb": 24, "ram_gb": 16},
+    "g5.2xlarge": {"vram_gb": 24, "ram_gb": 32},
+    "g5.4xlarge": {"vram_gb": 24, "ram_gb": 64},
+    "g5.8xlarge": {"vram_gb": 24, "ram_gb": 128},
+    "p3.2xlarge": {"vram_gb": 16, "ram_gb": 61},
+    "p4d.24xlarge": {"vram_gb": 40, "ram_gb": 1152},
+}
 
 
 def _get_instance_id(key: LlmInstanceKey) -> str | None:
     s = get_settings()
     if key == "ominis-2.0":
         return s.ollama_instance_id or None
-    if key == "ominis-2.0-clinic":
-        return s.ollama_clinic_instance_id or s.ollama_instance_id or None
+    if key == "ominis-2.0-med":
+        return (getattr(s, "ollama_med_instance_id", None) or "").strip() or s.ollama_instance_id or None
     return None
 
 
@@ -32,34 +45,79 @@ def _get_ec2_client():
     return boto3.client("ec2", **kwargs)
 
 
-def get_llm_instance_status() -> dict[str, str | None]:
+def _model_info_llm(key: LlmInstanceKey) -> tuple[str, str]:
+    """Return (model_base, model_description) for dashboard."""
+    s = get_settings()
+    if key == "ominis-2.0":
+        return (s.ollama_model, "Uso general (Qwen)")
+    if key == "ominis-2.0-med":
+        return (getattr(s, "ollama_med_model", "med42") or "med42", "Modelo clínico Med42-v2 (M42 Health)")
+    return ("", "")
+
+
+def get_llm_instance_status() -> dict[str, Any]:
     """
-    Return current EC2 state for each LLM instance.
-    Keys: "ominis-2.0", "ominis-2.0-clinic".
-    Values: "running" | "stopped" | "pending" | "error" | None (not configured).
+    Return current EC2 state and details for each LLM instance.
+    Top-level keys "ominis-2.0", "ominis-2.0-med" = state string.
+    "details" = per-key dict with instanceId, instanceType, publicIp, state, vramGb, ramGb, modelBase, modelDescription.
     """
-    result: dict[str, str | None] = {"ominis-2.0": None, "ominis-2.0-clinic": None}
-    keys_order = ("ominis-2.0", "ominis-2.0-clinic")
+    result: dict[str, Any] = {"ominis-2.0": None, "details": {}}
+    keys_order: list[str] = ["ominis-2.0"]
+    s = get_settings()
+    if (getattr(s, "ollama_med_model", None) or "").strip():
+        keys_order.append("ominis-2.0-med")
+        result["ominis-2.0-med"] = None
+    keys_order = tuple(keys_order)
     key_to_id: dict[str, str] = {}
     for key in keys_order:
-        iid = _get_instance_id(key)
+        iid = _get_instance_id(cast(LlmInstanceKey, key))
         if iid:
             key_to_id[key] = iid
+        model_base, model_desc = _model_info_llm(cast(LlmInstanceKey, key))
+        result["details"][key] = {
+            "instanceId": iid,
+            "instanceType": None,
+            "publicIp": None,
+            "state": None,
+            "vramGb": None,
+            "ramGb": None,
+            "modelBase": model_base,
+            "modelDescription": model_desc,
+        }
 
     if not key_to_id:
         return result
 
-    # Deduplicate instance IDs so we only call AWS once per unique ID
     unique_ids = list(dict.fromkeys(key_to_id.values()))
     try:
         client = _get_ec2_client()
         resp = client.describe_instances(InstanceIds=unique_ids)
-        state_by_id = {}
+        info_by_id: dict[str, dict] = {}
         for r in resp.get("Reservations", []):
             for inst in r.get("Instances", []):
-                state_by_id[inst["InstanceId"]] = inst["State"]["Name"]
+                iid = inst["InstanceId"]
+                itype = inst.get("InstanceType")
+                specs = INSTANCE_SPECS.get(itype or "", {}) if itype else {}
+                info_by_id[iid] = {
+                    "state": inst["State"]["Name"],
+                    "instanceType": itype,
+                    "publicIp": (inst.get("PublicIpAddress") or "").strip() or None,
+                    "privateIp": (inst.get("PrivateIpAddress") or "").strip() or None,
+                    "vramGb": specs.get("vram_gb"),
+                    "ramGb": specs.get("ram_gb"),
+                }
         for key, iid in key_to_id.items():
-            result[key] = state_by_id.get(iid, "unknown")
+            info = info_by_id.get(iid, {})
+            state = info.get("state") or "unknown"
+            result[key] = state
+            result["details"][key].update({
+                "instanceId": iid,
+                "instanceType": info.get("instanceType"),
+                "publicIp": info.get("publicIp"),
+                "state": state,
+                "vramGb": info.get("vramGb"),
+                "ramGb": info.get("ramGb"),
+            })
     except Exception as e:
         logger.warning("Failed to get LLM instance status: %s", e)
         for key in key_to_id:

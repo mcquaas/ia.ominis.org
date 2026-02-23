@@ -1,14 +1,20 @@
 """
 Authentication routes.
-Paths match the Strapi-compatible format the frontend expects:
+Paths match the format the frontend expects:
   /v1/api/auth/local, /v1/api/users/me, etc.
 """
 
+import json
 import logging
+import re
+import secrets
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +46,7 @@ from app.auth.service import (
     verify_password,
 )
 from app.admin.models import QueryLog
+from app.config import get_settings
 from app.database import get_db
 from app.chat.models import Conversation
 
@@ -125,6 +132,176 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     user = await create_user(db, body.username, body.email, body.password)
     token = create_access_token(user.id, user.role.value)
     return AuthResponse(jwt=token, user=user_to_response(user))
+
+
+# ==================== Google OAuth ====================
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+GOOGLE_SCOPES = "openid email profile"
+
+
+def _slug_username(raw: str, max_len: int = 50) -> str:
+    """Build a safe username from a string (e.g. email local part or name)."""
+    s = re.sub(r"[^a-zA-Z0-9._-]", "_", raw).strip("_") or "user"
+    return s[:max_len] if len(s) > max_len else s
+
+
+async def _ensure_unique_username(db: AsyncSession, base: str) -> str:
+    """Return base or base_N so the username is unique."""
+    username = base[:100]
+    n = 0
+    while await get_user_by_username(db, username):
+        n += 1
+        username = f"{base[:90]}_{n}"
+    return username
+
+
+@router.get("/api/connect/google")
+async def connect_google_start(request: Request):
+    """
+    Start Google OAuth: redirect user to Google consent, then back to callback.
+    Frontend sends users here (e.g. from "Continuar con Google" on login).
+    """
+    settings = get_settings()
+    if not (settings.google_client_id and settings.google_client_secret):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google login is not configured",
+        )
+    state = secrets.token_urlsafe(32)
+    callback_url = request.url_for("google_oauth_callback")
+    if settings.backend_public_url:
+        base = settings.backend_public_url.rstrip("/")
+        redirect_uri = f"{base}/v1/api/connect/google/callback"
+    else:
+        redirect_uri = str(callback_url)
+    params = {
+        "client_id": settings.google_client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": GOOGLE_SCOPES,
+        "state": state,
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    url = f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
+    response = RedirectResponse(url=url, status_code=302)
+    response.set_cookie(key="oauth_state", value=state, httponly=True, max_age=600)
+    return response
+
+
+@router.get("/api/connect/google/callback", name="google_oauth_callback")
+async def connect_google_callback(
+    request: Request,
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Google OAuth callback: exchange code for tokens, get user info, create or find user, redirect to frontend with JWT.
+    """
+    settings = get_settings()
+    if not (settings.google_client_id and settings.google_client_secret):
+        raise HTTPException(status_code=503, detail="Google login is not configured")
+
+    if error:
+        logger.warning("Google OAuth error: %s", error)
+        return RedirectResponse(
+            url=f"{settings.frontend_url.rstrip('/')}/login?error=google_denied",
+            status_code=302,
+        )
+
+    cookie_state = request.cookies.get("oauth_state")
+    if not state or state != cookie_state:
+        raise HTTPException(status_code=400, detail="Invalid or missing state")
+    response = RedirectResponse(
+        url=f"{settings.frontend_url.rstrip('/')}/connect/google/redirect",
+        status_code=302,
+    )
+    response.delete_cookie("oauth_state")
+
+    if not code:
+        return RedirectResponse(
+            url=f"{settings.frontend_url.rstrip('/')}/login?error=no_code",
+            status_code=302,
+        )
+
+    if settings.backend_public_url:
+        base = settings.backend_public_url.rstrip("/")
+        redirect_uri = f"{base}/v1/api/connect/google/callback"
+    else:
+        redirect_uri = str(request.url_for("google_oauth_callback"))
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if token_resp.status_code != 200:
+            logger.warning("Google token exchange failed: %s %s", token_resp.status_code, token_resp.text)
+            return RedirectResponse(
+                url=f"{settings.frontend_url.rstrip('/')}/login?error=token_exchange_failed",
+                status_code=302,
+            )
+        token_data = token_resp.json()
+        access_token = token_data.get("access_token")
+        if not access_token:
+            return RedirectResponse(
+                url=f"{settings.frontend_url.rstrip('/')}/login?error=no_token",
+                status_code=302,
+            )
+        userinfo_resp = await client.get(
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if userinfo_resp.status_code != 200:
+            logger.warning("Google userinfo failed: %s", userinfo_resp.status_code)
+            return RedirectResponse(
+                url=f"{settings.frontend_url.rstrip('/')}/login?error=userinfo_failed",
+                status_code=302,
+            )
+        userinfo = userinfo_resp.json()
+
+    email = userinfo.get("email")
+    if not email:
+        return RedirectResponse(
+            url=f"{settings.frontend_url.rstrip('/')}/login?error=no_email",
+            status_code=302,
+        )
+
+    user = await get_user_by_email(db, email)
+    if not user:
+        name = userinfo.get("name") or ""
+        base_username = _slug_username(userinfo.get("email", "").split("@")[0] or name or "user")
+        username = await _ensure_unique_username(db, base_username)
+        oauth_password = secrets.token_urlsafe(32)
+        user = await create_user(db, username, email, oauth_password)
+        if name:
+            await update_user(db, user, full_name=name)
+
+    if not user.is_active:
+        return RedirectResponse(
+            url=f"{settings.frontend_url.rstrip('/')}/login?error=account_blocked",
+            status_code=302,
+        )
+
+    token = create_access_token(user.id, user.role.value)
+    user_out = user_to_response(user)
+    user_param = urllib.parse.quote(json.dumps(user_out.model_dump()))
+    redirect_url = (
+        f"{settings.frontend_url.rstrip('/')}/connect/google/redirect"
+        f"?jwt={urllib.parse.quote(token)}&user={user_param}"
+    )
+    return RedirectResponse(url=redirect_url, status_code=302)
 
 
 @router.post("/api/auth/change-password")

@@ -1,9 +1,9 @@
 """
 Haystack Indexing Pipeline — native file conversion + embedding + pgvector storage.
 
-Supports PDF, DOCX, TXT, HTML, CSV, XLSX, and XLS files.
-Uses Haystack's built-in converters for standard formats and custom converters
-for tabular data (CSV/Excel).
+Supports PDF, DOCX, TXT, HTML, CSV, XLSX, XLS, and SAV (SPSS) files.
+SAV: variable dictionary + methodology only (no raw microdata); RAG = knowledge layer.
+Other tabular/standard formats use Haystack converters or custom CSV/Excel/SAV converters.
 Embeds with SentenceTransformers and writes to PgvectorDocumentStore.
 """
 
@@ -11,16 +11,13 @@ import csv
 import io
 import logging
 import tempfile
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from haystack import Document, Pipeline
-from haystack.components.converters import (
-    HTMLToDocument,
-    PyPDFToDocument,
-    TextFileToDocument,
-)
+from haystack.components.converters import HTMLToDocument, TextFileToDocument
 from haystack.components.embedders import SentenceTransformersDocumentEmbedder
 from haystack.components.joiners import DocumentJoiner
 from haystack.components.preprocessors import DocumentCleaner, DocumentSplitter
@@ -29,13 +26,53 @@ from haystack.components.writers import DocumentWriter
 
 from app.config import get_settings
 from app.rag.document_store import get_document_store
+from app.rag.embedder import ExternalDocumentEmbedder
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Serialize writes to pgvector to avoid "no result available" when many PDFs index concurrently
+_index_write_lock = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
-# Tabular data converters (CSV / Excel → Document)
+# PDF converter (custom: adds page numbers)
+# ---------------------------------------------------------------------------
+
+def _pdf_to_documents_with_page_numbers(file_path: Path) -> list[Document]:
+    """
+    Convert a PDF file to Haystack Documents, adding 'page_number' to metadata.
+    Uses pypdf to extract text page by page.
+    """
+    docs: list[Document] = []
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        logger.error("pypdf not installed. pip install pypdf for PDF support.")
+        return docs
+
+    try:
+        reader = PdfReader(str(file_path))
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            if text.strip():
+                docs.append(
+                    Document(
+                        content=text.strip(),
+                        meta={
+                            "page_number": i + 1,
+                            "file_path": str(file_path),
+                            "file_name": file_path.name,
+                        },
+                    )
+                )
+    except Exception as e:
+        logger.error(f"Failed to convert PDF {file_path.name}: {e}", exc_info=True)
+    return docs
+
+
+# ---------------------------------------------------------------------------
+# Tabular data converters (CSV / Excel / SAV → Document)
 # ---------------------------------------------------------------------------
 
 def _csv_to_documents(file_path: Path) -> list[Document]:
@@ -161,6 +198,84 @@ def _rows_to_documents(rows: list[list[str]], sheet_name: str = "") -> list[Docu
         if lines:
             content = f"{prefix}" + "\n".join(lines)
             docs.append(Document(content=content, meta={"chunk_type": "table_rows", "sheet": sheet_name, "row_range": f"{i+1}-{i+len(chunk_rows)}"}))
+
+    return docs
+
+
+# ---------------------------------------------------------------------------
+# SPSS/SAV (SASS) — variable dictionary only (no raw microdata in RAG)
+# ---------------------------------------------------------------------------
+
+def _sav_to_documents(file_path: Path) -> list[Document]:
+    """
+    Convert an SPSS .sav file into RAG-ready documents: variable dictionary + methodology.
+    Does NOT index raw microdata (recommended: keep microdata in an analytical engine).
+    Uses metadata only (pyreadstat metadataonly=True) so large files stay fast.
+    """
+    docs: list[Document] = []
+    try:
+        import pyreadstat
+    except ImportError:
+        logger.error("pyreadstat not installed. pip install pyreadstat for .sav support.")
+        return docs
+
+    try:
+        _, meta = pyreadstat.read_sav(str(file_path), metadataonly=True)
+    except Exception as e:
+        logger.error(f"Failed to read SAV metadata from {file_path.name}: {e}")
+        return docs
+
+    column_names = getattr(meta, "column_names", []) or []
+    column_labels = getattr(meta, "column_labels", []) or []
+    # column_labels can be a list (same order as column_names) or missing for some vars
+    if len(column_labels) != len(column_names):
+        column_labels = [None] * len(column_names)
+    var_to_label = dict(zip(column_names, column_labels))
+    variable_value_labels = getattr(meta, "variable_value_labels", None) or {}
+    file_label = getattr(meta, "file_label", None) or ""
+    notes = getattr(meta, "notes", None)
+    if notes is None:
+        notes = []
+    if isinstance(notes, str):
+        notes = [notes] if notes.strip() else []
+    number_rows = getattr(meta, "number_rows", None)
+    number_columns = len(column_names)
+
+    # Methodology chunk (design, weights, analytical notes)
+    methodology_parts = []
+    if file_label:
+        methodology_parts.append(f"Dataset: {file_label}")
+    methodology_parts.append(f"Variables: {number_columns}. Observations: {number_rows or 'N/A'}.")
+    if notes:
+        methodology_parts.append("Notas metodológicas:")
+        methodology_parts.extend(f"- {n}" for n in notes[:20])  # cap for size
+    if methodology_parts:
+        docs.append(
+            Document(
+                content="\n".join(methodology_parts),
+                meta={"chunk_type": "sav_methodology"},
+            )
+        )
+
+    # One chunk per variable (variable dictionary)
+    for var_name in column_names:
+        label = var_to_label.get(var_name)
+        values_map = variable_value_labels.get(var_name)
+        lines = [
+            f"Variable: {var_name}",
+            f"Pregunta/Etiqueta: {label or '(sin etiqueta)'}",
+        ]
+        if values_map:
+            values_txt = ", ".join(f"{k} = {v}" for k, v in sorted(values_map.items(), key=lambda x: (str(x[0]), str(x[1]))))
+            lines.append(f"Valores: {values_txt}")
+        lines.append("Universo: (consultar documentación del estudio si aplica).")
+        content = "\n".join(lines)
+        docs.append(
+            Document(
+                content=content,
+                meta={"chunk_type": "sav_variable", "variable_name": var_name},
+            )
+        )
 
     return docs
 
@@ -358,6 +473,9 @@ def index_file_with_meta(file_path: str | Path, source_id: int, meta: dict | Non
     Index a file and tag all resulting chunks with source metadata.
     This is the primary method used by the admin API.
     Supports: PDF, DOCX, TXT, HTML, CSV, XLSX, XLS.
+
+    Optional paper metadata (for Qdrant/vision collections): pass in meta:
+    year, journal, design, population, country, doi. These are stored in chunk.meta.
     """
     path = Path(file_path)
     if not path.exists():
@@ -372,12 +490,15 @@ def index_file_with_meta(file_path: str | Path, source_id: int, meta: dict | Non
         raw_docs = _csv_to_documents(path)
     elif suffix in (".xlsx", ".xls"):
         raw_docs = _excel_to_documents(path)
+    elif suffix == ".sav":
+        raw_docs = _sav_to_documents(path)
+    elif suffix == ".pdf":
+        raw_docs = _pdf_to_documents_with_page_numbers(path)
     else:
         # --- Standard converters ---
-        from haystack.components.converters import PyPDFToDocument, TextFileToDocument, HTMLToDocument
+        from haystack.components.converters import TextFileToDocument, HTMLToDocument
 
         converter_map = {
-            ".pdf": PyPDFToDocument,
             ".txt": TextFileToDocument,
             ".html": HTMLToDocument,
             ".htm": HTMLToDocument,
@@ -401,12 +522,14 @@ def index_file_with_meta(file_path: str | Path, source_id: int, meta: dict | Non
         logger.warning(f"No content extracted from {path.name}")
         return 0
 
-    # Step 2: Clean + split
+    # Step 2: Clean + split (skip split for .sav — variable dictionary is already one chunk per variable)
     cleaner = DocumentCleaner(remove_empty_lines=True, remove_extra_whitespaces=True)
-    splitter = DocumentSplitter(split_by="sentence", split_length=3, split_overlap=1)
-
     cleaned = cleaner.run(documents=raw_docs)["documents"]
-    chunks = splitter.run(documents=cleaned)["documents"]
+    if suffix == ".sav":
+        chunks = cleaned
+    else:
+        splitter = DocumentSplitter(split_by="sentence", split_length=3, split_overlap=1)
+        chunks = splitter.run(documents=cleaned)["documents"]
 
     # Step 3: Tag all chunks with source metadata (including taxonomy)
     default_meta = {
@@ -418,17 +541,25 @@ def index_file_with_meta(file_path: str | Path, source_id: int, meta: dict | Non
         # Taxonomy is stored as JSON; pass through for chunk metadata
         if "taxonomy" in meta and meta["taxonomy"]:
             default_meta["taxonomy"] = meta["taxonomy"]
+    # Prefer file type (e.g. "pdf") so the API can send sourceType and page_number for PDF links
+    if suffix:
+        default_meta["source_type"] = suffix.lstrip(".")
 
     for chunk in chunks:
         chunk.meta.update(default_meta)
 
-    # Step 4: Embed
-    embedder = SentenceTransformersDocumentEmbedder(model=settings.embedding_model)
-    embedder.warm_up()
+    # Step 4: Embed (external bge service or SentenceTransformers)
+    if (getattr(settings, "embedding_service_url", None) or "").strip():
+        embedder = ExternalDocumentEmbedder()
+        embedder.warm_up()
+    else:
+        embedder = SentenceTransformersDocumentEmbedder(model=settings.embedding_model)
+        embedder.warm_up()
     embedded = embedder.run(documents=chunks)["documents"]
 
-    # Step 5: Write to pgvector
-    document_store.write_documents(embedded, policy="overwrite")
+    # Step 5: Write to pgvector (serialized to avoid psycopg "no result available" under concurrency)
+    with _index_write_lock:
+        document_store.write_documents(embedded, policy="overwrite")
     logger.info(f"Indexed file '{path.name}' for source_id={source_id}: {len(embedded)} chunks")
     return len(embedded)
 

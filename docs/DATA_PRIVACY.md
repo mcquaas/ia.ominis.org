@@ -32,7 +32,7 @@ All infrastructure is owned and managed by Fundación Mexicana para la Salud A.C
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | S3 Storage | Mexico (Querétaro) | All data storage |
-| PostgreSQL | Mexico (Querétaro) | Strapi user database |
+| PostgreSQL | Mexico (Querétaro) | Backend user database |
 | CPU Inference | Mexico (Querétaro) | Default LLM inference |
 | GPU Inference | US (Virginia) | Optional fast inference |
 | Frontend | Global (CDN) | Web delivery |
@@ -88,9 +88,9 @@ AWS mx-central-1 (Querétaro, Mexico)
 │   ├── ominis-health-embeddings-mx
 │   └── ominis-health-models-mx
 ├── RDS PostgreSQL
-│   └── ominis-strapi-db (users, API keys, sources)
+│   └── backend DB (users, API keys, sources)
 ├── EC2 Instances
-│   ├── ominis-strapi (admin backend)
+│   ├── Haystack backend (admin API)
 │   ├── ominis-frontend
 │   └── ominis-ollama (CPU inference)
 └── CloudWatch Logs

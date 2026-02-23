@@ -7,7 +7,7 @@ This document provides a comprehensive overview of the Ominis Health LLM system 
 - [High-Level Overview](#high-level-overview)
 - [System Components](#system-components)
 - [Frontend Architecture](#frontend-architecture)
-- [Backend Architecture (Strapi)](#backend-architecture-strapi)
+- [Backend Architecture (Haystack)](#backend-architecture-haystack)
 - [RAG Engine](#rag-engine)
 - [Hybrid Inference](#hybrid-inference)
 - [Data Flow](#data-flow)
@@ -20,7 +20,7 @@ This document provides a comprehensive overview of the Ominis Health LLM system 
 The Ominis Health LLM is a multi-component system with:
 
 - **Frontend**: Next.js 16 web application
-- **Admin Backend**: Strapi V5 for user and content management
+- **Admin Backend**: Haystack (FastAPI) for user and content management
 - **RAG Engine**: Python-based retrieval and generation
 - **Inference**: Self-hosted ominis-2.0 (CPU/GPU)
 - **Data Storage**: 100% in Mexico (AWS mx-central-1)
@@ -34,7 +34,7 @@ The Ominis Health LLM is a multi-component system with:
         ▼                           ▼                           ▼
 ┌───────────────┐         ┌───────────────┐         ┌───────────────┐
 │  ai.ominis.org│         │admin.ominis.org│        │ api.ominis.org│
-│  (Frontend)   │         │   (Strapi)    │         │  (RAG API)    │
+│  (Frontend)   │         │ (Haystack API)│         │  (RAG API)    │
 │               │         │               │         │               │
 │  - Chat UI    │         │  - Auth       │         │  - Query      │
 │  - /modelo    │         │  - API Keys   │         │  - Sources    │
@@ -48,7 +48,7 @@ The Ominis Health LLM is a multi-component system with:
 │                                                                          │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐        │
 │  │  S3 Raw    │  │ S3 Chunks  │  │ S3 Vectors │  │ PostgreSQL │        │
-│  │  (sources) │  │            │  │  (FAISS)   │  │  (Strapi)  │        │
+│  │  (sources) │  │            │  │  (FAISS)   │  │ (Haystack) │        │
 │  └────────────┘  └────────────┘  └────────────┘  └────────────┘        │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -199,7 +199,7 @@ scripts/
 │   ├── vector_store.py       # FAISS operations
 │   ├── build_index.py        # Pipeline orchestration
 │   └── query_engine.py       # Query processing
-└── sync_rag_to_strapi.py     # Sync sources to Strapi
+└── (RAG sync to backend)     # Sources managed via Haystack API
 ```
 
 ### 4. Lambda Functions
@@ -237,7 +237,7 @@ const [uploadedImages, setUploadedImages] = useState([]);
 
 ```
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   Login      │───▶│   Strapi     │───▶│   JWT Token  │
+│   Login      │───▶│ Haystack API │───▶│   JWT Token  │
 │   Form       │    │   Auth API   │    │   Storage    │
 └──────────────┘    └──────────────┘    └──────────────┘
                            │
@@ -264,13 +264,13 @@ Next.js API routes proxy requests to backend services:
 | `/api/query-gpu` | US GPU server (faster) |
 | `/api/query-stream` | Streaming endpoint |
 
-## Backend Architecture (Strapi)
+## Backend Architecture (Haystack)
 
 ### Content Types
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                       Strapi Content Types                        │
+│                       Backend API (auth, API keys, RAG sources)   │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                   │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
@@ -461,8 +461,8 @@ When GPU inference is used:
 | S3 | ominis-health-embeddings-mx | FAISS index |
 | EC2 | ominis-ollama | CPU inference |
 | EC2 | ominis-frontend | Next.js |
-| EC2 | ominis-strapi | Strapi backend |
-| RDS | ominis-postgres | Strapi database |
+| EC2 | ominis-haystack-backend | Haystack backend |
+| RDS / local | PostgreSQL | Backend database |
 
 ### US Region (us-east-1) - Optional
 
@@ -477,7 +477,7 @@ When GPU inference is used:
 
 - **Frontend**: JWT tokens stored in localStorage
 - **API Keys**: Hashed with bcrypt, shown once on creation
-- **Strapi**: Built-in users-permissions plugin
+- **Haystack backend**: JWT auth, users-permissions, API keys
 
 ### Authorization
 
@@ -498,7 +498,7 @@ When GPU inference is used:
 | Component | Strategy |
 |-----------|----------|
 | Frontend | Vercel / EC2 Auto Scaling |
-| Strapi | Containerize with load balancer |
+| Haystack backend | Containerize with load balancer |
 | RAG API | Lambda concurrency / EC2 ASG |
 | FAISS | Read replicas from S3 |
 

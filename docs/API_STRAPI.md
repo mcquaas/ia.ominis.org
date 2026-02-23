@@ -1,8 +1,8 @@
-# Ominis Admin API Documentation
+# Ominis Backend API Documentation
 
-Documentación completa del API de Strapi para integración con el frontend.
+Documentación del API del backend (Haystack/FastAPI) para integración con el frontend.
 
-**Base URL**: `https://admin.ominis.org/v1`
+**Base URL**: `https://api.ominis.org/v1`
 
 ## Tabla de Contenidos
 
@@ -18,7 +18,7 @@ Documentación completa del API de Strapi para integración con el frontend.
 
 ## Autenticación
 
-Strapi usa JWT (JSON Web Tokens) para autenticación. El token se obtiene al hacer login y debe incluirse en el header `Authorization` de todas las peticiones protegidas.
+El backend usa JWT (JSON Web Tokens) para autenticación. El token se obtiene al hacer login y debe incluirse en el header `Authorization` de todas las peticiones protegidas.
 
 ### Registro de Usuario
 
@@ -1029,6 +1029,6 @@ X-RateLimit-Reset: 45
 
 ```env
 # .env.local
-NEXT_PUBLIC_STRAPI_URL=https://admin.ominis.org
+NEXT_PUBLIC_API_URL=https://api.ominis.org
 NEXT_PUBLIC_OMINIS_API_URL=https://api.ominis.org
 ```

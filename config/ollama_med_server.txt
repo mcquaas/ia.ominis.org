@@ -1,0 +1,12 @@
+# Ominis 2.0 Med — Med42-v2 (M42 Health). Si OLLAMA_MED_MODEL está definido, "Ominis 2.0 Med" aparece en el chat.
+# Servidor Ollama:
+#   - Vacío: mismo que Ominis 2.0 (g4dn/g5). En ese servidor: ollama pull med42
+#   - Vast: más rápido. Crear instancia Ollama en Vast (docs/VAST_AI_POWER.md §10, 24d-vast-ai-create-ollama-med.sh),
+#           pull med42 vía API, poner aquí OLLAMA_MED_URL=http://<VAST_IP>:<PORT>
+# Ver: https://huggingface.co/m42-health (aceptar licencia Med42)
+
+OLLAMA_MED_MODEL=hf.co/SandLogicTechnologies/Llama3-Med42-8B-GGUF
+# URL del servidor Ollama (Vast instance 31897424)
+OLLAMA_MED_URL=http://50.217.254.161:41598
+# Opcional: EC2 instance ID para start/stop en dashboard (vacío si usas Vast o mismo que Ominis 2.0)
+OLLAMA_MED_INSTANCE_ID=

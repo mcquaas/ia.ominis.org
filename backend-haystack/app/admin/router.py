@@ -1,6 +1,6 @@
 """
 Admin routes: RAG sources, file upload, indexing, system stats, query logs.
-Paths match the Strapi-compatible format the frontend expects.
+Paths match the format the frontend expects.
 """
 
 import asyncio
@@ -9,6 +9,7 @@ import logging
 import re
 import tempfile
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, cast
@@ -16,11 +17,12 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status  # Query used for research-instances
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.admin.models import ChatDefaults, QueryLog, RAGSource, SourceStatus, SystemStat
+from app.admin.models import ChatDefaults, LLMModelConfig, QueryLog, RAGSource, SiteConfig, SourceStatus, SystemStat
 from app.admin.schemas import (
+    AnalyticalQueryRequest,
     BatchReindexRequest,
     BatchReindexResponse,
     ChunkListResponse,
@@ -41,12 +43,15 @@ from app.admin.schemas import (
     ScrapePreviewResponse,
     ScrapeUrlRequest,
     ScrapedPdfItem,
+    ScrapedFileItem,
     SourceStatsOut,
     StoreStatsOut,
     SystemStatsOut,
     TainacanImportRequest,
     TainacanImportResponse,
     TainacanPreviewResponse,
+    LLMModelConfigOut,
+    LLMModelConfigUpdate,
 )
 from app.admin.research_instances import (
     get_research_instance_status,
@@ -59,9 +64,10 @@ from app.admin.llm_instances import (
     start_llm_instance,
     stop_llm_instance,
 )
+from app.admin.server_groups import get_servers_status
 from app.auth.dependencies import require_role
 from app.auth.models import RoleEnum, User
-from app.config import get_settings
+from app.config import get_settings, get_model_registry, invalidate_model_registry
 from app.database import get_db
 from app.rag.document_store import get_document_store
 
@@ -70,7 +76,7 @@ settings = get_settings()
 router = APIRouter(tags=["admin"])
 
 # Allowed file extensions for upload
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".html", ".htm", ".csv", ".xlsx", ".xls"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".html", ".htm", ".csv", ".xlsx", ".xls", ".sav"}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 
@@ -265,9 +271,13 @@ async def _run_indexing_in_background(source_id: int, method: str, **kwargs):
         # Extract metadata using LLM (non-blocking, best-effort)
         await _extract_and_save_metadata(source_id, kwargs)
 
-        # Clean up temp file if applicable
+        # Export SAV to Parquet for analytical layer (if configured)
         if method == "file" and "file_path" in kwargs:
-            Path(kwargs["file_path"]).unlink(missing_ok=True)
+            fp = Path(kwargs["file_path"])
+            if fp.suffix.lower() == ".sav" and get_settings().analytical_data_dir:
+                from app.rag.analytical import save_sav_as_parquet
+                await asyncio.to_thread(save_sav_as_parquet, str(fp), source_id)
+            fp.unlink(missing_ok=True)
 
     except Exception as e:
         logger.error(f"Indexing failed for source {source_id}: {e}", exc_info=True)
@@ -584,26 +594,37 @@ async def scrape_preview(
     _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
 ):
     """
-    Preview: Scrape a URL and return all PDF links found, without downloading/indexing.
-    Use this to show the user what will be indexed before committing.
+    Preview: Scrape a URL for PDF, CSV, XLS, XLSX links (without downloading/indexing).
+    Returns unified 'files' with format per item; 'pdfs' kept for backward compatibility.
     """
-    from app.rag.scraper import scrape_pdf_links
+    from app.rag.scraper import scrape_file_links
 
     try:
-        pdf_links = await scrape_pdf_links(body.url)
+        file_links = await scrape_file_links(body.url)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to scrape URL: {e}")
 
+    pdfs = [f for f in file_links if f.get("format", "").lower() == "pdf"]
     return ScrapePreviewResponse(
         url=body.url,
-        totalPdfs=len(pdf_links),
+        totalPdfs=len(pdfs),
         pdfs=[
             ScrapedPdfItem(
                 title=p["title"],
-                pdfUrl=p["pdf_url"],
+                pdfUrl=p["file_url"],
                 sourcePage=p["source_page"],
             )
-            for p in pdf_links
+            for p in pdfs
+        ],
+        totalFiles=len(file_links),
+        files=[
+            ScrapedFileItem(
+                title=f["title"],
+                fileUrl=f["file_url"],
+                sourcePage=f["source_page"],
+                format=f.get("format", "pdf"),
+            )
+            for f in file_links
         ],
     )
 
@@ -615,75 +636,102 @@ async def scrape_and_index(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Scrape a URL for PDF links (or use a provided list), create RAG sources for each,
-    and trigger background indexing. Each PDF becomes its own RAG source.
+    Scrape a URL for PDF/CSV/XLS/XLSX links (or use provided list), create RAG sources,
+    and trigger background indexing. Each file becomes its own RAG source with correct type.
     """
-    from app.rag.scraper import scrape_pdf_links
+    from app.rag.scraper import scrape_file_links
 
-    # Get the list of PDFs to index
-    if body.pdfs:
-        # Use the provided list (user may have filtered the preview)
-        pdf_list = [{"title": p.title, "pdf_url": p.pdfUrl, "source_page": p.sourcePage} for p in body.pdfs]
-    else:
-        # Scrape the page fresh
-        try:
-            pdf_list = await scrape_pdf_links(body.url)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to scrape URL: {e}")
+    try:
+        if body.files:
+            file_list = [
+                {"title": f.title, "file_url": f.fileUrl, "source_page": f.sourcePage, "format": (f.format or "pdf").lower()}
+                for f in body.files
+            ]
+        elif body.pdfs:
+            file_list = [
+                {"title": p.title, "file_url": p.pdfUrl, "source_page": p.sourcePage, "format": "pdf"}
+                for p in body.pdfs
+            ]
+        else:
+            try:
+                file_list = await scrape_file_links(body.url)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to scrape URL: {e}")
 
-    if not pdf_list:
-        raise HTTPException(status_code=404, detail="No PDF links found on the page")
+        if not file_list:
+            raise HTTPException(status_code=404, detail="No PDF/CSV/XLS links found on the page")
 
-    created_sources = []
+        created_sources = []
+        ts = int(time.time())
+        category = body.category or "scraped"
+        language = body.language
 
-    for pdf_info in pdf_list:
-        title = _safe_title(pdf_info["title"])
-        pdf_url = pdf_info["pdf_url"]
-        source_page = pdf_info["source_page"]
+        for idx, file_info in enumerate(file_list):
+            title = _safe_title(file_info["title"])
+            file_url = file_info["file_url"]
+            file_format = (file_info.get("format") or "pdf").lower()
+            source_type = file_format if file_format in ("pdf", "csv", "xls", "xlsx") else "dataset"
 
-        slug = _slugify(title)
+            base = _slugify(title) or source_type
+            base = base[:230]
+            slug = f"{base}-{ts}-{idx}"
 
-        # Ensure unique slug
-        existing = await db.execute(select(RAGSource).where(RAGSource.slug == slug))
-        if existing.scalar_one_or_none():
-            slug = f"{slug}-{int(time.time())}"
+            existing = await db.execute(select(RAGSource).where(RAGSource.slug == slug))
+            if existing.scalar_one_or_none():
+                slug = f"{base}-{ts}-{idx}-{uuid.uuid4().hex[:8]}"
 
-        source = RAGSource(
-            title=title,
-            slug=slug,
-            source_type="pdf",
-            source_url=pdf_url,
-            status=SourceStatus.indexing,
-            category=body.category or "scraped",
-            language=body.language,
+            source = RAGSource(
+                title=title,
+                slug=slug,
+                source_type=source_type,
+                source_url=file_url,
+                status=SourceStatus.indexing,
+                category=category,
+                language=language,
+            )
+            db.add(source)
+            await db.flush()
+
+            created_sources.append({
+                "sourceId": source.id,
+                "title": title,
+                "pdfUrl": file_url,
+                "fileUrl": file_url,
+                "format": file_format,
+                "status": "indexing",
+            })
+
+        await db.commit()
+
+        for info in created_sources:
+            asyncio.create_task(_run_file_download_and_index(
+                source_id=info["sourceId"],
+                file_url=info["fileUrl"],
+                title=info["title"],
+                category=category,
+                language=language,
+                file_format=info["format"],
+            ))
+
+        return ScrapeIndexResponse(
+            message=f"Queued {len(created_sources)} files for indexing from {body.url}",
+            totalQueued=len(created_sources),
+            sources=created_sources,
         )
-        db.add(source)
-        await db.flush()  # Get the ID without committing yet
-
-        created_sources.append({
-            "sourceId": source.id,
-            "title": title,
-            "pdfUrl": pdf_url,
-            "status": "indexing",
-        })
-
-    await db.commit()
-
-    # Trigger background indexing for each PDF
-    for info in created_sources:
-        asyncio.create_task(_run_pdf_download_and_index(
-            source_id=info["sourceId"],
-            pdf_url=info["pdfUrl"],
-            title=info["title"],
-            category=body.category or "scraped",
-            language=body.language,
-        ))
-
-    return ScrapeIndexResponse(
-        message=f"Queued {len(created_sources)} PDFs for indexing from {body.url}",
-        totalQueued=len(created_sources),
-        sources=created_sources,
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("scrape-index failed: %s", e)
+        msg = str(e)[:200]
+        if "UniqueViolation" in type(e).__name__ or "unique" in msg.lower() or "duplicate" in msg.lower():
+            raise HTTPException(
+                status_code=409,
+                detail="Algunos PDFs generan el mismo identificador. Intenta de nuevo o indexa en lotes más pequeños.",
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al indexar PDFs: {msg}. Revisa los logs del servidor.",
+        )
 
 
 async def _run_pdf_download_and_index(
@@ -739,6 +787,74 @@ async def _run_pdf_download_and_index(
 
     except Exception as e:
         logger.error(f"Failed to index PDF '{title}' (source {source_id}): {e}", exc_info=True)
+        try:
+            async with async_session() as db:
+                result = await db.execute(select(RAGSource).where(RAGSource.id == source_id))
+                source = result.scalar_one_or_none()
+                if source:
+                    source.status = SourceStatus.error
+                    source.indexing_error = str(e)[:500]
+                    await db.commit()
+        except Exception as db_err:
+            logger.error(f"Failed to update source status: {db_err}")
+    finally:
+        if tmp_path:
+            Path(str(tmp_path)).unlink(missing_ok=True)
+
+
+async def _run_file_download_and_index(
+    source_id: int,
+    file_url: str,
+    title: str,
+    category: str,
+    language: str,
+    file_format: str,
+):
+    """Download a file (PDF, CSV, XLS, XLSX) from URL and index it."""
+    from app.database import async_session
+    from app.rag.scraper import download_pdf, download_file
+
+    tmp_path = None
+    try:
+        if file_format == "pdf":
+            tmp_path, file_size = await download_pdf(file_url)
+        else:
+            tmp_path, file_size, ext = await download_file(file_url)
+            file_format = ext or file_format
+
+        logger.info(f"Downloaded '{title}' ({file_size} bytes, .{file_format}) for source {source_id}")
+
+        from app.rag.indexing import index_file_with_meta
+        meta = {
+            "title": title,
+            "url": file_url,
+            "source_type": "rag",
+            "category": category,
+            "language": language,
+        }
+        chunks = await asyncio.to_thread(
+            index_file_with_meta,
+            file_path=str(tmp_path),
+            source_id=source_id,
+            meta=meta,
+        )
+
+        async with async_session() as db:
+            result = await db.execute(select(RAGSource).where(RAGSource.id == source_id))
+            source = result.scalar_one_or_none()
+            if source:
+                source.status = SourceStatus.active
+                source.chunks_count = chunks
+                source.last_indexed_at = datetime.now(timezone.utc)
+                source.indexing_error = None
+                await db.commit()
+                logger.info(f"Source {source_id} ('{title}'): indexed {chunks} chunks")
+
+        if file_format == "pdf":
+            await _extract_and_save_metadata(source_id, {"url": file_url, "file_path": str(tmp_path) if tmp_path else ""})
+
+    except Exception as e:
+        logger.error(f"Failed to index file '{title}' (source {source_id}): {e}", exc_info=True)
         try:
             async with async_session() as db:
                 result = await db.execute(select(RAGSource).where(RAGSource.id == source_id))
@@ -1122,9 +1238,9 @@ async def upload_rag_source(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Upload a file (PDF, DOCX, TXT, HTML) and index it as a RAG source.
-    The file is processed through Haystack's native converters, split, embedded,
-    and stored in the PgvectorDocumentStore.
+    Upload a file (PDF, DOCX, TXT, HTML, CSV, XLS, XLSX, SAV) and index it as a RAG source.
+    SAV (SPSS): only variable dictionary and methodology are indexed (no raw microdata).
+    Other types: processed through Haystack converters, split, embedded, and stored.
     """
     # Validate file extension
     if not file.filename:
@@ -1187,6 +1303,30 @@ async def upload_rag_source(
         chunksCount=0,  # Will be updated after indexing completes
         status="indexing",
     )
+
+
+@router.post("/api/rag-sources/{source_id}/analytical-query")
+async def analytical_query(
+    source_id: int,
+    body: AnalyticalQueryRequest,
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+):
+    """
+    Run an analytical query on a SAV-derived Parquet (e.g. weighted mean, group by).
+    Only available when the source was uploaded as .sav and analytical_data_dir is set.
+    """
+    from app.rag.analytical import run_analytical_query
+
+    result = run_analytical_query(
+        source_id=source_id,
+        variable=body.variable,
+        statistic=body.statistic,
+        group_by=body.group_by,
+        weight_var=body.weight_var,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Analytical query failed"))
+    return result
 
 
 @router.put("/api/rag-sources/{source_id}")
@@ -1294,6 +1434,36 @@ async def classify_source_taxonomy(
         await db.refresh(source)
         return {"data": _source_to_out(source), "message": "Taxonomy classified"}
     return {"data": _source_to_out(source), "message": "No taxonomy extracted"}
+
+
+@router.post("/api/rag-sources/mark-stuck-indexing")
+async def mark_stuck_indexing(
+    older_than_minutes: int = Query(30, ge=1, le=10080),  # default 30 min, max 1 week
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Mark sources stuck in 'indexing' (no update for longer than older_than_minutes) as error.
+    Allows retrying them via reindex. Returns count of sources marked.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+    stmt = (
+        update(RAGSource)
+        .where(
+            RAGSource.status == SourceStatus.indexing,
+            RAGSource.updated_at < cutoff,
+        )
+        .values(
+            status=SourceStatus.error,
+            indexing_error=f"Indexing timed out (marked as stuck after {older_than_minutes} min)",
+        )
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+    marked = result.rowcount
+    if marked:
+        logger.info(f"Marked {marked} stuck indexing sources as error (older than {older_than_minutes} min)")
+    return {"marked": marked, "olderThanMinutes": older_than_minutes}
 
 
 @router.post("/api/rag-sources/{source_id}/reindex")
@@ -1871,18 +2041,18 @@ async def research_instances_stop(
 async def llm_instances_status(
     _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
 ):
-    """Get EC2 status for ominis-2.0 (Qwen) and ominis-2.0-clinic (BioMistral) servers (often same g4dn)."""
+    """Get EC2 status for ominis-2.0 and ominis-2.0-med servers (often same g4dn)."""
     return get_llm_instance_status()
 
 
 @router.post("/api/llm-instances/start")
 async def llm_instances_start(
-    key: str = Query(..., description="ominis-2.0 or ominis-2.0-clinic"),
+    key: str = Query(..., description="ominis-2.0 or ominis-2.0-med"),
     _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
 ):
     """Start the given LLM GPU instance."""
-    if key not in ("ominis-2.0", "ominis-2.0-clinic"):
-        raise HTTPException(status_code=400, detail="key must be ominis-2.0 or ominis-2.0-clinic")
+    if key not in ("ominis-2.0", "ominis-2.0-med"):
+        raise HTTPException(status_code=400, detail="key must be ominis-2.0 or ominis-2.0-med")
     result = start_llm_instance(cast(LlmInstanceKey, key))
     if result["status"] == "error":
         raise HTTPException(status_code=502, detail=result["message"])
@@ -1891,16 +2061,27 @@ async def llm_instances_start(
 
 @router.post("/api/llm-instances/stop")
 async def llm_instances_stop(
-    key: str = Query(..., description="ominis-2.0 or ominis-2.0-clinic"),
+    key: str = Query(..., description="ominis-2.0 or ominis-2.0-med"),
     _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
 ):
     """Stop the given LLM GPU instance."""
-    if key not in ("ominis-2.0", "ominis-2.0-clinic"):
-        raise HTTPException(status_code=400, detail="key must be ominis-2.0 or ominis-2.0-clinic")
+    if key not in ("ominis-2.0", "ominis-2.0-med"):
+        raise HTTPException(status_code=400, detail="key must be ominis-2.0 or ominis-2.0-med")
     result = stop_llm_instance(cast(LlmInstanceKey, key))
     if result["status"] == "error":
         raise HTTPException(status_code=502, detail=result["message"])
     return result
+
+
+# ==================== Servers (grouped by EC2 instance; one on/off per server) ====================
+
+
+@router.get("/api/servers/status")
+async def servers_status(
+    _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
+):
+    """Get all LLM/research EC2 servers with instance details and models on each. For dashboard grouped view."""
+    return get_servers_status()
 
 
 # ==================== LLM servers status (which Ollama URLs are up and which models they have) ====================
@@ -1915,32 +2096,183 @@ async def llm_servers_status(
     Returns reachable status and list of model names (Qwen, BioMistral, etc.).
     """
     servers = []
+    main_url = (settings.ollama_url or "").strip() or None
     clinic_url = (getattr(settings, "ollama_clinic_url", None) or "").strip() or None
+    # When clinic URL is empty, clinic uses main URL (same g4dn); we show both rows with same server info
     urls_to_check = [
-        ("OLLAMA_URL (ominis-2.0 / vision)", settings.ollama_url.strip() or None),
-        ("OLLAMA_CLINIC_URL (ominis-2.0-clinic)", clinic_url),
+        ("OLLAMA_URL (ominis-2.0 / vision)", main_url),
+        ("OLLAMA_CLINIC_URL (ominis-2.0-clinic)", clinic_url if clinic_url else main_url),
     ]
-    seen = set()
-    for label, url in urls_to_check:
+    # Probe each unique URL once; cache result by normalized url
+    url_cache: dict[str, dict] = {}
+    for _label, url in urls_to_check:
         if not url:
-            note = "not set (ominis-2.0-clinic uses OLLAMA_URL)" if "CLINIC" in label else "not set"
-            servers.append({"label": label, "url": None, "reachable": False, "models": [], "note": note})
+            note = "not set (ominis-2.0-clinic usa OLLAMA_URL)" if "CLINIC" in _label else "not set"
+            servers.append({"label": _label, "url": None, "reachable": False, "models": [], "note": note})
             continue
-        if url in seen:
-            continue
-        seen.add(url)
         base = url.rstrip("/")
-        entry = {"label": label, "url": base, "reachable": False, "models": []}
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(f"{base}/api/tags")
-                if r.status_code == 200:
-                    entry["reachable"] = True
-                    entry["models"] = [m.get("name", "") for m in r.json().get("models", []) if m.get("name")]
-        except Exception as e:
-            entry["error"] = str(e)[:120]
-        servers.append(entry)
+        if base not in url_cache:
+            entry = {"reachable": False, "models": []}
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    r = await client.get(f"{base}/api/tags")
+                    if r.status_code == 200:
+                        entry["reachable"] = True
+                        entry["models"] = [m.get("name", "") for m in r.json().get("models", []) if m.get("name")]
+            except Exception as e:
+                entry["error"] = str(e)[:120]
+            url_cache[base] = entry
+        cached = url_cache[base]
+        note = "Mismo servidor que Ominis 2.0 (OLLAMA_URL)" if ("CLINIC" in _label and not clinic_url and main_url) else None
+        servers.append({
+            "label": _label,
+            "url": base,
+            "reachable": cached.get("reachable", False),
+            "models": cached.get("models", [])[:],
+            **({"note": note} if note else {}),
+            **({"error": cached["error"]} if cached.get("error") else {}),
+        })
     return {"servers": servers}
+
+
+# ==================== LLM model config (dashboard: assignments, prompts, version, params) ====================
+
+
+@router.get("/api/llm-models/config", response_model=list[LLMModelConfigOut])
+async def get_llm_models_config(
+    _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    List all chat LLM models with current config (env + DB overrides).
+    overridden lists which keys are saved in DB.
+    """
+    registry = get_model_registry()
+    result_db = await db.execute(select(LLMModelConfig))
+    rows = {r.model_id: r for r in result_db.scalars().all()}
+    result = []
+    for model_id, cfg in registry.items():
+        row = rows.get(model_id)
+        overridden = []
+        if row:
+            if row.display_name is not None: overridden.append("display_name")
+            if row.version_label is not None: overridden.append("version_label")
+            if row.description is not None: overridden.append("description")
+            if row.backend_model is not None: overridden.append("backend_model")
+            if row.backend_url_override is not None: overridden.append("backend_url_override")
+            if row.system_prompt is not None: overridden.append("system_prompt")
+            if row.temperature is not None: overridden.append("temperature")
+            if row.num_predict is not None: overridden.append("num_predict")
+            if row.extra_params is not None: overridden.append("extra_params")
+            if row.is_default is not None: overridden.append("is_default")
+            if getattr(row, "available_for_researcher", None) is not None: overridden.append("available_for_researcher")
+        backend_type = "openai" if getattr(cfg, "use_openai", False) else "ollama"
+        backend_model = cfg.openai_model if backend_type == "openai" else cfg.ollama_model
+        result.append(LLMModelConfigOut(
+            model_id=model_id,
+            display_name=cfg.display_name,
+            version_label=getattr(cfg, "version_label", "") or "",
+            description=cfg.description or "",
+            backend_type=backend_type,
+            backend_model=backend_model or "",
+            backend_url_override=row.backend_url_override if row else None,
+            system_prompt=(cfg.system_prompt or None) if getattr(cfg, "system_prompt", "") else None,
+            temperature=cfg.temperature,
+            num_predict=cfg.num_predict,
+            extra_params=dict(row.extra_params) if row and row.extra_params else None,
+            is_default=cfg.is_default,
+            overridden=overridden,
+            available_for_researcher=row.available_for_researcher if row and getattr(row, "available_for_researcher", None) is not None else True,
+        ))
+    return result
+
+
+@router.put("/api/llm-models/config/{model_id}")
+async def put_llm_model_config(
+    model_id: str,
+    body: LLMModelConfigUpdate,
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create or update dashboard overrides for one LLM model.
+    Only provided fields are updated. Invalidates registry and pipeline so changes apply immediately.
+    """
+    registry = get_model_registry()
+    if model_id not in registry:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    result = await db.execute(select(LLMModelConfig).where(LLMModelConfig.model_id == model_id))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = LLMModelConfig(model_id=model_id)
+        db.add(row)
+    if body.display_name is not None:
+        row.display_name = body.display_name
+    if body.version_label is not None:
+        row.version_label = body.version_label
+    if body.description is not None:
+        row.description = body.description
+    if body.backend_model is not None:
+        row.backend_model = body.backend_model
+    if body.backend_url_override is not None:
+        row.backend_url_override = body.backend_url_override.strip() or None
+    if body.system_prompt is not None:
+        row.system_prompt = body.system_prompt.strip() or None
+    if body.temperature is not None:
+        row.temperature = body.temperature
+    if body.num_predict is not None:
+        row.num_predict = body.num_predict
+    if body.extra_params is not None:
+        row.extra_params = body.extra_params
+    if body.is_default is not None:
+        row.is_default = body.is_default
+    if body.available_for_researcher is not None:
+        row.available_for_researcher = body.available_for_researcher
+    await db.commit()
+    invalidate_model_registry()
+    try:
+        from app.rag.pipeline import get_pipeline_manager
+        get_pipeline_manager().invalidate_generators()
+    except RuntimeError:
+        pass
+    return {"status": "ok", "model_id": model_id}
+
+
+# ==================== Site config (banner message) ====================
+
+
+@router.get("/api/site-config")
+async def get_site_config(db: AsyncSession = Depends(get_db)):
+    """Return site-wide config (e.g. banner_message). Public — used to show notification at top of app."""
+    result = await db.execute(select(SiteConfig).where(SiteConfig.id == 1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = SiteConfig(id=1, banner_message=None)
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return {"banner_message": getattr(row, "banner_message", None) or None}
+
+
+@router.patch("/api/site-config")
+async def update_site_config(
+    body: dict,
+    _: User = Depends(require_role(RoleEnum.superadmin)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update site config (e.g. global banner). Superadmin only."""
+    result = await db.execute(select(SiteConfig).where(SiteConfig.id == 1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = SiteConfig(id=1, banner_message=None)
+        db.add(row)
+        await db.flush()
+    if "banner_message" in body:
+        val = body["banner_message"]
+        row.banner_message = str(val).strip() or None if val is not None else None
+    await db.commit()
+    await db.refresh(row)
+    return {"banner_message": getattr(row, "banner_message", None) or None}
 
 
 # ==================== Chat defaults (for all users) ====================
@@ -1959,6 +2291,7 @@ async def get_chat_defaults(db: AsyncSession = Depends(get_db)):
             rag_search=True,
             web_search=True,
             pubmed_search=True,
+            openscholar_search=False,
         )
         db.add(row)
         await db.commit()
@@ -1968,6 +2301,7 @@ async def get_chat_defaults(db: AsyncSession = Depends(get_db)):
         "rag_search": row.rag_search,
         "web_search": row.web_search,
         "pubmed_search": row.pubmed_search,
+        "openscholar_search": getattr(row, "openscholar_search", False),
     }
 
 
@@ -1981,7 +2315,7 @@ async def update_chat_defaults(
     result = await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))
     row = result.scalar_one_or_none()
     if row is None:
-        row = ChatDefaults(id=1, research_mode=False, rag_search=True, web_search=True, pubmed_search=True)
+        row = ChatDefaults(id=1, research_mode=False, rag_search=True, web_search=True, pubmed_search=True, openscholar_search=False)
         db.add(row)
         await db.flush()
     if "research_mode" in body:
@@ -1992,6 +2326,8 @@ async def update_chat_defaults(
         row.web_search = bool(body["web_search"])
     if "pubmed_search" in body:
         row.pubmed_search = bool(body["pubmed_search"])
+    if "openscholar_search" in body:
+        row.openscholar_search = bool(body["openscholar_search"])
     await db.commit()
     await db.refresh(row)
     return {
@@ -1999,6 +2335,7 @@ async def update_chat_defaults(
         "rag_search": row.rag_search,
         "web_search": row.web_search,
         "pubmed_search": row.pubmed_search,
+        "openscholar_search": getattr(row, "openscholar_search", False),
     }
 
 

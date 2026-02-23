@@ -18,6 +18,13 @@ python-docx>=1.0.0
 openpyxl>=3.1.0
 xlrd>=2.0.0
 
+# SPSS/SASS .sav (variable dictionary for RAG; no raw microdata)
+pyreadstat>=1.2.0
+
+# Analytical layer: SAV→Parquet export + query (weighted stats, group by)
+duckdb>=0.10.0
+pyarrow>=14.0.0
+
 # NLP (required by DocumentSplitter split_by="sentence")
 nltk>=3.9.1
 

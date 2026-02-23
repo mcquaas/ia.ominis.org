@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
         rag_search: body.rag_search !== false,
         web_search: body.web_search !== false,
         pubmed_search: body.pubmed_search !== false,
+        openscholar_search: body.openscholar_search === true,
         file_context: body.file_context || undefined,
         iterations: body.iterations || 4,
         max_total_sources: body.max_total_sources || 30,

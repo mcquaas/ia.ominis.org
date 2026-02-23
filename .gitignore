@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 venv/
+venv-vast/
 env/
 .venv/
 ENV/
@@ -18,6 +19,8 @@ ENV/
 
 # Secrets
 .env
+.env.pipecat
+.env.*
 *.pem
 *credentials*
 *secret*

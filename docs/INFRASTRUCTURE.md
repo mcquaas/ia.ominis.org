@@ -10,8 +10,9 @@ Complete inventory of servers, services, domains, and IPs for the ia.ominis.org 
 |--------|---------|------------|
 | **ia.ominis.org** | Main frontend (chat UI) | 78.13.37.163 |
 | **ai.ominis.org** | Alternate frontend URL | 78.13.37.163 |
+| **chat.ominis.org** | Chat UI (Ominis-styled, Haystack backend) | *see Chat Server* |
 | **api.ominis.org** | API gateway (Haystack + legacy RAG) | 78.12.33.205 |
-| **admin.ominis.org** | Strapi admin panel | — |
+| **admin.ominis.org** | (Legacy; admin via api.ominis.org) | — |
 | **ominis.org** | Main website / Tainacan content source | — |
 | **roclab.ominis.org** | ROC Lab | — |
 
@@ -24,6 +25,7 @@ Complete inventory of servers, services, domains, and IPs for the ia.ominis.org 
 | Server | Instance ID | IP | Region | Type | Purpose |
 |--------|-------------|-----|--------|------|---------|
 | **Frontend** | `i-0efb1b3c28d64cdb5` | 78.13.37.163 | — | — | Next.js chat UI |
+| **Chat Server** | *from 25-deploy-chat-ec2.sh* | *Elastic IP in config/chat_server.txt* | mx-central-1 | t3.small | Chat UI (Ominis look, Haystack API) |
 | **Haystack Backend** | `i-04464c8355e364211` | 78.12.33.205 | mx-central-1 | t3.large | FastAPI + Haystack RAG |
 | **Old RAG API (Ollama)** | `i-02264316b8b094bad` | 78.13.254.66 | mx-central-1 | t3.medium | Legacy Python RAG, Ollama (stopped) |
 | **GPU Ollama** | `i-067dd350739288262` | 3.213.91.241 | us-east-1 | — | Ominis-2.0, mistral, vision models |
@@ -65,6 +67,15 @@ Los cuatro servidores con GPU que usamos para inferencia LLM:
 | Next.js | 3000 | https://ia.ominis.org |
 | Nginx | 80, 443 | Reverse proxy |
 
+### Chat Server (chat.ominis.org)
+
+| Service | Port | URL |
+|---------|------|-----|
+| LibreChat (Ominis-styled) | 3080 | https://chat.ominis.org (via Nginx) |
+| Nginx | 80, 443 | Reverse proxy |
+
+Deploy: `./infrastructure/25-deploy-chat-ec2.sh` then `./infrastructure/26-sync-chat-librechat.sh`. Backend must list `https://chat.ominis.org` in `ALLOWED_ORIGINS`. See [CHAT_OMINIS.md](CHAT_OMINIS.md).
+
 ### Haystack Backend (78.12.33.205) — Main Agent Server
 
 | Service | Port | URL |
@@ -73,6 +84,8 @@ Los cuatro servidores con GPU que usamos para inferencia LLM:
 | PostgreSQL | 5432 | localhost only |
 | Status Watchdog | — | https://api.ominis.org/status/ |
 | Nginx | 80, 443 | Reverse proxy |
+
+**RAG file upload (CSV, PDF, etc.):** Uploads go to `POST /v1/api/rag-sources/upload`. For files &gt; 1MB, Nginx must allow larger bodies: run `infrastructure/20g-backend-nginx-upload-size.sh` on the backend host (sets `client_max_body_size 50M`). CORS must include the frontend origin (e.g. `https://ia.ominis.org`); set `ALLOWED_ORIGINS` in backend `.env` and run `20f-update-backend-env-cors.sh` if needed.
 
 ### Old RAG API (78.13.254.66) — DEPRECATED / To Decommission
 
@@ -125,7 +138,7 @@ Los cuatro servidores con GPU que usamos para inferencia LLM:
 | https://api.ominis.org/v1/query-stream | POST | Streaming query |
 | https://api.ominis.org/v1/health | GET | Health check |
 | https://api.ominis.org/status | GET | Status page (served from Haystack) |
-| https://api.ominis.org/v1 | GET | Strapi API (if deployed) |
+| https://api.ominis.org/v1 | GET | Haystack backend API |
 
 ---
 
@@ -186,13 +199,49 @@ User → [ia.ominis.org] Frontend (78.13.37.163)
 
 ## SSH Aliases (~/.ssh/config)
 
-| Host | IP |
-|------|-----|
-| ominis-haystack, api.ominis.org | 78.12.33.205 |
-| ominis-api | 78.13.254.66 (legacy, to decommission) |
-| ominis-gpu | 3.213.91.241 |
-| ominis-frontend | 78.13.37.163 |
-| ominis-openscholar | 44.217.135.115 |
+Credenciales: usuario **ubuntu**, clave privada **config/ominis-ollama-key.pem** (backend/frontend usan distintas keys; ver tabla). La key del backend Haystack es `ominis-ollama-key.pem`.
+
+Bloque listo para pegar en `~/.ssh/config` (ajusta `IdentityFile` si tu key está en otra ruta):
+
+```
+# Haystack Backend (api.ominis.org)
+Host ominis-haystack api.ominis.org
+    HostName 78.12.33.205
+    User ubuntu
+    IdentityFile ~/Dev/ia.ominis.org/config/ominis-ollama-key.pem
+    IdentitiesOnly yes
+
+# Frontend (ia.ominis.org)
+Host ominis-frontend
+    HostName 78.13.37.163
+    User ubuntu
+    IdentityFile ~/Dev/ia.ominis.org/config/ominis-frontend-key.pem
+    IdentitiesOnly yes
+
+# GPU Ollama (Ominis 2.0, BioMistral)
+Host ominis-gpu
+    HostName 3.213.91.241
+    User ubuntu
+    IdentityFile ~/Dev/ia.ominis.org/config/ominis-ollama-gpu-key.pem
+    IdentitiesOnly yes
+
+# OpenScholar (research vLLM)
+Host ominis-openscholar
+    HostName 44.217.135.115
+    User ubuntu
+    IdentityFile ~/Dev/ia.ominis.org/config/<openscholar-key>.pem
+    IdentitiesOnly yes
+```
+
+Después: `ssh ominis-haystack` o `ssh api.ominis.org`.
+
+| Host | IP | User | Key (en repo) |
+|------|-----|------|----------------|
+| ominis-haystack, api.ominis.org | 78.12.33.205 | ubuntu | config/ominis-ollama-key.pem |
+| ominis-api | 78.13.254.66 | ubuntu | (legacy, to decommission) |
+| ominis-gpu | 3.213.91.241 | ubuntu | config/ominis-ollama-gpu-key.pem |
+| ominis-frontend | 78.13.37.163 | ubuntu | config/ominis-frontend-key.pem |
+| ominis-openscholar | 44.217.135.115 | ubuntu | (creada al desplegar 14-deploy-openscholar.sh) |
 
 ---
 

@@ -2,7 +2,7 @@
 FastAPI dependencies for authentication and authorization.
 """
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,16 +50,23 @@ async def get_current_user(
 
 
 async def get_optional_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User | None:
-    """Like get_current_user but returns None instead of raising if not authenticated."""
-    if not credentials:
-        return None
-    try:
-        return await get_current_user(credentials, db)
-    except HTTPException:
-        return None
+    """Like get_current_user but returns None if not authenticated. Also accepts API key (e.g. chat.ominis.org)."""
+    if credentials:
+        try:
+            return await get_current_user(credentials, db)
+        except HTTPException:
+            pass  # Not a valid JWT; may be API key set by middleware (Bearer <api_key>)
+    # Chat.ominis.org and other API-key callers: treat valid API key as authenticated user
+    api_key_user_id = getattr(request.state, "api_key_user_id", None)
+    if api_key_user_id is not None:
+        user = await get_user_by_id(db, api_key_user_id)
+        if user and user.is_active:
+            return user
+    return None
 
 
 def require_role(*roles: RoleEnum):

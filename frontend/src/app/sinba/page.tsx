@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Header from '@/components/Header';
+import { useAuth } from '@/hooks/useAuth';
 import { listCubes, getCubeMetadata, queryCube, getProxyStatus } from '@/services/sinba';
 import type { CubeMetadata, CubeQueryResult } from '@/services/sinba';
 
@@ -47,6 +48,7 @@ function categoryColor(cat: string): string {
 
 /* ────────── Main page ────────── */
 export default function SinbaPage() {
+  const { loading: authLoading, isAdmin } = useAuth();
   // Cube list state
   const [cubePages, setCubePages] = useState<{ filename: string; label: string; category: string }[]>([]);
   const [loadingCubes, setLoadingCubes] = useState(true);
@@ -161,6 +163,17 @@ export default function SinbaPage() {
     const matchesCat = !categoryFilter || c.category === categoryFilter;
     return matchesSearch && matchesCat;
   });
+
+  if (!authLoading && !isAdmin) {
+    return (
+      <div className="min-h-screen bg-[#0a1628] text-gray-100">
+        <Header />
+        <main className="pt-20 pb-10 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto text-center py-16">
+          <p className="text-gray-400">Necesitas permisos de administrador para acceder a Cubos SINBA.</p>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0a1628] text-gray-100">

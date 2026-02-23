@@ -13,7 +13,12 @@ from starlette.responses import JSONResponse
 logger = logging.getLogger(__name__)
 
 # Paths that require API key auth (when no JWT is present)
-API_KEY_PATHS = ["/v1/query", "/v1/query-stream"]
+API_KEY_PATHS = [
+    "/v1/query",
+    "/v1/query-stream",
+    "/v1/liveavatar/chat/completions",
+    "/v1/chat/completions",
+]
 
 
 class APIKeyAuthMiddleware(BaseHTTPMiddleware):
@@ -29,15 +34,19 @@ class APIKeyAuthMiddleware(BaseHTTPMiddleware):
         if not any(path.startswith(p) for p in API_KEY_PATHS):
             return await call_next(request)
 
-        # Skip if Bearer token is present (JWT auth takes precedence)
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            return await call_next(request)
-
-        # Check for API key
-        api_key_header = request.headers.get("X-API-Key", "")
+        # API key can be in X-API-Key or in Authorization: Bearer <key> (e.g. LibreChat).
+        # Do not treat Bearer tokens that look like JWTs as API keys (ia.ominis.org sends JWT).
+        api_key_header = request.headers.get("X-API-Key", "").strip()
         if not api_key_header:
-            # No auth at all - allow anonymous access for query endpoints
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:].strip()
+                # JWT has three base64 parts separated by dots; API keys do not
+                if token.count(".") == 2:
+                    return await call_next(request)
+                api_key_header = token
+
+        if not api_key_header:
             return await call_next(request)
 
         # Validate the API key

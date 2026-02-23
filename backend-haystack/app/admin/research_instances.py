@@ -6,13 +6,30 @@ Used by admin dashboard and by RAG router to choose which research endpoint to u
 import logging
 import threading
 import time
-from typing import Literal
+from typing import Any, Literal
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 ResearchInstanceKey = Literal["openscholar", "openscholar_128k"]
+
+# Instance type -> GPU VRAM (GB) and system RAM (GB) for dashboard display
+INSTANCE_SPECS: dict[str, dict[str, int]] = {
+    "g4dn.xlarge": {"vram_gb": 16, "ram_gb": 16},
+    "g4dn.2xlarge": {"vram_gb": 16, "ram_gb": 32},
+    "g5.xlarge": {"vram_gb": 24, "ram_gb": 16},
+    "g5.2xlarge": {"vram_gb": 24, "ram_gb": 32},
+    "g5.4xlarge": {"vram_gb": 24, "ram_gb": 64},
+    "g5.8xlarge": {"vram_gb": 24, "ram_gb": 128},
+    "p3.2xlarge": {"vram_gb": 16, "ram_gb": 61},
+}
+
+# Model base and description per research key
+RESEARCH_MODEL_INFO: dict[str, tuple[str, str]] = {
+    "openscholar": ("OpenScholar 8K", "vLLM, contexto 8K"),
+    "openscholar_128k": ("OpenScholar 128K", "vLLM, contexto 128K (se apaga a los 60 min)"),
+}
 
 # When 128k instance was started (unix timestamp); stop it after auto_stop_minutes
 _128k_started_at: float | None = None
@@ -38,18 +55,30 @@ def _get_ec2_client():
     return boto3.client("ec2", **kwargs)
 
 
-def get_research_instance_status() -> dict[str, str | None]:
+def get_research_instance_status() -> dict[str, Any]:
     """
-    Return current EC2 state for each research instance.
-    Keys: "openscholar", "openscholar_128k".
-    Values: "running" | "stopped" | "pending" | "error" (ID set but AWS call failed) | None (not configured).
+    Return current EC2 state and details for each research instance.
+    Top-level keys "openscholar", "openscholar_128k" = state string (backward compat).
+    "details" = per-key dict with instanceId, instanceType, publicIp, state, vramGb, ramGb, modelBase, modelDescription.
     """
-    result: dict[str, str | None] = {"openscholar": None, "openscholar_128k": None}
-    ids = {}
-    for key in ("openscholar", "openscholar_128k"):
+    result: dict[str, Any] = {"openscholar": None, "openscholar_128k": None, "details": {}}
+    keys_order = ("openscholar", "openscholar_128k")
+    ids: dict[str, str] = {}
+    for key in keys_order:
         iid = _get_instance_id(key)
         if iid:
             ids[key] = iid
+        model_base, model_desc = RESEARCH_MODEL_INFO.get(key, ("", ""))
+        result["details"][key] = {
+            "instanceId": iid,
+            "instanceType": None,
+            "publicIp": None,
+            "state": None,
+            "vramGb": None,
+            "ramGb": None,
+            "modelBase": model_base,
+            "modelDescription": model_desc,
+        }
 
     if not ids:
         return result
@@ -57,12 +86,32 @@ def get_research_instance_status() -> dict[str, str | None]:
     try:
         client = _get_ec2_client()
         resp = client.describe_instances(InstanceIds=list(ids.values()))
-        state_by_id = {}
+        info_by_id: dict[str, dict] = {}
         for r in resp.get("Reservations", []):
             for inst in r.get("Instances", []):
-                state_by_id[inst["InstanceId"]] = inst["State"]["Name"]
+                iid = inst["InstanceId"]
+                itype = inst.get("InstanceType")
+                specs = INSTANCE_SPECS.get(itype or "", {}) if itype else {}
+                info_by_id[iid] = {
+                    "state": inst["State"]["Name"],
+                    "instanceType": itype,
+                    "publicIp": (inst.get("PublicIpAddress") or "").strip() or None,
+                    "privateIp": (inst.get("PrivateIpAddress") or "").strip() or None,
+                    "vramGb": specs.get("vram_gb"),
+                    "ramGb": specs.get("ram_gb"),
+                }
         for key, iid in ids.items():
-            result[key] = state_by_id.get(iid, "unknown")
+            info = info_by_id.get(iid, {})
+            state = info.get("state") or "unknown"
+            result[key] = state
+            result["details"][key].update({
+                "instanceId": iid,
+                "instanceType": info.get("instanceType"),
+                "publicIp": info.get("publicIp"),
+                "state": state,
+                "vramGb": info.get("vramGb"),
+                "ramGb": info.get("ramGb"),
+            })
     except Exception as e:
         logger.warning("Failed to get research instance status: %s", e)
         for key in ids:

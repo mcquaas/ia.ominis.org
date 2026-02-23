@@ -1,19 +1,57 @@
 """
-Vision analysis using Haystack's OllamaChatGenerator with ImageContent.
-
-Uses the native Haystack 2.23 multimodal support:
-  ChatMessage.from_user(content_parts=[text, ImageContent(...)])
+Vision analysis using Haystack's OllamaChatGenerator with ImageContent,
+or optional Qwen2.5-VL (OpenAI-compatible) when QWEN_VL_API_URL is set.
 """
 
+import asyncio
 import base64
 import logging
 from typing import Optional
 
+import httpx
 from haystack.dataclasses import ChatMessage, ImageContent
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+async def _analyze_image_qwen_vl(image_b64: str, question: str, mime_type: str) -> str:
+    """Call Qwen2.5-VL (OpenAI-compatible) for image analysis."""
+    settings = get_settings()
+    url = (getattr(settings, "qwen_vl_api_url", None) or "").rstrip("/")
+    if not url.endswith("/v1"):
+        url = f"{url}/v1" if url else ""
+    if not url:
+        return ""
+    endpoint = f"{url}/chat/completions"
+    model = getattr(settings, "qwen_vl_model", "qwen2.5-vl") or "qwen2.5-vl"
+    timeout = getattr(settings, "qwen_vl_timeout", 60) or 60
+    prompt = (
+        f"Analiza esta imagen. Pregunta del usuario: {question}. Describe en detalle, transcribe texto si hay. Responde en español."
+        if question
+        else "Describe esta imagen en detalle. Si hay texto, transcríbelo. Responde en español."
+    )
+    body = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
+                ],
+            }
+        ],
+        "max_tokens": 1024,
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(endpoint, json=body)
+        resp.raise_for_status()
+        data = resp.json()
+    choice = (data.get("choices") or [{}])[0]
+    text = (choice.get("message") or {}).get("content", "")
+    return (text or "").strip()
 
 
 def _guess_mime_type(b64: str) -> str:
@@ -49,6 +87,20 @@ async def analyze_image(
     Returns:
         A text description/analysis of the image in Spanish.
     """
+    settings = get_settings()
+    if (getattr(settings, "qwen_vl_api_url", None) or "").strip():
+        # Use Qwen2.5-VL (OpenAI-compatible) when configured
+        if image_b64.startswith("data:"):
+            parts = image_b64.split(",", 1)
+            mime_type = "image/png"
+            if len(parts) == 2:
+                if "/" in parts[0]:
+                    mime_type = parts[0].split(":")[1].split(";")[0]
+                image_b64 = parts[1]
+        else:
+            mime_type = _guess_mime_type(image_b64)
+        return await _analyze_image_qwen_vl(image_b64, question, mime_type)
+
     if vision_generator is None:
         logger.warning("No vision generator available; skipping image analysis.")
         return ""
@@ -83,8 +135,6 @@ async def analyze_image(
         )
 
     try:
-        import asyncio
-
         # Build ChatMessage with ImageContent (Haystack 2.23 native multimodal)
         image_content = ImageContent(
             base64_image=image_b64,

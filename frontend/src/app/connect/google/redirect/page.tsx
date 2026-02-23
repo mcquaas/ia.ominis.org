@@ -28,7 +28,7 @@ function GoogleRedirectContent() {
       }
     } else if (jwt) {
       // JWT only - fetch user profile
-      fetch(`${process.env.NEXT_PUBLIC_STRAPI_URL || 'https://api.ominis.org'}/v1/api/users/me?populate=role`, {
+      fetch(`${process.env.NEXT_PUBLIC_API_URL || 'https://api.ominis.org'}/v1/api/users/me?populate=role`, {
         headers: { Authorization: `Bearer ${jwt}` },
       })
         .then((res) => res.json())

@@ -6,7 +6,9 @@ extracts their titles (from surrounding context, not just the link text),
 and returns structured results for indexing.
 """
 
+import asyncio
 import logging
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -16,11 +18,14 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Browser-like headers to avoid WAF blocks (Akamai, Cloudflare, etc.)
+# When the server's CA bundle can't verify some targets (e.g. riisp.insp.mx), set SCRAPE_SSL_VERIFY=false
+_SSL_VERIFY = os.environ.get("SCRAPE_SSL_VERIFY", "true").lower() not in ("0", "false", "no")
+
+# Browser-like headers to avoid WAF blocks (Akamai, Cloudflare, datos.gob.mx 403, etc.)
 BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-MX,es;q=0.8,en-US;q=0.5,en;q=0.3",
+    "Accept-Language": "es-MX,es;q=0.9,es;q=0.8,en-US;q=0.5,en;q=0.3",
     "Accept-Encoding": "gzip, deflate, br",
     "DNT": "1",
     "Connection": "keep-alive",
@@ -29,7 +34,23 @@ BROWSER_HEADERS = {
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none",
     "Sec-Fetch-User": "?1",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Linux"',
 }
+
+
+def _headers_for_url(page_url: str) -> dict:
+    """Browser-like headers plus Referer/Origin from page_url to avoid 403 on datos.gob.mx etc."""
+    parsed = urlparse(page_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    # Referer as same-origin base often required by datos.gob.mx / historico.datos.gob.mx
+    referer = f"{origin}/"
+    return {
+        **BROWSER_HEADERS,
+        "Referer": referer,
+        "Origin": origin,
+    }
 
 # Common user agent to avoid blocks
 USER_AGENT = (
@@ -61,12 +82,14 @@ async def scrape_pdf_links(
         ...
     ]
     """
-    headers = {"User-Agent": USER_AGENT}
+    headers = _headers_for_url(page_url)
+    headers["User-Agent"] = USER_AGENT  # keep OminisBot for PDF scrape
 
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=True,
         headers=headers,
+        verify=_SSL_VERIFY,
     ) as client:
         resp = await client.get(page_url)
         resp.raise_for_status()
@@ -216,6 +239,139 @@ def _title_from_filename(href: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Unified file link extraction (PDF, CSV, XLS, XLSX) for any webpage
+# ---------------------------------------------------------------------------
+
+# File extensions we can index from a scraped page
+SCRAPE_FILE_EXTENSIONS = (".pdf", ".csv", ".xls", ".xlsx")
+
+
+def _extract_file_links(
+    html: str,
+    base_url: str,
+    extensions: tuple[str, ...] = SCRAPE_FILE_EXTENSIONS,
+) -> list[dict]:
+    """
+    Extract links to PDF, CSV, XLS, XLSX (or any given extensions) from HTML
+    with the same block/title logic as _extract_pdf_links.
+    Returns list of { title, file_url, source_page, format }.
+    """
+    results = []
+    seen_urls: set[str] = set()
+    # Build regex: match any of the extensions (case-insensitive)
+    ext_pattern = "|".join(re.escape(e) for e in extensions)
+    a_tag_re = re.compile(
+        rf'<a\s[^>]*href\s*=\s*["\']([^"\']*(?:{ext_pattern})[^"\']*)["\'][^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    block_pattern = re.compile(r'<hr\s*/?>|<li[^>]*>|---', re.IGNORECASE)
+    blocks = block_pattern.split(html)
+
+    for block in blocks:
+        for match in a_tag_re.finditer(block):
+            href = match.group(1).strip()
+            raw_link_text = match.group(2).strip()
+            full_url = urljoin(base_url, href)
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+            fmt = _detect_format_from_url(full_url).lower() or "pdf"
+            link_text = re.sub(r"<[^>]+>", "", raw_link_text).strip()
+            link_text = re.sub(r"\s+", " ", link_text)
+            title = _extract_block_title(block, match.start())
+            if not title or title.lower().strip() in GENERIC_LABELS:
+                if link_text and link_text.lower().strip() not in GENERIC_LABELS:
+                    title = link_text
+                else:
+                    title = _title_from_filename(href) if fmt == "pdf" else _title_from_url_generic(href)
+            results.append({
+                "title": title,
+                "file_url": full_url,
+                "source_page": base_url,
+                "format": fmt,
+            })
+
+    for match in a_tag_re.finditer(html):
+        href = match.group(1).strip()
+        full_url = urljoin(base_url, href)
+        if full_url in seen_urls:
+            continue
+        seen_urls.add(full_url)
+        fmt = _detect_format_from_url(full_url).lower() or "pdf"
+        raw_text = match.group(2).strip()
+        link_text = re.sub(r"<[^>]+>", "", raw_text).strip()
+        link_text = re.sub(r"\s+", " ", link_text)
+        if link_text and link_text.lower().strip() not in GENERIC_LABELS:
+            title = link_text
+        else:
+            title = _title_from_filename(href) if fmt == "pdf" else _title_from_url_generic(href)
+        results.append({
+            "title": title,
+            "file_url": full_url,
+            "source_page": base_url,
+            "format": fmt,
+        })
+
+    return results
+
+
+def _title_from_url_generic(href: str) -> str:
+    """Readable title from any file URL (CSV, XLS, etc.)."""
+    path = urlparse(href).path
+    filename = Path(path).stem if path else "document"
+    title = filename.replace("-", " ").replace("_", " ")
+    title = re.sub(r'^\d+\s*', '', title)
+    return title.strip().title() if title.strip() else "Documento"
+
+
+async def scrape_file_links(
+    page_url: str,
+    extensions: tuple[str, ...] = SCRAPE_FILE_EXTENSIONS,
+    timeout: float = 30.0,
+) -> list[dict]:
+    """
+    Scrape a webpage and find all links to PDF, CSV, XLS, XLSX (or given extensions).
+    Returns list of { title, file_url, source_page, format }.
+    """
+    headers = _headers_for_url(page_url)
+    headers["User-Agent"] = USER_AGENT
+    parsed = urlparse(page_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        headers=headers,
+        verify=_SSL_VERIFY,
+        cookies=httpx.Cookies(),
+    ) as client:
+        if "datos.gob.mx" in origin:
+            try:
+                await client.get(origin + "/", headers={**headers, "Referer": origin + "/"})
+            except Exception:
+                pass
+        resp = await client.get(page_url)
+        resp.raise_for_status()
+        html = resp.text
+
+    file_links = _extract_file_links(html, page_url, extensions)
+
+    if len(file_links) > 1:
+        titles = [f["title"] for f in file_links]
+        most_common = max(set(titles), key=titles.count)
+        if titles.count(most_common) > len(titles) * 0.5:
+            for f in file_links:
+                if f["title"] == most_common:
+                    f["title"] = _title_from_url_generic(f["file_url"])
+
+    logger.info(
+        f"Found {len(file_links)} file links (PDF/CSV/XLS) on {page_url}"
+    )
+    return file_links
+
+
+# ---------------------------------------------------------------------------
 # Dataset page scraper (CKAN / datos.gob.mx style)
 # ---------------------------------------------------------------------------
 
@@ -226,13 +382,26 @@ async def scrape_dataset_resources(
     Scrape a dataset page (CKAN / datos.gob.mx style) for downloadable
     resources (CSV, XLS, PDF, etc.) and page-level metadata.
 
-    Returns dict with:
-      - page_title, page_metadata (dict)
-      - resources: list of {title, description, url, format, resource_id}
+    For historico.datos.gob.mx and similar sites that return 403 without a session,
+    we first request the origin to obtain cookies, then request the dataset page.
     """
+    parsed = urlparse(page_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    headers = _headers_for_url(page_url)
+
     async with httpx.AsyncClient(
-        timeout=timeout, follow_redirects=True, headers=BROWSER_HEADERS,
+        timeout=timeout,
+        follow_redirects=True,
+        headers=headers,
+        verify=_SSL_VERIFY,
+        cookies=httpx.Cookies(),  # persist cookies across requests
     ) as client:
+        # First hit the origin to get any session/WAF cookies (reduces 403 on historico.datos.gob.mx)
+        if "datos.gob.mx" in origin or "historico.datos" in origin:
+            try:
+                await client.get(origin + "/", headers={**headers, "Referer": origin + "/"})
+            except Exception:
+                pass  # ignore; we still try the actual page
         resp = await client.get(page_url)
         resp.raise_for_status()
         html = resp.text
@@ -343,33 +512,49 @@ def _extract_dataset_resources(html: str, page_url: str) -> dict:
             }
         )
 
-    # Pattern 2: If no CKAN resources found, fall back to generic link extraction
-    if not resources:
-        indexable_exts = (
-            ".csv", ".xls", ".xlsx", ".pdf", ".json", ".xml", ".zip", ".txt",
-        )
-        all_links = re.findall(
-            r'<a\s[^>]*href="([^"]*)"[^>]*>(.*?)</a>', html, re.DOTALL
-        )
-        for href, text in all_links:
-            if not href.startswith("http"):
-                href = urljoin(base_url, href)
-            if href in seen_urls:
-                continue
-            if any(href.lower().endswith(ext) for ext in indexable_exts):
-                seen_urls.add(href)
-                text_clean = re.sub(r"<[^>]+>", "", text).strip()
-                ext = _detect_format_from_url(href)
-                resources.append(
-                    {
-                        "title": text_clean or _title_from_filename(href),
-                        "description": "",
-                        "url": href,
-                        "format": ext,
-                        "resource_id": "",
-                        "source_page": page_url,
-                    }
-                )
+    # Pattern 2: Generic link extraction + NADA-style (download/catalog URLs)
+    indexable_exts = (".csv", ".xls", ".xlsx", ".pdf", ".json", ".xml", ".zip", ".txt")
+    all_links = re.findall(
+        r'<a\s([^>]*)href="([^"]*)"([^>]*)>(.*?)</a>', html, re.DOTALL
+    )
+    for before, href, after, text in all_links:
+        if not href.startswith("http"):
+            href = urljoin(base_url, href)
+        if href in seen_urls:
+            continue
+        full_tag = (before + " " + after).lower()
+        text_clean = re.sub(r"<[^>]+>", "", text).strip()
+
+        ext = _detect_format_from_url(href)
+        if not ext and ("download" in href.lower() or "catalog" in href.lower() or "nada" in href.lower()):
+            from urllib.parse import parse_qs, urlparse
+            parsed = urlparse(href)
+            qs = parse_qs(parsed.query)
+            ext = (qs.get("format") or qs.get("type") or [""])[0].lower()[:5]
+            if not ext and text_clean:
+                if "csv" in text_clean.lower():
+                    ext = "csv"
+                elif "excel" in text_clean.lower() or "xls" in text_clean.lower():
+                    ext = "xlsx"
+                elif "pdf" in text_clean.lower():
+                    ext = "pdf"
+        if not ext:
+            continue
+        if ext == "dataset":
+            continue
+        # Add if direct file URL or we inferred format (e.g. NADA)
+        if any(href.lower().endswith(e) for e in indexable_exts) or ext in ("csv", "xls", "xlsx", "pdf", "json"):
+            seen_urls.add(href)
+            resources.append(
+                {
+                    "title": text_clean or _title_from_url_generic(href),
+                    "description": "",
+                    "url": href,
+                    "format": ext.upper() if len(ext) <= 5 else ext,
+                    "resource_id": "",
+                    "source_page": page_url,
+                }
+            )
 
     logger.info(
         f"Scraped dataset page '{page_url}': {len(resources)} resources, "
@@ -401,22 +586,36 @@ def _detect_format_from_url(url: str) -> str:
 
 async def download_pdf(
     pdf_url: str,
-    timeout: float = 120.0,
+    timeout: float = 180.0,
+    max_retries: int = 2,
 ) -> tuple[Path, int]:
     """
     Download a PDF to a temporary file.
     Returns (temp_file_path, file_size_bytes).
+    Retries on truncated response (peer closed connection), common with gob.mx.
     """
     headers = {"User-Agent": USER_AGENT}
+    last_error = None
 
-    async with httpx.AsyncClient(
-        timeout=timeout,
-        follow_redirects=True,
-        headers=headers,
-    ) as client:
-        resp = await client.get(pdf_url)
-        resp.raise_for_status()
-        content = resp.content
+    for attempt in range(max_retries + 1):
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                headers=headers,
+                verify=_SSL_VERIFY,
+            ) as client:
+                resp = await client.get(pdf_url)
+                resp.raise_for_status()
+                content = resp.content
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries and "peer closed connection" in str(e).lower():
+                logger.warning("PDF download truncated (attempt %s/%s), retrying: %s", attempt + 1, max_retries + 1, e)
+                await asyncio.sleep(2.0 * (attempt + 1))
+                continue
+            raise
 
     # Save to temp file
     tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
@@ -435,7 +634,10 @@ async def download_file(
     Detects extension from URL or content-type.
     """
     async with httpx.AsyncClient(
-        timeout=timeout, follow_redirects=True, headers=BROWSER_HEADERS,
+        timeout=timeout,
+        follow_redirects=True,
+        headers=BROWSER_HEADERS,
+        verify=_SSL_VERIFY,
     ) as client:
         resp = await client.get(url)
         resp.raise_for_status()

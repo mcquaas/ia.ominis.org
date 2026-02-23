@@ -15,6 +15,7 @@ import {
   reindexSource,
   classifySource,
   batchReindex,
+  markStuckIndexingAsFailed,
   getTaxonomySchema,
   scrapePreview,
   scrapeAndIndex,
@@ -141,11 +142,11 @@ export default function RagPage() {
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Scrape state
+  // Scrape state (PDF + CSV + XLS + XLSX)
   const [scrapeUrl, setScrapeUrl] = useState('');
   const [scrapeLoading, setScrapeLoading] = useState(false);
-  const [scrapedPdfs, setScrapedPdfs] = useState<
-    Array<{ title: string; pdfUrl: string; sourcePage: string; selected: boolean }>
+  const [scrapedFiles, setScrapedFiles] = useState<
+    Array<{ title: string; fileUrl: string; sourcePage: string; format: string; selected: boolean }>
   >([]);
   const [scrapePreviewDone, setScrapePreviewDone] = useState(false);
 
@@ -280,6 +281,24 @@ export default function RagPage() {
     }
   };
 
+  const [markingStuck, setMarkingStuck] = useState(false);
+  const handleMarkStuckAsFailed = async () => {
+    setMarkingStuck(true);
+    try {
+      const res = await markStuckIndexingAsFailed(30);
+      if (res.marked > 0) {
+        showMsg(`${res.marked} fuente(s) marcadas como fallidas (indexación atascada). Puedes re-indexar.`);
+        loadSources();
+      } else {
+        showMsg('No hay fuentes atascadas en indexación (más de 30 min).');
+      }
+    } catch {
+      showMsg('Error al marcar fuentes atascadas');
+    } finally {
+      setMarkingStuck(false);
+    }
+  };
+
   const handleViewChunks = async (sourceId: number) => {
     if (viewingChunks === sourceId) {
       setViewingChunks(null);
@@ -344,12 +363,16 @@ export default function RagPage() {
     if (!scrapeUrl.trim()) return;
     setScrapeLoading(true);
     setScrapePreviewDone(false);
-    setScrapedPdfs([]);
+    setScrapedFiles([]);
     try {
       const result = await scrapePreview(scrapeUrl);
-      setScrapedPdfs(result.pdfs.map((p) => ({ ...p, selected: true })));
+      const list = (result.files && result.files.length > 0
+        ? result.files
+        : result.pdfs.map((p) => ({ title: p.title, fileUrl: p.pdfUrl, sourcePage: p.sourcePage, format: 'pdf' }))
+      ).map((f) => ({ ...f, selected: true }));
+      setScrapedFiles(list);
       setScrapePreviewDone(true);
-      if (result.pdfs.length === 0) showMsg('No se encontraron PDFs en esta URL');
+      if (list.length === 0) showMsg('No se encontraron PDF/CSV/XLS en esta URL');
     } catch (e) {
       showMsg(e instanceof Error ? e.message : 'Error al escanear URL');
     } finally {
@@ -358,32 +381,32 @@ export default function RagPage() {
   };
 
   const handleScrapeIndex = async () => {
-    const selected = scrapedPdfs.filter((p) => p.selected);
+    const selected = scrapedFiles.filter((p) => p.selected);
     if (selected.length === 0) {
-      showMsg('Selecciona al menos un PDF');
+      showMsg('Selecciona al menos un archivo');
       return;
     }
     setUploading(true);
     try {
       const result = await scrapeAndIndex(scrapeUrl, {
         category: uploadCategory,
-        pdfs: selected.map((p) => ({ title: p.title, pdfUrl: p.pdfUrl, sourcePage: p.sourcePage })),
+        files: selected.map((p) => ({ title: p.title, fileUrl: p.fileUrl, sourcePage: p.sourcePage, format: p.format })),
       });
-      showMsg(`${result.totalQueued} PDFs enviados para indexación`);
+      showMsg(`${result.totalQueued} archivos enviados para indexación`);
       setScrapeUrl('');
-      setScrapedPdfs([]);
+      setScrapedFiles([]);
       setScrapePreviewDone(false);
       setUploadCategory('');
       loadSources();
     } catch (e) {
-      showMsg(e instanceof Error ? e.message : 'Error al indexar PDFs');
+      showMsg(e instanceof Error ? e.message : 'Error al indexar archivos');
     } finally {
       setUploading(false);
     }
   };
 
-  const toggleAllPdfs = (selected: boolean) => {
-    setScrapedPdfs((prev) => prev.map((p) => ({ ...p, selected })));
+  const toggleAllScrapedFiles = (selected: boolean) => {
+    setScrapedFiles((prev) => prev.map((p) => ({ ...p, selected })));
   };
 
   const handleTainacanPreview = async () => {
@@ -572,7 +595,7 @@ export default function RagPage() {
                     setUploadMode(m);
                     if (m === 'scrape') {
                       setScrapePreviewDone(false);
-                      setScrapedPdfs([]);
+                      setScrapedFiles([]);
                     }
                     if (m === 'tainacan') {
                       setTainacanPreviewData(null);
@@ -582,7 +605,7 @@ export default function RagPage() {
                   }}
                   className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${uploadMode === m ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' : 'text-gray-400 border-white/10 hover:text-white'}`}
                 >
-                  {m === 'file' ? 'Archivo' : m === 'text' ? 'Texto' : m === 'url' ? 'URL' : m === 'scrape' ? 'Scrape PDFs' : m === 'dataset' ? 'Datasets' : 'Tainacan'}
+                  {m === 'file' ? 'Archivo' : m === 'text' ? 'Texto' : m === 'url' ? 'URL' : m === 'scrape' ? 'Scrape archivos' : m === 'dataset' ? 'Datasets' : 'Tainacan'}
                 </button>
               ))}
             </div>
@@ -594,7 +617,7 @@ export default function RagPage() {
                     type="url"
                     value={datasetUrl}
                     onChange={(e) => setDatasetUrl(e.target.value)}
-                    placeholder="https://datos.gob.mx/busca/dataset/..."
+                    placeholder="https://datos.gob.mx/... o https://riisp.insp.mx/nada/..."
                     className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
                   />
                   <input
@@ -761,7 +784,7 @@ export default function RagPage() {
                     type="url"
                     value={scrapeUrl}
                     onChange={(e) => setScrapeUrl(e.target.value)}
-                    placeholder="https://www.gob.mx/salud/documentos/..."
+                    placeholder="https://riisp.insp.mx/nada/... o https://www.gob.mx/.../documentos"
                     className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
                   />
                   <input
@@ -785,49 +808,54 @@ export default function RagPage() {
                         Escaneando...
                       </>
                     ) : (
-                      'Buscar PDFs'
+                      'Buscar archivos'
                     )}
                   </button>
                 </div>
-                {scrapePreviewDone && scrapedPdfs.length > 0 && (
+                {scrapePreviewDone && scrapedFiles.length > 0 && (
                   <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
                     <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10 bg-white/5">
-                      <span className="text-white text-sm font-medium">{scrapedPdfs.length} PDFs encontrados</span>
+                      <span className="text-white text-sm font-medium">{scrapedFiles.length} archivos encontrados (PDF, CSV, XLS)</span>
                       <div className="flex gap-2">
-                        <button onClick={() => toggleAllPdfs(true)} className="text-xs text-cyan-400 hover:text-cyan-300">
+                        <button onClick={() => toggleAllScrapedFiles(true)} className="text-xs text-cyan-400 hover:text-cyan-300">
                           Seleccionar todos
                         </button>
                         <span className="text-gray-600">|</span>
-                        <button onClick={() => toggleAllPdfs(false)} className="text-xs text-gray-400 hover:text-white">
+                        <button onClick={() => toggleAllScrapedFiles(false)} className="text-xs text-gray-400 hover:text-white">
                           Deseleccionar
                         </button>
                       </div>
                     </div>
                     <div className="max-h-72 overflow-y-auto custom-scrollbar divide-y divide-white/5">
-                      {scrapedPdfs.map((pdf, idx) => (
+                      {scrapedFiles.map((file, idx) => (
                         <label
                           key={idx}
                           className="flex items-start gap-3 px-4 py-2.5 hover:bg-white/5 cursor-pointer transition-colors"
                         >
                           <input
                             type="checkbox"
-                            checked={pdf.selected}
+                            checked={file.selected}
                             onChange={() =>
-                              setScrapedPdfs((prev) => prev.map((p, i) => (i === idx ? { ...p, selected: !p.selected } : p)))
+                              setScrapedFiles((prev) => prev.map((p, i) => (i === idx ? { ...p, selected: !p.selected } : p)))
                             }
                             className="mt-1 rounded border-gray-500 bg-white/10 text-cyan-500 focus:ring-cyan-500/30"
                           />
                           <div className="min-w-0 flex-1">
-                            <p className="text-white text-sm truncate">{pdf.title}</p>
-                            <p className="text-gray-500 text-xs truncate">{pdf.pdfUrl}</p>
+                            <p className="text-white text-sm truncate">{file.title}</p>
+                            <p className="text-gray-500 text-xs truncate">{file.fileUrl}</p>
                           </div>
+                          {file.format && (
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-gray-400 uppercase flex-shrink-0">
+                              {file.format}
+                            </span>
+                          )}
                         </label>
                       ))}
                     </div>
                     <div className="px-4 py-3 border-t border-white/10 bg-white/5">
                       <button
                         onClick={handleScrapeIndex}
-                        disabled={uploading || scrapedPdfs.filter((p) => p.selected).length === 0}
+                        disabled={uploading || scrapedFiles.filter((p) => p.selected).length === 0}
                         className="w-full bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
                       >
                         {uploading ? (
@@ -839,7 +867,7 @@ export default function RagPage() {
                             Indexando...
                           </>
                         ) : (
-                          <>Indexar {scrapedPdfs.filter((p) => p.selected).length} PDFs seleccionados</>
+                          <>Indexar {scrapedFiles.filter((p) => p.selected).length} archivos seleccionados</>
                         )}
                       </button>
                     </div>
@@ -859,7 +887,7 @@ export default function RagPage() {
                       <input
                         ref={fileInputRef}
                         type="file"
-                        accept=".pdf,.docx,.txt,.html,.htm"
+                        accept=".pdf,.docx,.txt,.html,.htm,.csv,.xlsx,.xls,.sav"
                         className="hidden"
                         onChange={(e) => {
                           const f = e.target.files?.[0];
@@ -1024,7 +1052,20 @@ export default function RagPage() {
         </Section>
 
         {/* Sources table */}
-        <Section title={`Fuentes RAG (${totalSources})`}>
+        <Section
+          title={`Fuentes RAG (${totalSources})`}
+          action={
+            <button
+              type="button"
+              onClick={handleMarkStuckAsFailed}
+              disabled={markingStuck}
+              className="text-xs px-2 py-1 rounded bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500/30 disabled:opacity-50"
+              title="Marcar fuentes en 'indexando' desde hace más de 30 min como fallidas (luego puedes re-indexar)"
+            >
+              {markingStuck ? '…' : 'Marcar atascadas como fallidas'}
+            </button>
+          }
+        >
           {sourcesLoading ? (
             <p className="text-gray-500 text-sm">Cargando...</p>
           ) : sources.length > 0 ? (

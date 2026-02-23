@@ -1,0 +1,10 @@
+# Pipecat Cloud deployment config for Ominis Live Avatar (ominis-2.0-clinic)
+agent_name = "ominis-live-avatar"
+image = "docker.io/mcquaas/ominis-live-avatar:0.2"
+region = "us-west"
+agent_profile = "agent-2x"
+secret_set = "ominis-live-avatar-secrets"
+
+[scaling]
+min_agents = 0
+max_agents = 10

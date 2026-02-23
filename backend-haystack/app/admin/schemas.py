@@ -60,6 +60,15 @@ class RAGSourceUpdate(BaseModel):
     taxonomy: Optional[TaxonomyDict] = None
 
 
+# --- Analytical query (SAV/Parquet statistics) ---
+
+class AnalyticalQueryRequest(BaseModel):
+    variable: str
+    statistic: str = "mean"  # mean, sum, count, min, max
+    group_by: Optional[str] = None
+    weight_var: Optional[str] = None
+
+
 # --- File Upload schemas ---
 
 class FileUploadResponse(BaseModel):
@@ -83,17 +92,28 @@ class ScrapedPdfItem(BaseModel):
     sourcePage: str
 
 
+class ScrapedFileItem(BaseModel):
+    """Unified item for PDF, CSV, XLS, XLSX from scrape."""
+    title: str
+    fileUrl: str
+    sourcePage: str
+    format: str = "pdf"  # pdf, csv, xls, xlsx
+
+
 class ScrapePreviewResponse(BaseModel):
     url: str
     totalPdfs: int
     pdfs: list[ScrapedPdfItem]
+    totalFiles: int = 0
+    files: list[ScrapedFileItem] = []  # PDF + CSV + XLS + XLSX when using scrape-files
 
 
 class ScrapeIndexRequest(BaseModel):
     url: str
     category: str = ""
     language: str = "es"
-    pdfs: list[ScrapedPdfItem] | None = None  # None = all from the page
+    pdfs: list[ScrapedPdfItem] | None = None  # legacy: PDF-only
+    files: list[ScrapedFileItem] | None = None  # unified: PDF/CSV/XLS/XLSX with format
 
 
 class ScrapeIndexResponse(BaseModel):
@@ -248,3 +268,36 @@ class PaginationMeta(BaseModel):
 class RAGSourceListResponse(BaseModel):
     data: list[RAGSourceOut]
     meta: dict
+
+
+# --- LLM model config (dashboard: assignments, prompts, version, params) ---
+
+class LLMModelConfigOut(BaseModel):
+    model_id: str
+    display_name: str
+    version_label: str = ""
+    description: str = ""
+    backend_type: str  # "ollama" | "openai"
+    backend_model: str
+    backend_url_override: Optional[str] = None
+    system_prompt: Optional[str] = None
+    temperature: Optional[float] = None
+    num_predict: Optional[int] = None
+    extra_params: Optional[dict] = None
+    is_default: bool = False
+    overridden: list[str] = []  # keys that are set in DB (saved overrides)
+    available_for_researcher: Optional[bool] = None  # None = use default (True)
+
+
+class LLMModelConfigUpdate(BaseModel):
+    display_name: Optional[str] = None
+    version_label: Optional[str] = None
+    description: Optional[str] = None
+    backend_model: Optional[str] = None
+    backend_url_override: Optional[str] = None
+    system_prompt: Optional[str] = None
+    temperature: Optional[float] = None
+    num_predict: Optional[int] = None
+    extra_params: Optional[dict] = None
+    is_default: Optional[bool] = None
+    available_for_researcher: Optional[bool] = None

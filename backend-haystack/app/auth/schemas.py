@@ -1,6 +1,6 @@
 """
 Pydantic schemas for authentication requests and responses.
-Matches the frontend's expected API contract (Strapi-compatible format).
+Matches the frontend's expected API contract.
 """
 
 from datetime import datetime

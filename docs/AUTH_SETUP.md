@@ -2,6 +2,8 @@
 
 This guide covers the configuration of authentication features: email/SMS verification, password reset, and Google OAuth.
 
+**Note:** The production backend is now the Haystack API (FastAPI). The steps below were written for the legacy Strapi backend; adapt URLs and configuration to the Haystack backend (e.g. `api.ominis.org`, `NEXT_PUBLIC_API_URL`) where applicable.
+
 ## 1. Phone Field (Already Implemented)
 
 The phone field has been added to user registration. Users can optionally provide a phone number during sign-up.
@@ -151,77 +153,68 @@ To support phone-based reset:
 
 ---
 
-## 5. Google OAuth (Google Cloud Setup)
+## 5. Google OAuth (Haystack backend + Google Cloud)
+
+The backend (FastAPI) implements Google OAuth. The **return URL** that Google must redirect to is the **backend** callback URL, not the frontend.
+
+### Return URL (Authorized redirect URI) for Google Cloud
+
+Use this exact URI in Google Cloud Console → Credentials → your OAuth client → **Authorized redirect URIs**:
+
+- **Production:** `https://api.ominis.org/v1/api/connect/google/callback`
+- **Local dev:** `http://localhost:8000/v1/api/connect/google/callback` (if backend runs on port 8000)
+
+Google sends the user to this URL after they sign in; the backend then exchanges the code for tokens and redirects the user to the frontend with the JWT.
 
 ### Step 1: Create Google Cloud Project
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project or select existing
-3. Enable **Google+ API** or **Google Identity** (if prompted)
+2. Create a new project or select existing (e.g. "Ominis")
+3. No need to enable a separate API for basic OAuth (email/profile/openid).
 
 ### Step 2: Configure OAuth Consent Screen
 
 1. Navigate to **APIs & Services → OAuth consent screen**
 2. Choose **External** (for public users)
 3. Fill required fields:
-   - App name: `Ominis AI`
+   - App name: e.g. `Ominis AI`
    - User support email: your email
    - Developer contact: your email
 4. Add scopes: `email`, `profile`, `openid`
-5. Add test users during development (optional)
+5. Add test users during development if the app is in "Testing" (optional)
 
 ### Step 3: Create OAuth 2.0 Credentials
 
 1. Go to **APIs & Services → Credentials**
 2. Click **Create Credentials → OAuth client ID**
 3. Application type: **Web application**
-4. Name: `Ominis Auth`
+4. Name: e.g. `Ominis G Auth`
 5. **Authorized JavaScript origins**:
    - `https://ia.ominis.org`
    - `http://localhost:3000` (development)
-6. **Authorized redirect URIs**:
+6. **Authorized redirect URIs** (must match exactly):
    - `https://api.ominis.org/v1/api/connect/google/callback`
-   - `https://admin.ominis.org/v1/api/connect/google/callback` (if using admin subdomain)
-   - `http://localhost:1337/api/connect/google/callback` (local dev)
-
+   - `http://localhost:8000/v1/api/connect/google/callback` (local dev)
 7. Copy **Client ID** and **Client Secret**
 
-### Step 4: Configure Strapi
+### Step 4: Configure Backend (Haystack)
 
-1. Open Strapi Admin: `https://admin.ominis.org/admin`
-2. Go to **Settings → Users & Permissions → Providers**
-3. Edit **Google**
-4. Enable: **ON**
-5. **Client ID**: paste from Google Console
-6. **Client Secret**: paste from Google Console
-7. **Redirect URL to your front-end app**: `https://ia.ominis.org/connect/google/redirect`
-   - For local dev: `http://localhost:3000/connect/google/redirect`
-8. Save
+1. In the backend `.env` (or environment) set:
+   - `GOOGLE_CLIENT_ID` = Client ID from Google Console
+   - `GOOGLE_CLIENT_SECRET` = Client Secret from Google Console
+   - `FRONTEND_URL` = `https://ia.ominis.org` (production) or `http://localhost:3000` (dev). This is where the backend redirects after successful Google login (to `/connect/google/redirect?jwt=...&user=...`).
+   - `BACKEND_PUBLIC_URL` = `https://api.ominis.org` (production, optional). Use when the backend is behind a reverse proxy so the OAuth redirect_uri sent to Google is exactly `https://api.ominis.org/v1/api/connect/google/callback`.
+2. Restart the backend. "Continuar con Google" will work if both Google credentials are set.
 
-### Step 5: Server URL
+### Step 5: Frontend
 
-Ensure `config/server.js` has the correct absolute URL:
-
-```javascript
-module.exports = ({ env }) => ({
-  host: env('HOST', '0.0.0.0'),
-  port: env.int('PORT', 1337),
-  url: env('PUBLIC_URL', 'https://api.ominis.org/v1'),
-  // ...
-});
-```
-
-`PUBLIC_URL` must match your Strapi API base (used for OAuth redirects).
-
-### Step 6: Frontend
-
-The login page already includes "Continuar con Google". It redirects to:
+The login page already includes "Continuar con Google". It redirects the user to:
 
 ```
-{STRAPI_URL}/v1/api/connect/google
+{NEXT_PUBLIC_API_URL}/v1/api/connect/google
 ```
 
-After successful auth, Strapi redirects to the frontend URL with the JWT. The page `/connect/google/redirect` handles the callback and stores the token.
+(e.g. `https://api.ominis.org/v1/api/connect/google`). After Google sign-in, the backend callback redirects to `{FRONTEND_URL}/connect/google/redirect?jwt=...&user=...`; the page at `/connect/google/redirect` stores the token and sends the user to `/c`.
 
 ---
 

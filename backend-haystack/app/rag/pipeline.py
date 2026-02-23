@@ -13,6 +13,10 @@ from typing import Optional
 from haystack.components.embedders import SentenceTransformersTextEmbedder
 from haystack.dataclasses import ChatMessage, Document
 
+from app.rag.embedder import ExternalTextEmbedder
+
+from haystack.components.generators.chat import OpenAIChatGenerator
+from haystack.utils import Secret
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator
 from haystack_integrations.components.retrievers.pgvector import PgvectorEmbeddingRetriever
 from haystack_integrations.document_stores.pgvector import PgvectorDocumentStore
@@ -29,14 +33,21 @@ settings = get_settings()
 
 # ---------------------------------------------------------------------------
 # System prompt (shared across all models – the agent persona stays the same)
+# Topic-agnostic: applies to any clinical, medical, or health research topic.
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """Eres OMINIS, el asistente de investigación en salud de la Fundación Mexicana para la Salud (FUNSALUD).
-Tu misión es ayudar a investigadores y profesionales de la salud con información precisa y basada en evidencia.
+Tu misión es ayudar a investigadores y profesionales de la salud con información precisa, rigurosa y basada en evidencia científica, para cualquier tema clínico, médico o de investigación en salud.
+
+EVIDENCIA Y RIGOR CIENTÍFICO (aplica a cualquier tema):
+- Base tus respuestas en las fuentes proporcionadas [N] cuando existan. Cualquier afirmación clínica, epidemiológica o de política de salud debe estar respaldada por esas fuentes o indicarse explícitamente como conocimiento general no verificado en esta sesión.
+- No inventes datos, cifras, estudios, autores ni referencias. Si no hay evidencia suficiente en las fuentes, dilo claramente y recomienda consultar literatura o fuentes adicionales.
+- Prioriza fuentes revisadas por pares, guías clínicas y documentos oficiales. Usa lenguaje científico y preciso; evita generalidades sin respaldo.
+- Esto aplica por igual a cualquier área: cardiología, oncología, salud mental, enfermedades infecciosas, nutrición, medicamentos, diagnóstico, pronóstico, etc.
 
 INSTRUCCIONES:
-1. Usa un lenguaje claro, profesional y accesible.
-2. Responde SIEMPRE y ÚNICAMENTE en español mexicano. NUNCA uses caracteres chinos, japoneses, coreanos, árabes ni de ningún otro idioma que no sea español. Si necesitas transliterar un término técnico, usa su equivalente en español o en inglés con caracteres latinos.
-3. No proporciones diagnósticos médicos. Recomienda consultar a un profesional cuando sea apropiado.
+1. Usa un lenguaje claro, profesional y científico. Evita afirmaciones categóricas sin cita cuando tengas fuentes.
+2. Responde SIEMPRE en español mexicano. Solo responde en otro idioma si el usuario formuló su pregunta explícitamente en ese idioma. NUNCA uses caracteres chinos, japoneses, coreanos, árabes ni de ningún otro alfabeto no latino. Si necesitas transliterar un término técnico, usa su equivalente en español o en inglés con caracteres latinos.
+3. No proporciones diagnósticos médicos ni recomendaciones terapéuticas directas al paciente. Recomienda consultar a un profesional cuando sea apropiado.
 4. Si el historial de conversación indica que el usuario está confirmando una propuesta anterior (ej. "Sí", "Claro"), procede con la acción propuesta.
 
 CONTEXTO GEOGRÁFICO:
@@ -53,6 +64,7 @@ HERRAMIENTAS DISPONIBLES:
 - Puedes analizar imágenes adjuntas.
 - Puedes generar PDFs: las respuestas largas incluyen un botón "Descargar PDF" para exportar. NO indiques copiar a Word o Google Docs para PDF; el botón ya lo hace.
 - Puedes consultar los CUBOS OLAP del SINBA (Sistema Nacional de Información Básica en Salud) de la Secretaría de Salud de México. Estos cubos contienen estadísticas de egresos hospitalarios, defunciones, nacimientos, servicios de salud y más.
+- Para datasets tipo ENSANUT o SAV indexados en RAG: el diccionario de variables está en las fuentes. Si el usuario pide estadísticas calculadas (promedios, totales por grupo, etc.), indícale que puede usar la consulta analítica en el dashboard (RAG → fuente SAV → Consulta analítica) para obtener resultados reales sin alucinar cifras.
 
 REGLAS DE CITACIÓN (muy importante):
 5. Se te proporcionarán fuentes numeradas [1], [2], etc. con título, URL y contenido. Cuando cites una fuente con [N], el usuario verá automáticamente el enlace clickeable. NO necesitas escribir la URL en tu texto.
@@ -60,12 +72,19 @@ REGLAS DE CITACIÓN (muy importante):
 7. Cita SOLAMENTE las fuentes cuyo contenido hayas utilizado para tu respuesta.
 8. Si una fuente no aporta información útil a tu respuesta, NO la cites.
 9. NUNCA inventes URLs, referencias bibliográficas ni fuentes que no aparezcan en las fuentes proporcionadas.
-10. Si ninguna fuente es relevante, responde con tu conocimiento general SIN inventar referencias.
-11. Es preferible citar pocas fuentes relevantes que muchas irrelevantes."""
+10. Si NO se te proporcionó ninguna fuente numerada, NO uses [1], [2] ni ningún número entre corchetes y NO incluyas enlaces ni URLs en tu respuesta.
+11. Si ninguna fuente es relevante, puedes responder con conocimiento general pero INDICA que la respuesta es orientativa y que se recomienda verificar con fuentes primarias o activar búsqueda (PubMed, web) para evidencia específica. NUNCA inventes referencias.
+12. Es preferible citar pocas fuentes relevantes que muchas irrelevantes. Es preferible una respuesta corta y verificable que una larga con afirmaciones no respaldadas.
+
+SER PROACTIVO Y SERVIDOR:
+- Siempre sé servicial y ofrece más ayuda al finalizar tu respuesta.
+- Sugiere ampliar la búsqueda cuando sea útil: por ejemplo profundizar en OMINIS (bases de salud), en PubMed (literatura científica) o en la Web, según lo que mejor convenga a lo que el usuario necesita.
+- Si tu respuesta incluye datos numéricos o comparativos relevantes, ofrece explícitamente generar una gráfica o una tabla de datos si al usuario le resultaría útil.
+- Puedes cerrar con una pregunta breve que ofrezca alternativas sobre cómo continuar (ej. "¿Quieres que amplíe con más estudios en PubMed?", "¿Te genero una tabla comparativa?", "¿Prefieres que busque en la web datos más recientes?")."""
 
 
 RESEARCH_SYSTEM_PROMPT = """Eres OMINIS en modo investigación.
-Tu misión es realizar investigación rigurosa y producir reportes con evidencia verificable.
+Tu misión es realizar investigación rigurosa y producir reportes con evidencia verificable, para CUALQUIER tema clínico, médico o de investigación en salud (enfermedades, diagnósticos, tratamientos, epidemiología, políticas, medicamentos, etc.). El mismo rigor aplica a cualquier área.
 
 PROCESO DE INVESTIGACIÓN (dos fases):
 
@@ -87,7 +106,7 @@ FASE 2 — REPORTE (si YA hay un plan o el usuario dice "procede", "sí", "adela
 - Si no tienes suficientes fuentes, di claramente qué falta en vez de inventar.
 
 REGLAS ABSOLUTAS (NUNCA las violes):
-1. Responde SIEMPRE y ÚNICAMENTE en español mexicano. NUNCA uses caracteres chinos, japoneses, coreanos, árabes ni de ningún otro alfabeto no latino.
+1. Responde SIEMPRE en español mexicano. Solo responde en otro idioma si el usuario hizo su pregunta explícitamente en ese idioma. NUNCA uses caracteres chinos, japoneses, coreanos, árabes ni de ningún otro alfabeto no latino.
 2. NUNCA INVENTES autores, títulos de artículos, revistas, URLs ni datos que NO aparezcan LITERALMENTE en el contenido de las fuentes [N] proporcionadas.
 3. Si citas un artículo, los autores DEBEN ser EXACTAMENTE los que aparecen en la fuente. NO inventes nombres de personas.
 4. Si citas una URL, DEBE ser EXACTAMENTE la URL que aparece en la fuente [N]. NO inventes URLs como "example.com".
@@ -103,15 +122,20 @@ def build_chat_messages(
     history: list[dict] | None = None,
     image_description: str = "",
     file_context: str = "",
+    system_prompt: str | None = None,
+    max_content_per_doc: int = 800,
 ) -> list[ChatMessage]:
     """
     Build a list of ChatMessage objects for the OllamaChatGenerator.
     This is the Haystack-native way to construct prompts with proper roles.
+    If system_prompt is provided (e.g. from dashboard config), it overrides the default SYSTEM_PROMPT.
+    max_content_per_doc: max chars per document content (smaller = faster prefill for large models like gpt-oss).
     """
     messages: list[ChatMessage] = []
 
-    # 1. System message
-    messages.append(ChatMessage.from_system(SYSTEM_PROMPT))
+    # 1. System message (per-model override from dashboard or default)
+    prompt = (system_prompt or "").strip() or SYSTEM_PROMPT
+    messages.append(ChatMessage.from_system(prompt))
 
     # 2. Conversation history
     if history:
@@ -126,7 +150,7 @@ def build_chat_messages(
     # 3. User message with sources and question
     user_parts = []
 
-    # Include source documents if available
+    # Include source documents if available (Evidence Pack format: source = Document – Institution – Year)
     if documents:
         source_text = "FUENTES DISPONIBLES (usa [N] para citar):\n"
         for i, doc in enumerate(documents, 1):
@@ -135,12 +159,21 @@ def build_chat_messages(
             title = doc.meta.get("title", "Sin título")
             url = doc.meta.get("url", "")
             citation = doc.meta.get("citation", "")
-            content = (doc.content or "")[:800]
-
+            content = (doc.content or "")[:max_content_per_doc]
+            # Evidence Pack: source = Document – Institution – Year
+            taxonomy = doc.meta.get("taxonomy") or {}
+            inst = (taxonomy.get("institucion") or [""])
+            inst_str = inst[0] if inst else ""
+            anio = doc.meta.get("year") or (taxonomy.get("vigencia") or [""])[0] if isinstance(taxonomy.get("vigencia"), list) else ""
+            source_label = f"{title} – {inst_str} – {anio}".strip(" – ")
             source_text += f"\n[{i}] {source_type} — {title}\n"
+            source_text += f"Source: {source_label}\n"
             source_text += f"URL: {url}\n"
             if citation:
                 source_text += f"Cita: {citation}\n"
+            if taxonomy:
+                meta_str = ", ".join(f"{k}={v}" for k, v in taxonomy.items() if v)
+                source_text += f"metadata: {meta_str}\n"
             source_text += f"Contenido: {content}\n---"
 
         user_parts.append(source_text)
@@ -160,18 +193,18 @@ def build_chat_messages(
     if documents:
         user_parts.append(
             "\nINSTRUCCIONES DE RESPUESTA:"
-            "\n- Responde la pregunta de manera completa y útil."
-            "\n- Cita SOLO las fuentes que realmente respalden tu respuesta, usando [N]."
+            "\n- Responde de forma completa, útil y basada en evidencia. Cualquier afirmación clínica o científica debe respaldarse con las fuentes [N]."
+            "\n- Cita SOLO las fuentes que realmente respalden tu respuesta, usando [N]. No cites fuentes que no hayas usado."
             "\n- Si una fuente no es relevante a la pregunta, NO la cites."
-            "\n- Si ninguna fuente cubre la pregunta, responde con tu conocimiento sin citar fuentes."
-            "\n- NO inventes fuentes adicionales."
+            "\n- Si ninguna fuente cubre la pregunta, puedes usar conocimiento general pero indica que es orientativo y recomienda verificar con fuentes. NO inventes referencias."
+            "\n- NO inventes fuentes adicionales, datos ni estudios."
             "\n- Si el usuario solicita una gráfica o visualización, incluye una tabla breve con los datos numéricos usados."
         )
     else:
         user_parts.append(
             "\nNo se encontraron fuentes en las búsquedas. "
-            "Responde con tu conocimiento general. "
-            "NO incluyas referencias, URLs ni citas inventadas. "
+            "Puedes responder con conocimiento general pero DEBES indicar que la respuesta es orientativa y que se recomienda verificar con fuentes primarias o activar búsqueda (PubMed, web, Ominis) para evidencia. "
+            "PROHIBIDO: NO uses [1], [2] ni ningún número entre corchetes; NO incluyas enlaces, URLs ni referencias bibliográficas; NO inventes estudios, autores ni fuentes. "
             "Si el usuario solicita una gráfica, incluye una tabla breve con los datos numéricos usados."
         )
 
@@ -284,7 +317,7 @@ def build_research_messages(
             "- Cuando menciones autores, copia los NOMBRES EXACTOS de la fuente (no escribas 'Autores').\n"
             "- Cuando menciones un título, copia el TÍTULO EXACTO de la fuente (no lo parafrasees).\n"
             "- NUNCA inventes autores, títulos, revistas ni URLs.\n"
-            "- Cita con [N]. Ejemplo: 'Según el estudio de Liu H, Xing F, et al. [3], se encontró...'\n"
+            "- Cita con [N]. Ejemplo: 'Según el estudio de Liu H, Xing F, et al. [3], se encontró...' En el cuerpo NO repitas el formato completo de la referencia; solo el número [N].\n"
             "- Compara hallazgos entre fuentes. Señala coincidencias y discrepancias.\n"
             "- Si una fuente no tiene datos relevantes, no la cites.\n\n"
             "FORMATO Markdown:\n"
@@ -298,11 +331,8 @@ def build_research_messages(
             "## Limitaciones\n"
             "## Conclusiones y recomendaciones\n"
             "## Referencias\n\n"
-            "REFERENCIAS — formato obligatorio para cada fuente citada:\n"
-            "[N] Nombres completos de autores. \"Título exacto del artículo\". "
-            "Nombre de la revista o fuente (Año). URL exacta de la fuente\n"
-            "IMPORTANTE: Copia los datos de cada fuente [N] de la EVIDENCIA DISPONIBLE arriba. "
-            "NO inventes ni modifiques ningún dato de las referencias.\n"
+            "REFERENCIAS: Una sola sección al final. Para cada fuente citada en el reporte, escribe UNA línea con datos REALES copiados de la EVIDENCIA DISPONIBLE: Nombres de autores. \"Título exacto del artículo\". Fuente (Año). URL. No uses texto placeholder; no dupliques la misma referencia; no pongas una segunda lista de referencias en otro lugar.\n"
+            "GRÁFICAS: Incluye una gráfica (bloque ```chart con JSON) SOLO si hay datos cuantitativos comparativos que aporten valor. Si no es claro o sería confuso, no incluyas gráfica. Eje X = categorías (ej. Año, Tratamiento); Eje Y = magnitud numérica (ej. Número de estudios, Prevalencia (%)). Nunca pongas \"Año\" en el eje Y si los valores son números como 0.2 o 0.5.\n"
         )
     else:
         user_parts.append(
@@ -350,24 +380,64 @@ class PipelineManager:
                 "id": m.public_id,
                 "displayName": m.display_name,
                 "description": m.description,
+                "versionLabel": getattr(m, "version_label", "") or "",
                 "isDefault": m.is_default,
             }
             for m in get_model_registry().values()
         ]
 
-    def get_generator(self, model_id: str | None = None) -> OllamaChatGenerator:
-        """Get the OllamaChatGenerator for a given model."""
+    def get_generator(self, model_id: str | None = None):
+        """Get the chat generator for a given model (Ollama or OpenAI). Rebuilds generators if cache was invalidated."""
+        if not self._generators:
+            self._rebuild_generators()
         mid = model_id if model_id and model_id in self._generators else DEFAULT_MODEL_ID
         generator = self._generators.get(mid)
         if generator is None:
             raise RuntimeError(f"Generator for model '{mid}' not initialized.")
         return generator
 
+    def invalidate_generators(self) -> None:
+        """Clear generator cache so next get_generator() rebuilds from current registry (e.g. after LLM config change)."""
+        self._generators.clear()
+
+    def _rebuild_generators(self) -> None:
+        """Rebuild _generators from current get_model_registry() (used after invalidate_generators)."""
+        for model_id, model_cfg in get_model_registry().items():
+            if getattr(model_cfg, "use_openai", False) and model_cfg.openai_api_base:
+                power_key = getattr(settings, "power_api_key", "EMPTY") or "EMPTY"
+                power_timeout = getattr(settings, "power_timeout", 120) or 120
+                generator = OpenAIChatGenerator(
+                    model=model_cfg.openai_model,
+                    api_key=Secret.from_token(power_key),
+                    api_base_url=model_cfg.openai_api_base,
+                    timeout=power_timeout,
+                    generation_kwargs={
+                        "temperature": model_cfg.temperature,
+                        "max_tokens": model_cfg.num_predict,
+                    },
+                )
+                self._generators[model_id] = generator
+            else:
+                ollama_url = model_cfg.ollama_url or settings.ollama_url
+                timeout = (getattr(model_cfg, "timeout", None) or 0) or getattr(settings, "ollama_timeout", 90) or 90
+                generator = OllamaChatGenerator(
+                    model=model_cfg.ollama_model,
+                    url=ollama_url,
+                    timeout=timeout,
+                    generation_kwargs={
+                        "temperature": model_cfg.temperature,
+                        "num_predict": model_cfg.num_predict,
+                        "num_gpu": model_cfg.num_gpu,
+                    },
+                )
+                self._generators[model_id] = generator
+
     def get_vision_generator(self) -> Optional[OllamaChatGenerator]:
         """Get the vision-capable OllamaChatGenerator."""
         return self._vision_generator
 
-    def get_text_embedder(self) -> SentenceTransformersTextEmbedder:
+    def get_text_embedder(self):
+        """Returns SentenceTransformersTextEmbedder or ExternalTextEmbedder (when embedding_service_url set)."""
         if self._text_embedder is None:
             raise RuntimeError("Text embedder not initialized.")
         return self._text_embedder
@@ -414,11 +484,16 @@ class PipelineManager:
             logger.info("Attempting S3 migration for initial data...")
             doc_count = await migrate_chunks_from_s3()
 
-        # 2. Shared text embedder (for query embedding)
-        self._text_embedder = SentenceTransformersTextEmbedder(
-            model=settings.embedding_model,
-        )
-        self._text_embedder.warm_up()
+        # 2. Shared text embedder (for query embedding): external bge service or SentenceTransformers
+        if (getattr(settings, "embedding_service_url", None) or "").strip():
+            self._text_embedder = ExternalTextEmbedder()
+            self._text_embedder.warm_up()
+            logger.info("Using external embedding service: %s", settings.embedding_service_url.strip())
+        else:
+            self._text_embedder = SentenceTransformersTextEmbedder(
+                model=settings.embedding_model,
+            )
+            self._text_embedder.warm_up()
 
         # 3. PgvectorEmbeddingRetriever (Haystack native)
         self._retriever = PgvectorEmbeddingRetriever(
@@ -426,27 +501,46 @@ class PipelineManager:
             top_k=5,
         )
 
-        # 4. Build one OllamaChatGenerator per registered model
+        # 4. Build one generator per registered model (Ollama or OpenAI-compatible e.g. vLLM)
         for model_id, model_cfg in get_model_registry().items():
-            ollama_url = model_cfg.ollama_url or settings.ollama_url
-            logger.info(
-                f"Creating OllamaChatGenerator for '{model_cfg.display_name}' "
-                f"-> Ollama at {ollama_url}"
-            )
-
-            timeout = getattr(settings, "ollama_timeout", 90) or 90
-            generator = OllamaChatGenerator(
-                model=model_cfg.ollama_model,
-                url=ollama_url,
-                timeout=timeout,
-                generation_kwargs={
-                    "temperature": model_cfg.temperature,
-                    "num_predict": model_cfg.num_predict,
-                    "num_gpu": model_cfg.num_gpu,
-                },
-            )
-            self._generators[model_id] = generator
-            logger.info(f"  OllamaChatGenerator '{model_id}' ready.")
+            if getattr(model_cfg, "use_openai", False) and model_cfg.openai_api_base:
+                logger.info(
+                    f"Creating OpenAIChatGenerator for '{model_cfg.display_name}' "
+                    f"-> {model_cfg.openai_api_base} (model={model_cfg.openai_model})"
+                )
+                power_key = getattr(settings, "power_api_key", "EMPTY") or "EMPTY"
+                power_timeout = getattr(settings, "power_timeout", 120) or 120
+                generator = OpenAIChatGenerator(
+                    model=model_cfg.openai_model,
+                    api_key=Secret.from_token(power_key),
+                    api_base_url=model_cfg.openai_api_base,
+                    timeout=power_timeout,
+                    generation_kwargs={
+                        "temperature": model_cfg.temperature,
+                        "max_tokens": model_cfg.num_predict,
+                    },
+                )
+                self._generators[model_id] = generator
+                logger.info(f"  OpenAIChatGenerator '{model_id}' ready.")
+            else:
+                ollama_url = model_cfg.ollama_url or settings.ollama_url
+                logger.info(
+                    f"Creating OllamaChatGenerator for '{model_cfg.display_name}' "
+                    f"-> Ollama at {ollama_url}"
+                )
+                timeout = (getattr(model_cfg, "timeout", None) or 0) or getattr(settings, "ollama_timeout", 90) or 90
+                generator = OllamaChatGenerator(
+                    model=model_cfg.ollama_model,
+                    url=ollama_url,
+                    timeout=timeout,
+                    generation_kwargs={
+                        "temperature": model_cfg.temperature,
+                        "num_predict": model_cfg.num_predict,
+                        "num_gpu": model_cfg.num_gpu,
+                    },
+                )
+                self._generators[model_id] = generator
+                logger.info(f"  OllamaChatGenerator '{model_id}' ready.")
 
         # 5. Vision generator (separate OllamaChatGenerator with vision model)
         if settings.vision_model:
