@@ -150,7 +150,7 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
     clearTimeout(timeoutId);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const msg = typeof data?.detail === 'string' ? data.detail : 'Invalid identifier or password';
+      const msg = typeof data?.detail === 'string' ? data.detail : (response.status === 502 ? 'Backend no disponible.' : 'Invalid identifier or password');
       throw new Error(msg);
     }
     storeAuth(data.jwt, data.user);
@@ -158,7 +158,7 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
   } catch (err) {
     clearTimeout(timeoutId);
     if (err instanceof Error) {
-      if (err.name === 'AbortError') throw new Error('El servidor no respondió. Comprueba que el backend esté activo.');
+      if (err.name === 'AbortError') throw new Error('El servidor no respondió a tiempo. Comprueba que api.ominis.org esté activo y que el frontend tenga BACKEND_URL configurado.');
       throw err;
     }
     throw err;

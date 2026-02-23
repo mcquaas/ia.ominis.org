@@ -5,12 +5,13 @@ const LOGIN_ENDPOINT = `${BACKEND_URL}/v1/api/auth/local`;
 
 export const dynamic = 'force-dynamic';
 
-/**
- * Proxy login to the Haystack backend (api.ominis.org). Same-origin request avoids CORS
- * and wrong NEXT_PUBLIC_API_URL; server uses BACKEND_URL to reach the backend.
- */
-const BACKEND_TIMEOUT_MS = 15000;
+/** Fail fast so the client gets a 502 instead of waiting for client timeout. */
+const BACKEND_TIMEOUT_MS = 10_000;
 
+/**
+ * Proxy login to the Haystack backend (api.ominis.org). Same-origin request avoids CORS;
+ * server uses BACKEND_URL to reach the backend.
+ */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -26,13 +27,16 @@ export async function POST(request: NextRequest) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       return NextResponse.json(
-        { detail: data.detail ?? 'Invalid identifier or password' },
+        { detail: typeof data?.detail === 'string' ? data.detail : 'Invalid identifier or password' },
         { status: res.status }
       );
     }
     return NextResponse.json(data);
   } catch (e) {
-    const message = e instanceof Error ? e.message : 'Failed to reach backend';
+    const isAbort = e instanceof Error && e.name === 'AbortError';
+    const message = isAbort
+      ? `El backend (${BACKEND_URL}) no respondió en ${BACKEND_TIMEOUT_MS / 1000}s. Comprueba que esté activo.`
+      : (e instanceof Error ? e.message : 'No se pudo conectar al backend.');
     return NextResponse.json(
       { detail: message },
       { status: 502 }
