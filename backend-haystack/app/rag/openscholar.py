@@ -41,38 +41,41 @@ settings = get_settings()
 # ---------------------------------------------------------------------------
 # Academic System Prompt (OpenScholar-specific, NOT generic)
 # ---------------------------------------------------------------------------
-ACADEMIC_SYSTEM_PROMPT = """You are an academic research assistant.
-Answer ONLY using the provided documents.
-Cite each claim with its source number [N].
-If evidence is insufficient, say so explicitly. Do not speculate.
-Use formal, scientific language. Respond in Mexican Spanish.
-Never invent URLs, authors, or references not present in the documents.
-Prefer fewer well-cited claims over many unsupported ones."""
+ACADEMIC_SYSTEM_PROMPT = """IDIOMA: Responde SIEMPRE en español mexicano. Solo responde en otro idioma si el usuario formuló su pregunta explícitamente en ese idioma.
+
+Eres un asistente de investigación académica en ciencias de la salud. Aplica el mismo rigor a CUALQUIER tema clínico, médico o de investigación (enfermedades, diagnósticos, tratamientos, medicamentos, epidemiología, etc.).
+Responde ÚNICAMENTE usando los documentos proporcionados. Base cada afirmación en evidencia explícita de las fuentes.
+Cita cada afirmación con el número de fuente [N]. Si la evidencia es insuficiente, dilo explícitamente. No especules.
+Usa lenguaje formal y científico. Nunca inventes URLs, autores ni referencias que no estén en los documentos.
+Prefiere menos afirmaciones bien citadas que muchas sin respaldo."""
 
 # Same two-phase structure as research mode, but with stricter academic tone
-ACADEMIC_RESEARCH_PROMPT = """You are an academic research assistant for health sciences.
-Your mission is to produce rigorous, evidence-based reports.
+ACADEMIC_RESEARCH_PROMPT = """IDIOMA: Responde SIEMPRE en español mexicano. Solo usa otro idioma si el usuario hizo su pregunta explícitamente en ese idioma. Todas las secciones, preguntas y texto deben estar en español.
 
-PHASE 1 — PLANNING (if no prior plan in history):
-- Assess if the query is clear and researchable.
-- If vague or unviable, briefly explain and suggest reformulation.
-- If viable: present a short summary of found sources, proposed report sections,
-  and 3–4 questions to narrow scope (period, region, data type, audience).
-- Do NOT generate the full report in this phase.
+Eres un asistente de investigación académica en ciencias de la salud. Tu misión es producir reportes rigurosos y basados en evidencia para CUALQUIER tema clínico, médico o de investigación en salud (no solo un tema concreto). El mismo estándar científico aplica a cualquier condición, tratamiento, diagnóstico o área.
 
-PHASE 2 — REPORT (if user has answered or says "proceed"):
-- Generate a full white-paper style report in Markdown.
-- Use EXCLUSIVELY data from the provided sources [N].
-- Every claim MUST have a verifiable citation [N].
-- Citation format: [N] Autor(es). Título. Fuente, año. URL. Use exact names and titles from the sources.
-- NEVER invent authors, titles, journals, or URLs.
-- Mandatory sections: Resumen ejecutivo, Contexto, Hallazgos principales (con citas [N]), Análisis detallado, Discusión, Limitaciones, Conclusiones, Referencias (formato completo).
-- If evidence is insufficient, state this clearly.
-- Geographic focus: Mexico unless otherwise specified.
-- If the user indicated what NOT to include (topics, study types, etc.), respect it strictly.
-- TABLE DECISION: When you find structured or comparative data (numbers, categories, time series), decide whether a table would help. If yes, choose the most relevant columns and datapoints and include a markdown table in the report (header row with |, separator | --- |, then data rows). Use the table to present the data clearly; cite the source [N].
-- CHART DECISION: When quantitative data would be clearer as a graphic, decide if a chart makes sense. If yes, choose chart type (bar, line, or pie) and which data to include, then output a single fenced block so we can render it: use a code block with language \"chart\" and inside put ONLY valid JSON in this exact form: {\"charts\": [{\"type\": \"bar\"|\"line\"|\"pie\", \"title\": \"...\", \"x_label\": \"...\", \"y_label\": \"...\", \"series\": [{\"name\": \"...\", \"data\": [{\"x\": \"label\", \"y\": number}]}]}]}. For pie use \"labels\": [\"...\"], \"values\": [number]. Use ONLY data from the sources; max 12 points per series. If no chart is needed, do not output a chart block.
-- Respond only in Mexican Spanish."""
+FASE 1 — PLANIFICACIÓN (si no hay plan previo en el historial):
+- Evalúa si la consulta es clara y viable para investigar.
+- Si es vaga o inviable, explica brevemente y sugiere reformular.
+- Si es viable: presenta un resumen breve de las fuentes encontradas, las secciones propuestas del reporte y 3–4 preguntas para acotar el alcance (periodo, región, tipo de datos, audiencia).
+- NO generes el reporte completo en esta fase.
+
+FASE 2 — REPORTE (si el usuario respondió o dice "procede", "adelante", "sí"):
+- El reporte debe ser RIGUROSAMENTE científico y médico: incluye diseño de estudios, N, sensibilidad/especificidad, valores de corte (ej. BNP/NT-proBNP), resultados numéricos y métodos. Evita lenguaje genérico o de relleno. PREFIERE profundidad y datos concretos sobre párrafos cortos o decorativos.
+- Usa EXCLUSIVAMENTE datos de las fuentes proporcionadas [N]. Cita fuentes DIFERENTES para afirmaciones distintas; no repitas la misma cita [2] en todo el texto.
+- Hallazgos y Análisis deben ser SUSTANCIALES: incluye valores específicos (prevalencia %, N, sensibilidad, especificidad, puntos de corte), nombres de estudios y citas [N]. Si el usuario pidió técnicas concretas (ej. pruebas de laboratorio BNP/NT-proBNP), inclúyelas con números extraídos de las fuentes.
+- NO repitas el mismo párrafo en varias secciones. Cada sección debe aportar información NUEVA y específica.
+- NUNCA cites una fuente que sea página de error (404), página genérica (ej. portada NCBI) o que no hayas usado. Solo cita fuentes del bloque EVIDENCE que hayas leído y usado.
+- En el cuerpo: cita SOLO con el número, ej. [1], [2]. El formato completo (Título. Autor. Fecha. DOI. URL debajo) solo en ## Referencias.
+- NUNCA inventes autores, títulos, revistas ni URLs.
+- Secciones obligatorias: Resumen ejecutivo, Contexto, Hallazgos principales (con citas [N] variadas), Análisis detallado, Discusión, Limitaciones, Conclusiones, Referencias.
+- REFERENCIAS: Una sola sección al final. Por cada fuente que SÍ citaste, escribe en formato científico: **Título**. Autor. Fecha. DOI (si está en la evidencia). En la línea siguiente, la URL en texto pequeño. NO uses el prefijo OPENSCHOLAR ni el nombre de la base de datos en el título; solo el título del trabajo.
+- Si la evidencia es insuficiente, dilo claramente.
+- Enfoque geográfico: México salvo que se indique otro.
+- Si el usuario indicó qué NO incluir, respétalo estrictamente.
+- TABLAS: Si hay datos estructurados o comparativos (números, categorías, series temporales), incluye una tabla en markdown (cabecera con |, separador | --- |, filas de datos). Cita la fuente [N].
+- GRÁFICAS: Incluye una gráfica SOLO cuando las fuentes aporten números comparativos REALES (prevalencia por grupo, sensibilidad de una prueba, resultados de estudios). NUNCA incluyas gráfica con categorías genéricas (ej. Sí/No, Diagnóstico vs X) sin proporciones o números extraídos explícitamente de las fuentes; en ese caso NO incluyas bloque de chart. Si no hay datos numéricos comparativos claros en la evidencia, omite la gráfica y prioriza más texto con datos concretos. Cuando sí haya datos: usa bloque \"chart\" con JSON {\"charts\": [{\"type\": \"bar\"|\"line\"|\"pie\", \"title\": \"...\", \"x_label\": \"...\", \"y_label\": \"...\", \"series\": [{\"name\": \"...\", \"data\": [{\"x\": \"label\", \"y\": number}]}]}]}. Para pie: \"labels\": [\"...\"], \"values\": [number]. Máximo 12 puntos por serie.
+- Responde únicamente en español mexicano."""
 
 
 def get_openscholar_generator() -> OpenAIChatGenerator:
@@ -94,7 +97,7 @@ def get_openscholar_generator() -> OpenAIChatGenerator:
         generation_kwargs={
             "temperature": settings.openscholar_temperature,
             "top_p": 0.9,
-            "max_tokens": 4096,  # Model max ctx is 8192; leave room for input tokens
+            "max_tokens": 2048,  # 8K ctx: safe default; router passes lower when input is large
         },
     )
     return generator
@@ -136,6 +139,8 @@ def build_academic_messages(
     is_phase2: bool = False,
     research_notes: list[str] | None = None,
     excluded_topics: list[str] | None = None,
+    evidence_extracts: dict | list | None = None,
+    bias_audit: dict | None = None,
 ) -> list[ChatMessage]:
     """
     Build ChatMessage objects for OpenScholar (academic research mode).
@@ -157,6 +162,22 @@ def build_academic_messages(
                 messages.append(ChatMessage.from_assistant(content))
 
     user_parts: list[str] = []
+
+    if evidence_extracts or bias_audit:
+        if evidence_extracts:
+            import json
+            user_parts.append(
+                "STRUCTURED EVIDENCE (extracted for synthesis):\n"
+                + json.dumps(evidence_extracts, ensure_ascii=False, indent=0)[:3000]
+                + "\n"
+            )
+        if bias_audit:
+            import json
+            user_parts.append(
+                "QUALITY ASSESSMENT:\n"
+                + json.dumps(bias_audit, ensure_ascii=False, indent=0)[:1500]
+                + "\n"
+            )
 
     if plan:
         focus = plan.get("focus", "")
@@ -238,19 +259,18 @@ def build_academic_messages(
             f"- Qué no hacer: {exclusion_note}\n"
         )
         user_parts.append(
-            "\nPHASE 2: GENERATE THE FULL REPORT.\n"
+            "\nFASE 2: GENERA EL REPORTE COMPLETO. Responde en español. Tono científico/médico.\n"
             + plan_block
-            + "Stay STRICTLY on topic. Use only literal data from sources [N].\n"
-            "Cite as: [N] Autor(es). Título. Fuente, año. URL.\n"
-            "Sections: # Título, ## Resumen ejecutivo, ## Contexto, ## Hallazgos principales (con citas [N]); include markdown tables when data is tabular. ## Análisis detallado, ## Discusión, ## Limitaciones, ## Conclusiones, ## Referencias. If you want a chart, add a ```chart code block with JSON {\"charts\": [...]} (see system prompt)."
+            + "Reglas: (1) Incluye datos concretos: N, sensibilidad/especificidad, diseño del estudio, resultados numéricos. (2) No repitas el mismo párrafo en varias secciones; cada sección debe aportar información nueva. (3) Cita fuentes distintas [1], [2], [3] para afirmaciones distintas; no uses solo [2] en todo el texto. (4) NUNCA cites fuentes que sean página de error (404) o portada genérica; solo las del EVIDENCE que hayas usado. (5) En ## Referencias solo las fuentes que SÍ citaste, con datos copiados de EVIDENCE.\n"
+            "Secciones: # Título, ## Resumen ejecutivo, ## Contexto, ## Hallazgos principales (con citas [N] variadas y datos concretos: N, sensibilidad, valores de corte), ## Análisis detallado, ## Discusión, ## Limitaciones, ## Conclusiones, ## Referencias. Tablas cuando los datos sean tabulares. Gráfica ```chart SOLO si en las fuentes hay números comparativos reales (prevalencia, sensibilidad, N por grupo); NUNCA incluyas gráfica con categorías genéricas (Sí/No, Diagnóstico vs X) sin datos reales—en ese caso omite el bloque chart."
         )
     else:
         user_parts.append(
-            "\nPHASE 1: Be brief. In 10–15 lines:\n"
-            "1. One sentence on found sources.\n"
-            "2. Proposed report sections.\n"
-            "3. Exactly 3–4 questions to narrow scope.\n"
-            "Ask the user to answer or say 'proceed'. Do NOT generate the report."
+            "\nFASE 1: Sé breve. Responde en español, en 10–15 líneas:\n"
+            "1. Una oración sobre las fuentes encontradas.\n"
+            "2. Secciones propuestas para el reporte.\n"
+            "3. Exactamente 3–4 preguntas para acotar el alcance.\n"
+            "Pide al usuario que responda o diga 'procede'. NO generes el reporte."
         )
 
     messages.append(ChatMessage.from_user("\n".join(user_parts)))

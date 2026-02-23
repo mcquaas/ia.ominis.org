@@ -20,9 +20,16 @@ import time
 from typing import Literal, Optional
 from urllib.parse import urljoin, urlparse
 
-from fastapi import APIRouter, Request, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth.dependencies import get_optional_user
+from app.auth.models import RoleEnum, User
+from app.database import get_db
+from app.admin.models import LLMModelConfig
 
 from haystack import Document
 from haystack.dataclasses import ChatMessage, StreamingChunk
@@ -30,7 +37,7 @@ from haystack.dataclasses import ChatMessage, StreamingChunk
 import httpx
 import html2text
 
-from app.config import DEFAULT_MODEL_ID, get_model_config, get_settings
+from app.config import DEFAULT_MODEL_ID, get_model_config, get_model_registry, get_settings
 from app.rag.pipeline import (
     SYSTEM_PROMPT,
     build_chat_messages,
@@ -41,15 +48,28 @@ from app.rag.charting import generate_chart_specs, parse_chart_specs_from_text, 
 from app.rag.pdf_generator import generate_pdf
 from app.rag.web_search import search_web
 from app.rag.pubmed_search import search_pubmed
+from app.rag.openscholar_search import search_openscholar
 from app.rag.vision import analyze_image
 from app.rag.scraper import BROWSER_HEADERS
-from app.admin.research_instances import get_active_research_key, get_research_instance_status
+from app.rag.agents import run_bias_auditor_sync, run_evidence_extractor_sync
+from app.rag.med42 import get_med42_generator, run_clinical_translator_sync
 from app.rag.openscholar import (
     MODEL_CTX_LIMIT,
     MODEL_CTX_LIMIT_128K,
     build_academic_messages,
     get_openscholar_128k_generator,
-    get_openscholar_generator,
+)
+from app.rag.intent import (
+    filter_documents_by_intent,
+    get_rag_top_k_multiplier,
+    run_metadata_intent_mapper,
+    should_use_clinical_validator,
+)
+from app.rag.clinical_validator import (
+    content_has_clinical_signals,
+    run_clinical_validator_sync,
+    format_validator_disclaimer,
+    VALIDATOR_UNAVAILABLE_DISCLAIMER,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,10 +78,12 @@ router = APIRouter(tags=["query"])
 
 # Approximate chars per token for input estimation (Spanish/English)
 CHARS_PER_TOKEN = 4
-# Reserve tokens so completion never exceeds model context
-OUTPUT_TOKEN_BUFFER = 128
-MIN_OUTPUT_TOKENS = 1024
+# Reserve tokens so completion never exceeds model context (buffer large to account for underestimation)
+OUTPUT_TOKEN_BUFFER = 1024
+MIN_OUTPUT_TOKENS = 512
 MAX_OUTPUT_TOKENS_CAP = 4096
+# 8K model: never request more than this so input+output stays under 8192 even when estimate is low
+MAX_OUTPUT_TOKENS_8K_SAFE = 2048
 
 
 def _estimate_input_tokens_from_messages(messages) -> int:
@@ -97,6 +119,7 @@ class QueryRequest(BaseModel):
     rag_search: bool = True
     web_search: bool = True
     pubmed_search: bool = True
+    openscholar_search: bool = False  # Semantic Scholar / Open Scholar (default off)
     num_sources: int = 3
     file_context: Optional[str] = None  # Extracted text from attached files
 
@@ -118,6 +141,7 @@ class ResearchRequest(BaseModel):
     rag_search: bool = True
     web_search: bool = True
     pubmed_search: bool = True
+    openscholar_search: bool = False  # Semantic Scholar / Open Scholar (default off)
     num_sources: int = 10
     file_context: Optional[str] = None
     iterations: int = 5
@@ -154,8 +178,16 @@ def sse_event(data: dict) -> str:
 
 
 def _source_display_title(meta: dict) -> str:
-    """Get a display title for a source; fallback to URL hostname when title is generic/empty."""
+    """Get a display title for a source; fallback to URL hostname when title is generic/empty.
+    Strips OPENSCHOLAR prefix so the frontend never shows it in titles."""
     title = (meta.get("title") or "").strip()
+    # Remove "OPENSCHOLAR — " or "OPENSCHOLAR - " prefix (case insensitive)
+    if title.upper().startswith("OPENSCHOLAR"):
+        rest = title[11:].lstrip()
+        if rest.startswith("—") or rest.startswith("-"):
+            title = rest[1:].strip()
+        else:
+            title = rest
     url = meta.get("url", "")
     if not title or title.lower() in ("url", "sin título", "sin titulo"):
         if url:
@@ -168,17 +200,33 @@ def _source_display_title(meta: dict) -> str:
 
 
 def _doc_to_source(doc: Document) -> dict:
-    """Convert a Haystack Document to a source dict for the API response."""
-    return {
+    """Convert a Haystack Document to a source dict for the API response.
+    Includes sourceType and meta.page_number for PDFs so the frontend can build #page=N links.
+    Optional snippet (first 600 chars of content) for the preview modal.
+    """
+    source_type = doc.meta.get("source_type", "rag")
+    content = (doc.content or "").strip()
+    snippet = content[:600] + ("…" if len(content) > 600 else "") if content else ""
+    out = {
         "title": _source_display_title(doc.meta),
         "url": doc.meta.get("url", ""),
         "score": round(doc.score or 0.0, 4) if doc.score else None,
-        "type": doc.meta.get("source_type", "rag"),
+        "type": source_type,
+        "sourceType": source_type,
         "citation": doc.meta.get("citation", ""),
         "authors": doc.meta.get("authors", ""),
-        "year": doc.meta.get("year", ""),
+        "year": str(doc.meta.get("year", "")).strip() if doc.meta.get("year") else "",
         "journal": doc.meta.get("journal", ""),
+        "doi": doc.meta.get("doi", ""),
+        "snippet": snippet or None,
     }
+    # Include page_number for PDFs so the frontend can append #page=N to the URL
+    page_number = doc.meta.get("page_number")
+    if page_number is not None:
+        out["meta"] = {"page_number": int(page_number)}
+        if doc.meta.get("file_name"):
+            out["meta"]["file_name"] = str(doc.meta["file_name"])
+    return out
 
 
 def _deduplicate_and_rank(documents: list[Document], max_total: int = 10) -> list[Document]:
@@ -207,7 +255,7 @@ def _deduplicate_and_rank(documents: list[Document], max_total: int = 10) -> lis
     def sort_key(d: Document) -> tuple:
         source_type = d.meta.get("source_type", "rag")
         score = d.score or 0
-        type_priority = {"rag": 0, "pubmed": 1, "web": 2}.get(source_type, 3)
+        type_priority = {"rag": 0, "pubmed": 1, "web": 2, "openscholar": 1}.get(source_type, 3)
         return (type_priority, -score)
 
     unique.sort(key=sort_key)
@@ -260,13 +308,60 @@ def _is_trustworthy_domain(url: str) -> bool:
     return any(d in domain for d in trusted)
 
 
+def _truncate_step(text: str, max_len: int, suffix: str = "...") -> str:
+    """Truncate for research step display; always append suffix when cutting."""
+    if not text:
+        return ""
+    text = (text or "").strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - len(suffix)].rstrip() + suffix
+
+
 def _source_priority(doc: Document) -> tuple:
     source_type = doc.meta.get("source_type", "rag")
     url = doc.meta.get("url", "")
     score = doc.score or 0
     trusted = 0 if _is_trustworthy_domain(url) else 1
-    type_priority = {"rag": 0, "pubmed": 0, "web": 1, "webpage": 1}.get(source_type, 2)
+    type_priority = {"rag": 0, "pubmed": 0, "web": 1, "webpage": 1, "openscholar": 0}.get(source_type, 2)
     return (trusted, type_priority, -score)
+
+
+def _is_non_article_or_error_url(url: str) -> bool:
+    """True if URL is clearly not an article (404 page, CDN, NCBI homepage, etc.)."""
+    if not url:
+        return True
+    url_lower = url.lower()
+    # CDN, generic NCBI home, or non-article paths
+    if "cdn.ncbi" in url_lower or "cdn." in url_lower:
+        return True
+    if "ncbi.nlm.nih.gov" in url_lower or "ncbi.nlm.nih.gov" in url_lower:
+        # Keep pubmed.ncbi.nlm.nih.gov/12345 style; drop bare domain or non-article
+        path = url.split(".nih.gov", 1)[-1] if ".nih.gov" in url_lower else ""
+        if not path or path.strip("/") in ("", " ", "/"):
+            return True
+        if "/pubmed/" not in url_lower and "/pmc/" not in url_lower and path.count("/") < 2:
+            return True
+    return False
+
+
+def _doc_is_error_or_non_article(doc: Document, failed_urls: set[str]) -> bool:
+    """True if document should be excluded (failed fetch, 404, homepage, etc.)."""
+    url = (doc.meta or {}).get("url", "")
+    if url in failed_urls:
+        return True
+    if _is_non_article_or_error_url(url):
+        return True
+    title = ((doc.meta or {}).get("title") or "").lower()
+    content_snippet = (doc.content or "")[:500].lower()
+    # Exclude error pages or generic pages
+    if "404" in title or "page not found" in title or "error" in title and "ncbi" in title:
+        return True
+    if "404" in content_snippet[:200] and "page not found" in content_snippet[:300]:
+        return True
+    if title == "national center for biotechnology information" or "welcome to ncbi" in content_snippet[:400]:
+        return True
+    return False
 
 
 def _extract_links(html: str, base_url: str) -> list[str]:
@@ -340,8 +435,8 @@ async def _build_research_plan(question: str, generator) -> dict:
     """
     system = (
         "Eres un planificador de investigación en salud para México. "
-        "Evalúa si la pregunta es viable para investigar. "
-        "Devuelve SOLO JSON válido sin texto extra."
+        "Aplica a CUALQUIER tema clínico, médico o de investigación en salud. "
+        "Evalúa si la pregunta es viable para investigar. Devuelve SOLO JSON válido sin texto extra."
     )
     user = (
         "Evalúa la siguiente pregunta y genera un plan de investigación. "
@@ -349,8 +444,7 @@ async def _build_research_plan(question: str, generator) -> dict:
         "pon viable=false.\n"
         "REGLA CRÍTICA: Si el usuario proporcionó ESPECIFICACIONES Y ACLARACIONES, "
         "estas OBLIGATORIAMENTE reemplazan o aclaran el tema original. "
-        "Ejemplo: si el usuario escribió 'IC' y luego aclaró 'me refería a Insuficiencia Cardiaca', "
-        "las queries DEBEN ser sobre Insuficiencia Cardiaca, NO sobre infección crónica (u otro IC)."
+        "Las queries DEBEN reflejar EXACTAMENTE el tema que el usuario quiere (ej. si aclaró un acrónimo o un alcance, úsalo)."
         "\n"
         "Formato JSON:\n"
         "{"
@@ -427,6 +521,7 @@ async def _refine_search_query(
     """
     system = (
         "Eres un experto en búsquedas académicas y de salud para México. "
+        "Aplica a cualquier tema clínico, médico o de investigación en salud. "
         "Tu tarea es analizar la pregunta del usuario Y el historial de conversación completo "
         "para generar las mejores consultas de búsqueda posibles. "
         "Devuelve SOLO un JSON válido sin texto extra.\n\n"
@@ -495,16 +590,19 @@ async def _score_source_relevance(
         source_list += f"[{i}] {title} — {content_preview}\n"
 
     system = (
-        "Eres un evaluador de relevancia de fuentes para investigación. "
-        "Devuelve SOLO JSON con los índices de las fuentes relevantes."
+        "Eres un evaluador de relevancia de fuentes para investigación médica/científica. "
+        "Aplica a cualquier tema clínico o de investigación en salud. "
+        "Incluye solo fuentes que aporten evidencia directa (estudios, guías, datos). "
+        "Devuelve SOLO JSON con los índices de las fuentes que son REALMENTE relevantes."
     )
     user = (
         f"TEMA DE INVESTIGACIÓN: {topic}\n"
         f"ESPECIFICACIONES DEL USUARIO: {user_spec}\n\n"
         f"FUENTES ENCONTRADAS:\n{source_list}\n"
-        "Evalúa cada fuente y devuelve los ÍNDICES de las que son relevantes para esta investigación específica. "
-        "Descarta fuentes que no tienen relación directa con el tema.\n"
-        'Formato: {"relevant": [0, 2, 5, 8], "reason": "breve explicación"}'
+        "Reglas: Incluye SOLO fuentes que aporten datos, métodos o hallazgos DIRECTOS sobre el tema (estudios, resultados, guías). "
+        "EXCLUYE: fuentes que solo mencionan el término de forma marginal, fuentes sobre temas distintos (ej. monitoreo remoto si el tema es termografía diagnóstica), "
+        "páginas de error o genéricas. Ordena por relevancia: las más específicas primero.\n"
+        'Formato: {"relevant": [índices en orden de relevancia], "reason": "breve explicación"}'
     )
 
     try:
@@ -536,18 +634,23 @@ async def _gather_sources(
     rag_search: bool,
     web_search: bool,
     pubmed_search: bool,
+    openscholar_search: bool,
     num_sources: int,
     manager,
     refined_queries: list[str] | None = None,
+    intent: dict | None = None,
 ) -> list[Document]:
     """
     Gather documents from all enabled search sources in parallel.
-    Uses Haystack components for each search type.
-    If refined_queries are provided, also searches with those.
+    RAG retrieval is filtered by orchestrator intent: we request more candidates when
+    intent has retrieval_constraints/depth so that after in-memory taxonomy filter we keep enough.
     """
     tasks = []
 
-    # RAG retrieval (using Haystack embedder + retriever components)
+    # RAG retrieval: top_k from orchestrator intent (depth + constraints) so filtered result has enough docs
+    top_k_mult = get_rag_top_k_multiplier(intent)
+    rag_top_k = num_sources * top_k_mult
+
     if rag_search:
         async def do_rag():
             try:
@@ -557,7 +660,7 @@ async def _gather_sources(
                 query_embedding = embed_result["embedding"]
                 result = retriever.run(
                     query_embedding=query_embedding,
-                    top_k=num_sources * 2,
+                    top_k=rag_top_k,
                 )
                 docs = result.get("documents", [])
                 valid = []
@@ -567,7 +670,7 @@ async def _gather_sources(
                         d.meta["source_type"] = d.meta.get("source_type", "rag")
                         valid.append(d)
                 valid.sort(key=lambda d: d.score or 0, reverse=True)
-                return valid[:num_sources]
+                return valid[: num_sources * 2]  # keep more for post-filter
             except Exception as e:
                 logger.error(f"RAG retrieval error: {e}", exc_info=True)
                 return []
@@ -593,6 +696,16 @@ async def _gather_sources(
                 return []
         tasks.append(do_pubmed())
 
+    # Open Scholar (Semantic Scholar) — academic paper search
+    if openscholar_search:
+        async def do_openscholar():
+            try:
+                return await search_openscholar(question, max_results=num_sources)
+            except Exception as e:
+                logger.error(f"Open Scholar search error: {e}", exc_info=True)
+                return []
+        tasks.append(do_openscholar())
+
     # Also search with refined queries if provided
     if refined_queries:
         for rq in refined_queries:
@@ -610,6 +723,13 @@ async def _gather_sources(
                     except Exception:
                         return []
                 tasks.append(do_pubmed_refined())
+            if openscholar_search:
+                async def do_openscholar_refined(q=rq):
+                    try:
+                        return await search_openscholar(q, max_results=num_sources)
+                    except Exception:
+                        return []
+                tasks.append(do_openscholar_refined())
 
     if not tasks:
         return []
@@ -796,37 +916,121 @@ async def generate_pdf_endpoint(body: GeneratePdfRequest):
 
 # --- Model listing endpoint ---
 
-# Research model IDs (not in chat registry; use OpenScholar)
-RESEARCH_MODEL_ID_8K = "ominis-2.0-research"
-RESEARCH_MODEL_ID_128K = "ominis-2.0-research-128k"
+# Guest (unauthenticated) can only use this model
+GUEST_ONLY_MODEL_ID = "ominis-2.0"
 
-RESEARCH_MODELS_META = [
-    {"id": RESEARCH_MODEL_ID_8K, "displayName": "Ominis 2.0 Research", "description": "Investigación general (OpenScholar 8K)", "isDefault": False},
-    {"id": RESEARCH_MODEL_ID_128K, "displayName": "Ominis 2.0 Research 128K", "description": "Investigación profunda, contexto largo (OpenScholar 128K)", "isDefault": False},
-]
+# OpenScholar 128K (research mode; when OPENSCHOLAR_128K_API_URL is set, e.g. Vast.ai)
+ACADEMIC_MODEL_ID_128K = "ominis-2.0-research-128k"
+
+
+def _research_128k_available() -> bool:
+    return bool((get_settings().openscholar_128k_api_url or "").strip())
+
+
+def _get_research_generator_and_model_id():
+    """Use OpenScholar 128K when configured (e.g. Vast.ai); else fallback to default chat model."""
+    manager = get_pipeline_manager()
+    if _research_128k_available():
+        try:
+            return get_openscholar_128k_generator(), ACADEMIC_MODEL_ID_128K, ""
+        except ValueError:
+            pass
+    return manager.get_generator(), manager.get_public_model_id(DEFAULT_MODEL_ID), "OpenScholar 128K no configurado. Usando Ominis 2.0."
+
+
+async def _researcher_allowed_chat_model_ids(db: AsyncSession) -> set[str]:
+    """Model IDs that SuperAdmin has marked as available for researchers (default True if not set)."""
+    registry = get_model_registry()
+    result = await db.execute(select(LLMModelConfig).where(LLMModelConfig.model_id.in_(registry.keys())))
+    rows = {r.model_id: r for r in result.scalars().all()}
+    allowed = set()
+    for model_id in registry.keys():
+        row = rows.get(model_id)
+        if getattr(row, "available_for_researcher", None) is False:
+            continue
+        allowed.add(model_id)
+    return allowed
+
+
+def _model_access(user: User | None, model_id: str, researcher_allowed: set[str]) -> tuple[bool, str | None]:
+    """
+    Returns (allowed, reason_code).
+    reason_code: None if allowed; else "login_required" | "researcher_only" | "request_superadmin".
+    """
+    if user is None:
+        if model_id == GUEST_ONLY_MODEL_ID:
+            return True, None
+        return False, "login_required"
+    if user.role in (RoleEnum.admin, RoleEnum.superadmin):
+        return True, None
+    if model_id == ACADEMIC_MODEL_ID_128K and _research_128k_available():
+        return True, None
+    if model_id in researcher_allowed:
+        return True, None
+    return False, "request_superadmin"
 
 
 @router.get("/models")
-async def list_models():
-    """List available Ominis models (chat + research)."""
+async def list_models(
+    user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List available Ominis models (chat + research 128K). With optional auth, each model includes allowed and reason."""
     manager = get_pipeline_manager()
-    chat_models = manager.available_models
-    all_models = chat_models + RESEARCH_MODELS_META
-    return {"models": all_models, "default": DEFAULT_MODEL_ID}
+    chat_models = list(manager.available_models)
+    if _research_128k_available():
+        chat_models.append({
+            "id": ACADEMIC_MODEL_ID_128K,
+            "displayName": "Ominis 2.0 Research 128K",
+            "description": "Investigación profunda, contexto largo (OpenScholar 128K en Vast.ai)",
+            "isDefault": False,
+        })
+    researcher_allowed = await _researcher_allowed_chat_model_ids(db) if user is not None else set()
+    result_models = []
+    for m in chat_models:
+        mid = m["id"]
+        allowed, reason = _model_access(user, mid, researcher_allowed)
+        result_models.append({**m, "allowed": allowed, **({"reason": reason} if reason else {})})
+    return {"models": result_models, "default": DEFAULT_MODEL_ID}
 
 
 # --- Streaming endpoint ---
 
 @router.post("/query-stream")
-async def query_stream(body: QueryRequest, request: Request):
+async def query_stream(
+    body: QueryRequest,
+    request: Request,
+    user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Streaming query endpoint using Haystack OllamaChatGenerator.
     Supports RAG, web search, PubMed, and vision (multimodal).
+    Model access: guests only ominis-2.0; researchers see SuperAdmin-allowed models; others get 403 with reason.
     """
     manager = get_pipeline_manager()
     model_id = manager.get_model_id(body.model)
-    public_model_id = manager.get_public_model_id(model_id)
-    cfg = get_model_config(model_id)  # only for chat models; research uses separate path
+    researcher_allowed = await _researcher_allowed_chat_model_ids(db) if db else set()
+    allowed, reason = _model_access(user, model_id, researcher_allowed)
+    # When user selected ominis-2.0-research-128k and it's available, use research 128k generator (e.g. from LibreChat)
+    use_128k = (
+        (body.model or "").strip() == ACADEMIC_MODEL_ID_128K
+        and _research_128k_available()
+        and _model_access(user, ACADEMIC_MODEL_ID_128K, researcher_allowed)[0]
+    )
+    if use_128k:
+        research_generator, public_model_id, _ = _get_research_generator_and_model_id()
+        model_id_for_config = DEFAULT_MODEL_ID
+    else:
+        research_generator = None
+        public_model_id = manager.get_public_model_id(model_id)
+        model_id_for_config = model_id
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "model_not_allowed", "reason": reason or "forbidden"},
+        )
+    cfg = get_model_config(model_id_for_config)  # only for chat models; research uses separate path
     logger.info(
         "query-stream: model_id=%s -> Ollama url=%s ollama_model=%s",
         model_id, (cfg.ollama_url or "").rstrip("/"), cfg.ollama_model,
@@ -835,9 +1039,17 @@ async def query_stream(body: QueryRequest, request: Request):
     async def event_generator():
         start_time = time.time()
         full_answer = ""
+        chunk_count = 0
         sources_list = []
 
         try:
+            # Send immediately so frontend does not stay on "connecting"
+            yield sse_event({
+                "type": "status",
+                "message": "Conectando...",
+                "model": public_model_id,
+            })
+
             has_image = body.image and len(body.image) > 50
             image_description = ""
 
@@ -875,19 +1087,25 @@ async def query_stream(body: QueryRequest, request: Request):
                 "model": public_model_id,
             })
 
-            # Step 1: Use LLM to generate optimal search queries from context
-            generator = manager.get_generator(model_id)
+            # Step 0: Metadata Intent Mapper (orchestrator decides retrieval depth, clinical risk, etc.)
+            generator = research_generator if use_128k else manager.get_generator(model_id)
             history_dicts = [msg.model_dump() for msg in body.history] if body.history else None
-            refined_queries: list[str] = []
-
-            # Always refine when there's history (context matters)
-            # or when web/pubmed search is enabled (to get Mexico-focused results)
-            if (history_dicts and len(history_dicts) > 0) or body.web_search or body.pubmed_search:
+            intent = None
+            if body.rag_search or body.web_search or body.pubmed_search or body.openscholar_search:
                 yield sse_event({
                     "type": "status",
                     "message": "Analizando consulta...",
                     "model": public_model_id,
                 })
+                intent = await run_metadata_intent_mapper(
+                    question=body.question,
+                    history=history_dicts,
+                    generator=generator,
+                )
+            refined_queries: list[str] = []
+
+            # Refine queries when history or external search enabled
+            if (history_dicts and len(history_dicts) > 0) or body.web_search or body.pubmed_search or body.openscholar_search:
                 refined_queries = await _refine_search_query(
                     question=body.question,
                     history=history_dicts,
@@ -896,16 +1114,28 @@ async def query_stream(body: QueryRequest, request: Request):
                 if refined_queries:
                     logger.info(f"LLM-refined queries: {refined_queries}")
 
-            # Gather sources using both the original question AND refined queries
+            # Gather sources (RAG request uses intent for top_k so post-filter has enough candidates)
             raw_documents = await _gather_sources(
                 question=body.question,
                 rag_search=body.rag_search,
                 web_search=body.web_search,
                 pubmed_search=body.pubmed_search,
+                openscholar_search=body.openscholar_search,
                 num_sources=body.num_sources,
                 manager=manager,
                 refined_queries=refined_queries if refined_queries else None,
+                intent=intent,
             )
+
+            # RAG filtered by orchestrator: keep only docs whose taxonomy matches retrieval_constraints
+            if intent and body.rag_search and raw_documents:
+                rag_docs = [d for d in raw_documents if (d.meta or {}).get("source_type") == "rag"]
+                other_docs = [d for d in raw_documents if (d.meta or {}).get("source_type") != "rag"]
+                before = len(rag_docs)
+                filtered_rag = filter_documents_by_intent(rag_docs, intent)
+                if before != len(filtered_rag) or (intent.get("retrieval_constraints") and any(intent["retrieval_constraints"].get(d) for d in ("institucion", "tipo_documento", "dominio_salud", "territorio", "vigencia"))):
+                    logger.info("RAG filtered by intent: %s -> %s docs (constraints=%s)", before, len(filtered_rag), list((k, v) for k, v in (intent.get("retrieval_constraints") or {}).items() if v))
+                raw_documents = filtered_rag + other_docs
 
             documents = _deduplicate_and_rank(raw_documents, max_total=8)
 
@@ -919,17 +1149,28 @@ async def query_stream(body: QueryRequest, request: Request):
 
             yield sse_event({
                 "type": "status",
-                "message": "Generando respuesta...",
+                "message": "Preparando contexto y respuesta...",
                 "model": public_model_id,
             })
 
-            # Step 2: Build ChatMessage objects (Haystack native)
+            # Step 2: Build ChatMessage objects (Haystack native); use per-model system prompt if set
+            model_cfg = get_model_config(model_id_for_config)
+            # Power and Med benefit from smaller prompts for faster time-to-first-token
+            fast_prefill_models = ("ominis-2.0-med",)
+            chat_docs = documents[:4] if model_id_for_config in fast_prefill_models else documents
+            chat_max_content = 400 if model_id_for_config in fast_prefill_models else 800
+            history_list = [msg.model_dump() for msg in body.history] if body.history else []
+            if model_id_for_config in fast_prefill_models and len(history_list) > 4:
+                # Keep last 2 exchanges (user + assistant each) to reduce prompt size
+                history_list = history_list[-4:]
             messages = build_chat_messages(
                 question=body.question,
-                documents=documents,
-                history=[msg.model_dump() for msg in body.history] if body.history else [],
+                documents=chat_docs,
+                history=history_list,
                 image_description=image_description,
                 file_context=body.file_context or "",
+                system_prompt=getattr(model_cfg, "system_prompt", None) or None,
+                max_content_per_doc=chat_max_content,
             )
 
             # Step 3: Stream generation via OllamaChatGenerator
@@ -940,7 +1181,13 @@ async def query_stream(body: QueryRequest, request: Request):
                 if text:
                     chunk_queue.put_nowait(text)
 
-            generator = manager.get_generator(model_id)
+            generator = research_generator if use_128k else manager.get_generator(model_id)
+
+            yield sse_event({
+                "type": "status",
+                "message": "Conectando con el modelo...",
+                "model": public_model_id,
+            })
 
             async def run_generator():
                 loop = asyncio.get_event_loop()
@@ -956,21 +1203,61 @@ async def query_stream(body: QueryRequest, request: Request):
 
             gen_task = asyncio.create_task(run_generator())
 
+            # Power and Med can need longer for first token (large or remote model); allow longer before aborting
+            generation_timeout = 180.0 if model_id == "ominis-2.0-med" else 120.0
+            heartbeat_interval = 20.0
+            wait_elapsed = 0.0
+
             while True:
                 try:
-                    token = await asyncio.wait_for(chunk_queue.get(), timeout=120.0)
+                    token = await asyncio.wait_for(chunk_queue.get(), timeout=heartbeat_interval)
                 except asyncio.TimeoutError:
-                    yield sse_event({"type": "error", "message": "Generation timed out"})
-                    break
+                    wait_elapsed += heartbeat_interval
+                    if wait_elapsed >= generation_timeout:
+                        yield sse_event({"type": "error", "message": "Generation timed out"})
+                        break
+                    status_extra = " Med puede tardar un momento en la primera respuesta." if model_id == "ominis-2.0-med" else ""
+                    yield sse_event({
+                        "type": "status",
+                        "message": "El modelo está generando... (puede tardar un momento)" + status_extra,
+                        "model": public_model_id,
+                    })
+                    continue
 
                 if token is None:
                     break
 
+                wait_elapsed = 0.0  # reset so timeout only applies when no tokens arrive
                 token = _sanitize_text(token)
                 full_answer += token
+                chunk_count += 1
                 yield sse_event({"type": "chunk", "text": token})
 
             await gen_task
+
+            # Any clinical response validated by Ominis 2.0 Med when enabled
+            use_validator = (
+                (intent and should_use_clinical_validator(intent, documents))
+                or content_has_clinical_signals(body.question, full_answer)
+            )
+            if use_validator:
+                try:
+                    logger.info("Running clinical validator (Ominis 2.0 Med) for query stream")
+                    clinic_gen = manager.get_generator("ominis-2.0-med")
+                    validator_out = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: run_clinical_validator_sync(
+                            body.question,
+                            full_answer,
+                            clinic_gen,
+                        ),
+                    )
+                    disclaimer = format_validator_disclaimer(validator_out)
+                    if disclaimer:
+                        full_answer += disclaimer
+                except Exception as e:
+                    logger.warning("Clinical validator skip: %s", e)
+                    full_answer += VALIDATOR_UNAVAILABLE_DISCLAIMER
 
             sources_list = _filter_cited_sources(full_answer, all_sources_list)
             charts: list[dict] = []
@@ -989,6 +1276,9 @@ async def query_stream(body: QueryRequest, request: Request):
                 logger.error(f"Chart generation error: {e}", exc_info=True)
 
             elapsed_ms = int((time.time() - start_time) * 1000)
+            # Output token estimate: streaming chunk count (Ollama often 1 chunk ≈ 1 token)
+            tokens_per_sec = (chunk_count / (elapsed_ms / 1000.0)) if elapsed_ms > 0 else None
+
             yield sse_event({
                 "type": "done",
                 "answer": full_answer,
@@ -1008,21 +1298,18 @@ async def query_stream(body: QueryRequest, request: Request):
                     rag_search=body.rag_search,
                     web_search=body.web_search,
                     pubmed_search=body.pubmed_search,
+                    output_tokens=chunk_count,
+                    tokens_per_second=tokens_per_sec,
                 )
             )
 
         except Exception as e:
             logger.error(f"Streaming error: {e}", exc_info=True)
             err_msg = str(e)
-            if model_id == "ominis-2.0-clinic" and (
-                "timeout" in err_msg.lower() or "timed out" in err_msg.lower()
-                or "connection" in err_msg.lower() or "refused" in err_msg.lower()
-                or "unreachable" in err_msg.lower()
-            ):
+            if model_id == "ominis-2.0-med" and ("not found" in err_msg.lower() or "404" in err_msg):
                 err_msg = (
-                    "El servidor de Ominis 2.0 Clinic (BioMistral) no respondió. "
-                    "Comprueba en el dashboard que el servidor «Ominis 2.0 Clinic» esté encendido, "
-                    "o cambia a Ominis 2.0 en el menú +."
+                    "El modelo Med42 no está instalado en el servidor Ollama. "
+                    "Un administrador debe ejecutar en el servidor GPU: ollama pull med42 (o el nombre del modelo en OLLAMA_MED_MODEL)."
                 )
             yield sse_event({"type": "error", "message": err_msg})
 
@@ -1037,46 +1324,13 @@ async def query_stream(body: QueryRequest, request: Request):
     )
 
 
-# Public model IDs
-ACADEMIC_MODEL_ID = "ominis-2.0-research"
-ACADEMIC_MODEL_ID_128K = "ominis-2.0-research-128k"
-
-
-def _get_research_generator_and_model_id(preferred: Literal["openscholar", "openscholar_128k"] | None = None):
-    """
-    Choose research generator and model id.
-    If preferred is set and that instance is running, use it; else 128K if running, else 8K if running, else Ollama.
-    Returns (generator, public_model_id).
-    """
-    manager = get_pipeline_manager()
-    status = get_research_instance_status()
-    if preferred == "openscholar_128k" and status.get("openscholar_128k") == "running":
-        try:
-            return get_openscholar_128k_generator(), ACADEMIC_MODEL_ID_128K
-        except ValueError:
-            pass
-    if preferred == "openscholar" and status.get("openscholar") == "running":
-        return get_openscholar_generator(), ACADEMIC_MODEL_ID
-    active = get_active_research_key()
-    if active == "openscholar_128k":
-        try:
-            return get_openscholar_128k_generator(), ACADEMIC_MODEL_ID_128K
-        except ValueError:
-            pass
-    if active == "openscholar":
-        return get_openscholar_generator(), ACADEMIC_MODEL_ID
-    # Fallback: use default chat model (same as non-research)
-    return manager.get_generator(), manager.get_public_model_id(DEFAULT_MODEL_ID)
-
-
 async def _research_stream_events(body: ResearchRequest):
     """
-    Shared event generator for research/academic mode.
-    Uses body.research_model if set and that instance is running; else 128K > 8K > Ollama.
+    Research/academic mode: OpenScholar 128K when OPENSCHOLAR_128K_API_URL is set (e.g. Vast.ai).
     """
     manager = get_pipeline_manager()
-    generator, public_model_id = _get_research_generator_and_model_id(body.research_model)
-    logger.info("Research mode: using %s (requested=%s)", public_model_id, body.research_model)
+    generator, public_model_id, degradation_msg = _get_research_generator_and_model_id()
+    logger.info("Research mode: using %s", public_model_id)
 
     start_time = time.time()
     full_answer = ""
@@ -1099,7 +1353,6 @@ async def _research_stream_events(body: ResearchRequest):
                 vision_generator=vision_gen,
             )
 
-        # Detect phase: is user replying to a previous plan?
         history_dicts = [msg.model_dump() for msg in body.history] if body.history else []
         is_phase2 = False
         if history_dicts and len(history_dicts) >= 2:
@@ -1108,7 +1361,6 @@ async def _research_stream_events(body: ResearchRequest):
                     is_phase2 = True
                     break
 
-        # Phase 1 only: validate viability (always runs, regardless of history length)
         if not is_phase2:
             yield sse_event({
                 "type": "status",
@@ -1122,8 +1374,6 @@ async def _research_stream_events(body: ResearchRequest):
                 yield sse_event({"type": "done", "answer": f"No viable: {reason}", "sources": [], "model": public_model_id, "elapsed_ms": int((time.time() - start_time) * 1000)})
                 return
         else:
-            # Phase 2: build plan from the FULL conversation context
-            # CRITICAL: user clarifications OVERRIDE ambiguous original topic (e.g. "IC" → "Insuficiencia Cardiaca")
             original_topic = ""
             user_answers = ""
             for msg in history_dicts:
@@ -1132,27 +1382,24 @@ async def _research_stream_events(body: ResearchRequest):
                         original_topic = msg.get("content", "")
                     else:
                         user_answers += msg.get("content", "") + "\n"
-            user_answers += body.question  # Current message is also an answer
-            # Pass full context so plan reflects user's clarifications (e.g. IC = Insuficiencia Cardiaca, not infección crónica)
+            user_answers += body.question
             plan_input = f"{original_topic}\n\nESPECIFICACIONES Y ACLARACIONES DEL USUARIO (OBLIGATORIAS — las queries DEBEN reflejar esto):\n{user_answers}"
             plan = await _build_research_plan(plan_input, generator)
 
-        # Search for sources
         queries = plan.get("queries", [])
         research_notes: list[str] = []
 
         if not is_phase2:
-            # Phase 1: quick search for planning
             collected: list[Document] = []
             yield sse_event({"type": "status", "message": "Buscando fuentes iniciales...", "model": public_model_id})
             docs = await _gather_sources(
                 question=queries[0] if queries else body.question,
                 rag_search=body.rag_search, web_search=body.web_search,
-                pubmed_search=body.pubmed_search, num_sources=5, manager=manager,
+                pubmed_search=body.pubmed_search, openscholar_search=body.openscholar_search,
+                num_sources=5, manager=manager,
             )
             collected.extend(docs)
         else:
-            # Phase 2: DEEP research — 3 independent phases, each with its own budget
             collected = []
             seen_urls: set[str] = set()
             research_steps: list[dict] = []
@@ -1168,7 +1415,6 @@ async def _research_stream_events(body: ResearchRequest):
                     "elapsedSeconds": step["elapsed"],
                 }})
 
-            # ── PHASE A: SEARCH (no time limit — always completes all queries) ──
             focus = plan.get("focus", "")
             yield emit_step("plan", f"Plan: {focus}", result=f"{len(queries)} consultas",
                 reasoning=f"Definiendo el plan de investigación para abordar: {focus[:80]}{'...' if len(focus) > 80 else ''}. Consultas iniciales: {len(queries)}.")
@@ -1180,6 +1426,7 @@ async def _research_stream_events(body: ResearchRequest):
                 docs = await _gather_sources(
                     question=q, rag_search=body.rag_search,
                     web_search=body.web_search, pubmed_search=body.pubmed_search,
+                    openscholar_search=body.openscholar_search,
                     num_sources=body.num_sources, manager=manager,
                 )
                 collected.extend(docs)
@@ -1187,7 +1434,6 @@ async def _research_stream_events(body: ResearchRequest):
                 yield emit_step("search_result", f"Resultados: {q[:40]}", result=f"{len(docs)} fuentes",
                     reasoning=f"Encontré {len(docs)} fuentes. Evaluando cuáles profundizar para el reporte.")
 
-            # Refine with user's answers (always runs if answers exist)
             if user_answers.strip():
                 yield emit_step("refine", "Refinando con respuestas del usuario",
                     reasoning=f"Refinando con las especificaciones del usuario: {user_answers[:100].replace(chr(10), ' ')}{'...' if len(user_answers) > 100 else ''}")
@@ -1203,6 +1449,7 @@ async def _research_stream_events(body: ResearchRequest):
                     docs = await _gather_sources(
                         question=q, rag_search=False,
                         web_search=body.web_search, pubmed_search=body.pubmed_search,
+                        openscholar_search=body.openscholar_search,
                         num_sources=body.num_sources, manager=manager,
                     )
                     collected.extend(docs)
@@ -1210,18 +1457,14 @@ async def _research_stream_events(body: ResearchRequest):
                     yield emit_step("search_result", f"Resultados: {q[:40]}", result=f"{len(docs)} fuentes",
                         reasoning=f"Me interesaron {len(docs)} fuentes adicionales. Las incorporaré al análisis.")
 
-            # Deduplicate
             candidates = _deduplicate_and_rank(collected, max_total=40)
             candidates.sort(key=_source_priority)
             yield emit_step("filter", f"{len(collected)} → {len(candidates)} únicas",
                 reasoning=f"Filtrando duplicados: de {len(collected)} resultados a {len(candidates)} fuentes únicas para leer.")
 
-            # ── PHASE B: READ ALL SOURCES (web + PubMed full text) ──
-            read_deadline = time.time() + 150  # 2.5 min for reading
+            read_deadline = time.time() + 150
             fetched_count = 0
             follow_urls: list[str] = []
-
-            # Read ALL sources — web snippets need full pages, PubMed abstracts
             readable = []
             for d in candidates:
                 url = d.meta.get("url", "")
@@ -1239,7 +1482,6 @@ async def _research_stream_events(body: ResearchRequest):
                 url = doc.meta.get("url", "")
                 seen_urls.add(url)
                 title_hint = doc.meta.get("title", "")[:50]
-
                 yield sse_event({"type": "status", "message": f"Leyendo ({fetched_count+1}/{len(readable)}): {title_hint or url[:40]}...", "model": public_model_id})
                 yield emit_step("read", f"Leyendo: {title_hint}", url=url,
                     reasoning=f"Leyendo esta fuente para extraer datos relevantes sobre {focus[:50]}{'...' if len(focus) > 50 else ''}.")
@@ -1257,8 +1499,7 @@ async def _research_stream_events(body: ResearchRequest):
                     fetched_count += 1
                     total_read += 1
                     preview = text[:200].replace("\n", " ")
-                    note = f"{title or title_hint}: {preview}"
-                    research_notes.append(note)
+                    research_notes.append(f"{title or title_hint}: {preview}")
                     yield emit_step("read_done", f"{title or title_hint}", url=url, result=f"{len(text)} chars — {preview[:80]}",
                         reasoning=f"Hallazgo: {preview[:120]}... Tomando nota para citar en el reporte.")
                     for link in links:
@@ -1268,7 +1509,6 @@ async def _research_stream_events(body: ResearchRequest):
                     yield emit_step("read_fail", f"Sin contenido útil", url=url, result=f"{len(text or '')} chars",
                         reasoning="Contenido no útil. Marcando para no incluir en el reporte.")
 
-            # ── PHASE C: FOLLOW TRUSTED LINKS (separate budget) ──
             if follow_urls and time.time() < read_deadline:
                 unique_follows = []
                 for link in follow_urls:
@@ -1285,15 +1525,14 @@ async def _research_stream_events(body: ResearchRequest):
                         yield emit_step("read", "Enlace", url=link,
                             reasoning="Leyendo enlace secundario para completar el contexto.")
                         title, text, _ = await _fetch_url_content(link)
-                        if text:
+                        if text and len(text) > 50:
                             collected.append(Document(
                                 content=text,
                                 meta={"title": title or "", "url": link, "source_type": "webpage"},
                             ))
                             fetched_count += 1
                             total_read += 1
-                            follow_preview = (text or "")[:200].replace("\n", " ")
-                            research_notes.append(f"{title or link[:40]}: {follow_preview}")
+                            research_notes.append(f"{title or link[:40]}: {(text or '')[:200].replace(chr(10), ' ')}")
                             yield emit_step("read_done", f"{title or link[:40]}", url=link, result=f"{len(text)} chars",
                                 reasoning="Contenido adicional útil. Incorporando al análisis.")
 
@@ -1302,10 +1541,7 @@ async def _research_stream_events(body: ResearchRequest):
                 reasoning=f"Consolidando lo que he encontrado: {total_found} fuentes encontradas, {total_read} leídas. Preparando el reporte con citas específicas.")
             logger.info(f"Deep research: {total_found} found, {total_read} read, {fetched_count} fetched, {elapsed_search}s")
 
-        # Final source selection (runs for both Phase 1 and Phase 2)
         documents = _deduplicate_and_rank(collected, max_total=body.max_total_sources)
-
-        # Remove user-excluded sources
         if body.excluded_sources:
             excluded_set = set(body.excluded_sources)
             before = len(documents)
@@ -1314,7 +1550,6 @@ async def _research_stream_events(body: ResearchRequest):
                 yield emit_step("filter", f"Excluidas {before - len(documents)} fuentes por el usuario",
                     reasoning="Respetando las fuentes que el usuario decidió excluir del plan.")
 
-        # Phase 2: filter for relevance using LLM before generating report
         if is_phase2 and len(documents) > 5:
             yield sse_event({"type": "status", "message": "Evaluando relevancia de fuentes...", "model": public_model_id})
             yield emit_step("relevance", f"Evaluando {len(documents)} fuentes para relevancia",
@@ -1332,7 +1567,6 @@ async def _research_stream_events(body: ResearchRequest):
             _doc_to_source(doc) for doc in documents
             if doc.content and doc.meta.get("url")
         ]
-
         if all_sources_list:
             yield sse_event({"type": "sources", "sources": all_sources_list})
             if is_phase2:
@@ -1345,7 +1579,24 @@ async def _research_stream_events(body: ResearchRequest):
             "model": public_model_id,
         })
 
-        # Build messages — ominis-2.0-research academic prompt
+        # Optional: Evidence Extractor + Bias Auditor (phase 2 only, Qwen)
+        evidence_extracts: dict | list = {}
+        bias_audit: dict = {}
+        if is_phase2 and len(documents) >= 2:
+            try:
+                qwen_gen = manager.get_generator()
+                loop = asyncio.get_event_loop()
+                evidence_extracts = await loop.run_in_executor(
+                    None,
+                    lambda: run_evidence_extractor_sync(qwen_gen, documents, max_docs=10),
+                ) or {}
+                bias_audit = await loop.run_in_executor(
+                    None,
+                    lambda: run_bias_auditor_sync(qwen_gen, evidence_extracts),
+                ) or {}
+            except Exception as e:
+                logger.warning("Research agents (evidence/bias) failed: %s", e)
+
         messages = build_academic_messages(
             question=body.question,
             documents=documents,
@@ -1356,9 +1607,10 @@ async def _research_stream_events(body: ResearchRequest):
             is_phase2=is_phase2,
             research_notes=research_notes if is_phase2 else None,
             excluded_topics=body.excluded_topics or None,
+            evidence_extracts=evidence_extracts if evidence_extracts else None,
+            bias_audit=bias_audit if bias_audit else None,
         )
 
-        # Phase 2: set max_tokens so input + output never exceed model context
         if is_phase2:
             ctx_limit = MODEL_CTX_LIMIT_128K if public_model_id == ACADEMIC_MODEL_ID_128K else MODEL_CTX_LIMIT
             input_tokens = _estimate_input_tokens_from_messages(messages)
@@ -1389,39 +1641,29 @@ async def _research_stream_events(body: ResearchRequest):
                     ),
                 )
             except Exception as e:
-                logger.error(f"ominis-2.0 generation failed: {e}", exc_info=True)
+                logger.error(f"Research generation failed: {e}", exc_info=True)
                 raise
             finally:
-                chunk_queue.put_nowait(None)  # unblock consumer loop
+                chunk_queue.put_nowait(None)
             return result
 
-        # Timeout: 150s (ominis-2.0 HTTP timeout is 120s; extra buffer for slow responses)
-        gen_task = asyncio.create_task(
-            asyncio.wait_for(run_generator(), timeout=150.0)
-        )
-
+        gen_task = asyncio.create_task(asyncio.wait_for(run_generator(), timeout=300.0))
         while True:
             try:
-                token = await asyncio.wait_for(chunk_queue.get(), timeout=160.0)
+                token = await asyncio.wait_for(chunk_queue.get(), timeout=310.0)
             except asyncio.TimeoutError:
                 gen_task.cancel()
                 try:
                     await gen_task
-                except asyncio.CancelledError:
-                    pass
-                except asyncio.TimeoutError:
-                    pass
-                except Exception:
+                except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                     pass
                 yield sse_event({
                     "type": "error",
-                    "message": "ominis-2.0 no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
+                    "message": "El servidor de investigación no respondió a tiempo. Intenta de nuevo o acota el alcance.",
                 })
                 return
-
             if token is None:
                 break
-
             token = _sanitize_text(token)
             full_answer += token
             yield sse_event({"type": "chunk", "text": token})
@@ -1431,66 +1673,65 @@ async def _research_stream_events(body: ResearchRequest):
         except asyncio.TimeoutError:
             yield sse_event({
                 "type": "error",
-                "message": "ominis-2.0 no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
+                "message": "El servidor de investigación no respondió a tiempo. Intenta de nuevo o acota el alcance.",
             })
             return
         except Exception as e:
-            err_msg = str(e)
-            if "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
-                yield sse_event({
-                    "type": "error",
-                    "message": "ominis-2.0 no respondió a tiempo. Verifica que el servicio esté disponible o intenta de nuevo.",
-                })
-            else:
-                yield sse_event({"type": "error", "message": f"Error de ominis-2.0: {err_msg}"})
+            yield sse_event({"type": "error", "message": f"Error al generar el reporte: {str(e)}"})
             return
+
+        # Optional: Clinical Translator (Med42) — append implications when configured and phase 2
+        med42_gen = get_med42_generator()
+        if is_phase2 and med42_gen and full_answer:
+            try:
+                loop = asyncio.get_event_loop()
+                clinical_section = await loop.run_in_executor(
+                    None,
+                    lambda: run_clinical_translator_sync(med42_gen, full_answer),
+                )
+                if clinical_section:
+                    full_answer += "\n\n## Implicaciones clínicas (Med42)\n\n" + clinical_section
+            except Exception as e:
+                logger.warning("Med42 clinical translator failed: %s", e)
 
         sources_list = _filter_cited_sources(full_answer, all_sources_list)
         charts: list[dict] = []
         answer_for_client = full_answer
         try:
-            # 1) Prefer charts embedded by the report LLM (```chart block)
             chart_specs = parse_chart_specs_from_text(full_answer)
             if chart_specs:
+                yield sse_event({"type": "status", "message": "Generando gráfica...", "model": public_model_id})
                 charts = render_chart_images(chart_specs)
                 answer_for_client = strip_chart_block_from_text(full_answer)
-            # 2) If no embedded charts and this is a research report, ask chart LLM to suggest from report
+            # In research (phase2): only use charts embedded in the report; do not force chart generation
             if not charts and is_phase2:
-                chart_specs = await generate_chart_specs(
-                    question=body.question,
-                    answer=full_answer,
-                    documents=documents,
-                    history=[msg.model_dump() for msg in body.history] if body.history else [],
-                    generator=generator,
-                    force=True,
-                )
-                charts = render_chart_images(chart_specs)
-            # 3) Non-research: only suggest charts when question looks chart-related
+                pass
             elif not charts:
                 chart_specs = await generate_chart_specs(
-                    question=body.question,
-                    answer=full_answer,
-                    documents=documents,
+                    question=body.question, answer=full_answer, documents=documents,
                     history=[msg.model_dump() for msg in body.history] if body.history else [],
                     generator=generator,
                 )
+                if chart_specs:
+                    yield sse_event({"type": "status", "message": "Generando gráfica...", "model": public_model_id})
                 charts = render_chart_images(chart_specs)
             if charts:
                 yield sse_event({"type": "charts", "charts": charts})
         except Exception as e:
             logger.error(f"Chart generation error: {e}", exc_info=True)
         elapsed_ms = int((time.time() - start_time) * 1000)
-
-        yield sse_event({
+        payload = {
             "type": "done",
             "answer": answer_for_client,
             "sources": sources_list,
             "charts": charts if charts else None,
             "model": public_model_id,
             "elapsed_ms": elapsed_ms,
-            "is_report": is_phase2,  # Flag: this is a research report
-        })
-
+            "is_report": is_phase2,
+        }
+        if degradation_msg:
+            payload["degradation"] = degradation_msg
+        yield sse_event(payload)
         asyncio.create_task(
             _log_query(
                 question=body.question,
@@ -1503,7 +1744,6 @@ async def _research_stream_events(body: ResearchRequest):
                 pubmed_search=body.pubmed_search,
             )
         )
-
     except Exception as e:
         logger.error(f"Research streaming error: {e}", exc_info=True)
         yield sse_event({"type": "error", "message": str(e)})
@@ -1511,10 +1751,7 @@ async def _research_stream_events(body: ResearchRequest):
 
 @router.post("/query-research-stream")
 async def query_research_stream(body: ResearchRequest, request: Request):
-    """
-    Research mode streaming endpoint.
-    Uses ominis-2.0 (academic LLM) exclusively — per architecture.
-    """
+    """Research mode streaming (OpenScholar 128K when configured, e.g. Vast.ai)."""
     return StreamingResponse(
         _research_stream_events(body),
         media_type="text/event-stream",
@@ -1527,11 +1764,17 @@ async def query_research_stream(body: ResearchRequest, request: Request):
 
 
 @router.post("/academic_query-stream")
-async def academic_query_stream(body: ResearchRequest, request: Request):
-    """
-    Modo Investigación (ominis-2.0) — same as query-research-stream.
-    Deterministic routing: research mode always uses ominis-2.0.
-    """
+async def academic_query_stream(
+    body: ResearchRequest,
+    request: Request,
+    user: User | None = Depends(get_optional_user),
+):
+    """Modo Investigación (OpenScholar 128K). Requires login."""
+    if user is None:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "model_not_allowed", "reason": "login_required"},
+        )
     return StreamingResponse(
         _research_stream_events(body),
         media_type="text/event-stream",
@@ -1571,18 +1814,21 @@ async def query(body: QueryRequest):
         rag_search=body.rag_search,
         web_search=body.web_search,
         pubmed_search=body.pubmed_search,
+        openscholar_search=body.openscholar_search,
         num_sources=body.num_sources,
         manager=manager,
     )
     documents = _deduplicate_and_rank(raw_documents, max_total=8)
 
-    # Build ChatMessages and generate
+    # Build ChatMessages and generate; use per-model system prompt if set
+    model_cfg = get_model_config(model_id)
     messages = build_chat_messages(
         question=body.question,
         documents=documents,
         history=[msg.model_dump() for msg in body.history] if body.history else [],
         image_description=image_description,
         file_context=body.file_context or "",
+        system_prompt=getattr(model_cfg, "system_prompt", None) or None,
     )
 
     generator = manager.get_generator(model_id)
@@ -1645,8 +1891,10 @@ async def _log_query(
     pubmed_search: bool = False,
     user_id: Optional[int] = None,
     api_key_id: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+    tokens_per_second: Optional[float] = None,
 ):
-    """Log a query to the database asynchronously."""
+    """Log a query to the database asynchronously (fire-and-forget)."""
     try:
         from app.database import async_session
         from app.admin.models import QueryLog
@@ -1658,6 +1906,8 @@ async def _log_query(
                 sources_used=json.dumps(sources, ensure_ascii=False),
                 model_used=model_used or settings.ollama_model,
                 response_time_ms=elapsed_ms,
+                tokens_used=output_tokens,
+                tokens_per_second=tokens_per_second,
                 user_id=user_id,
                 api_key_id=api_key_id,
                 rag_search=rag_search,
