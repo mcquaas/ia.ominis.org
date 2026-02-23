@@ -151,7 +151,7 @@ export default function ChatSidebar({
 
       {/* Collapsed mini-bar (visible when sidebar is closed on desktop) */}
       {!isOpen && (
-        <div className="hidden lg:flex fixed top-16 left-0 bottom-0 z-40 w-10 bg-[#0b1426]/80 backdrop-blur-sm border-r border-white/10 flex-col items-center py-3 gap-2">
+        <div className="hidden lg:flex fixed left-0 bottom-0 z-40 w-10 bg-[#0b1426]/80 backdrop-blur-sm border-r border-white/10 flex-col items-center py-3 gap-2 top-[calc(4rem+var(--banner-height,0px)+env(safe-area-inset-top))]">
           <button
             onClick={onOpen}
             className="text-gray-400 hover:text-white p-1.5 hover:bg-white/10 rounded-lg transition-colors"
@@ -177,29 +177,30 @@ export default function ChatSidebar({
 
       {/* Sidebar */}
       <aside
-        className={`fixed top-16 left-0 bottom-0 z-40 w-72 bg-[#0b1426]/95 backdrop-blur-md border-r border-white/10 flex flex-col transition-transform duration-300 ${
+        className={`fixed left-0 bottom-0 z-40 w-72 bg-[#0b1426]/95 backdrop-blur-md border-r border-white/10 flex flex-col transition-transform duration-300 top-[calc(4rem+var(--banner-height,0px)+env(safe-area-inset-top))] ${
           isOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        {/* Header */}
+        {/* Header: back arrow and optional "Nuevo trabajo"; no "Trabajos" label */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-          {isAuthenticated ? (
-            <button
-              onClick={onNewChat}
-              className="flex items-center gap-2 text-sm text-white hover:text-blue-400 transition-colors"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-              Nuevo trabajo
-            </button>
-          ) : (
-            <span className="text-sm text-gray-400">Trabajos</span>
-          )}
+          <div className="flex items-center gap-2 min-w-0">
+            {isAuthenticated && (
+              <button
+                onClick={onNewChat}
+                className="flex items-center gap-1.5 flex-shrink-0 text-sm text-white hover:text-blue-400 transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                <span className="hidden sm:inline">Nuevo trabajo</span>
+              </button>
+            )}
+          </div>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-white p-1 transition-colors"
-            title="Cerrar sidebar"
+            className="flex-shrink-0 text-gray-400 hover:text-white p-1 transition-colors"
+            title="Cerrar historial"
+            aria-label="Cerrar historial"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -215,7 +216,7 @@ export default function ChatSidebar({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
             </svg>
             <p className="text-gray-400 text-sm mb-2">
-              Inicia sesión para guardar y ver tu historial de trabajos.
+              Inicia sesión para guardar tus trabajos y acceder a modelos más potentes.
             </p>
             <Link
               href="/login"

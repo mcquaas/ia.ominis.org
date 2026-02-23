@@ -9,17 +9,24 @@ import Footer from "@/components/Footer";
 import * as chatService from "@/services/chat";
 import type { ConversationSummary } from "@/services/chat";
 import * as feedbackService from "@/services/feedback";
-import { getResearchInstanceStatus, getChatDefaults } from "@/services/auth";
+import { getChatDefaults, getToken } from "@/services/auth";
 
 interface Source {
   title: string;
   url: string;
   score?: number;
-  type?: "rag" | "web" | "pubmed";
+  sourceType?: "rag" | "web" | "pubmed" | "openscholar" | "pdf" | "csv" | "xlsx" | "xls" | "sav"; // Type of the source (e.g., pdf, web, pubmed, openscholar)
   authors?: string;
   year?: string;
   journal?: string;
+  doi?: string;
   ref_num?: number;
+  meta?: { page_number?: number; file_name?: string; }; // Additional metadata from the backend
+  snippet?: string; // Optional excerpt for preview modal
+}
+
+interface SourceWithDisplayNum extends Source {
+  displayNum: number;
 }
 
 interface ChartData {
@@ -37,6 +44,7 @@ interface Message {
   images?: string[];
   charts?: ChartData[];
   isReport?: boolean;
+  degradation?: string;
   model?: string;  // e.g. "ominis-2.0" from done event (shown as Investigación)
   dbMessageId?: number;  // DB id when persisted (for feedback)
 }
@@ -46,6 +54,8 @@ interface ModelOption {
   displayName: string;
   description: string;
   isDefault: boolean;
+  allowed?: boolean;
+  reason?: string; // "login_required" | "request_superadmin" | "admin_only"
 }
 
 const HISTORY_ENABLED_KEY = "ominis_history_enabled";
@@ -87,6 +97,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const [ragSearchEnabled, setRagSearchEnabled] = useState(true);
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const [pubmedSearchEnabled, setPubmedSearchEnabled] = useState(true);
+  const [openscholarSearchEnabled, setOpenscholarSearchEnabled] = useState(false);
   const [researchModeEnabled, setResearchModeEnabled] = useState(false);
   const [uploadedImages, setUploadedImages] = useState<Array<{ data: string; name: string }>>([]);
   const [uploadedFiles, setUploadedFiles] = useState<Array<{ name: string; ext: string; text: string; extracting: boolean }>>([]);
@@ -99,11 +110,8 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const [modalImage, setModalImage] = useState<string | null>(null);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([
     { id: "ominis-2.0", displayName: "Ominis 2.0", description: "Uso general (Qwen)", isDefault: true },
-    { id: "ominis-2.0-clinic", displayName: "Ominis 2.0 Clinic", description: "Conocimiento médico (BioMistral)", isDefault: false },
   ]);
   const [selectedModel, setSelectedModel] = useState<string>("ominis-2.0");
-  const [researchInstanceStatus, setResearchInstanceStatus] = useState<{ openscholar: string | null; openscholar_128k: string | null }>({ openscholar: null, openscholar_128k: null });
-  const [selectedResearchModel, setSelectedResearchModel] = useState<"openscholar" | "openscholar_128k" | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<string, "positive" | "negative">>({});
@@ -111,6 +119,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const [feedbackReasonCategory, setFeedbackReasonCategory] = useState<string | null>(null);
   const [feedbackReasonText, setFeedbackReasonText] = useState("");
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [modelAccessMessage, setModelAccessMessage] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -128,10 +137,11 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   useEffect(() => {
     getChatDefaults()
       .then((d) => {
-        setResearchModeEnabled(d.research_mode);
+        setResearchModeEnabled(d.research_mode ?? false);
         setRagSearchEnabled(d.rag_search);
         setWebSearchEnabled(d.web_search);
         setPubmedSearchEnabled(d.pubmed_search);
+        setOpenscholarSearchEnabled(d.openscholar_search ?? false);
       })
       .catch(() => { /* keep current defaults on error */ });
   }, []);
@@ -139,8 +149,20 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
   const [historyEnabled, setHistoryEnabled] = useState(true);
 
+  const loadConversations = useCallback(async () => {
+    try {
+      const res = await chatService.listConversations();
+      setConversations(res.data);
+    } catch (err) {
+      console.warn("[Ominis] Failed to load conversations:", err);
+    }
+  }, []);
+
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
+  /** When true, user scrolled up during streaming; don't auto-scroll until they scroll back to bottom */
+  const [userHasScrolledUp, setUserHasScrolledUp] = useState(false);
+  const [sourcePreviewSource, setSourcePreviewSource] = useState<Source | null>(null);
 
   // ─── Chat history helpers ───────────────────────────────────────
 
@@ -160,7 +182,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       setConversations([]);
       setActiveConversationId(null);
     }
-  }, [isAuthenticated, user]);
+  }, [isAuthenticated, user, loadConversations]);
 
   // Load conversation from URL uuid when navigating to /c/[uuid]
   useEffect(() => {
@@ -189,16 +211,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       }
     })();
     return () => { cancelled = true; };
-  }, [initialUuid, isAuthenticated]);
-
-  const loadConversations = useCallback(async () => {
-    try {
-      const res = await chatService.listConversations();
-      setConversations(res.data);
-    } catch (err) {
-      console.warn("[Ominis] Failed to load conversations:", err);
-    }
-  }, []);
+  }, [initialUuid, isAuthenticated, loadConversations]);
 
   const handleNewChat = useCallback(async () => {
     if (!isAuthenticated || !historyEnabled) {
@@ -370,22 +383,27 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     }
   };
 
+  const SCROLL_AT_BOTTOM_THRESHOLD = 100;
+
   useEffect(() => {
-    scrollToBottom();
-    // Always refocus the input after messages change
+    if (!userHasScrolledUp) scrollToBottom();
     inputRef.current?.focus();
-  }, [messages]);
+  }, [messages, userHasScrolledUp]);
 
-  // Also scroll when loading status changes (keeps spinner in view)
+  // When loading (streaming), only auto-scroll if user hasn't scrolled up
   useEffect(() => {
-    if (isLoading) scrollToBottom();
-  }, [isLoading, loadingStatus]);
+    if (isLoading && !userHasScrolledUp) scrollToBottom();
+  }, [isLoading, loadingStatus, userHasScrolledUp]);
 
-  // Scroll-to-top button visibility (re-run when messages appear so ref is attached)
+  // Scroll-to-top button visibility; track if user is at bottom (so we don't auto-scroll when they scrolled up)
   useEffect(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
-    const onScroll = () => setShowScrollTop(el.scrollTop > 200);
+    const onScroll = () => {
+      setShowScrollTop(el.scrollTop > 200);
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_AT_BOTTOM_THRESHOLD;
+      setUserHasScrolledUp(!atBottom);
+    };
     el.addEventListener("scroll", onScroll);
     onScroll();
     return () => el.removeEventListener("scroll", onScroll);
@@ -421,7 +439,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
           if (!title || title.length < 3 || title.toLowerCase() === "url") {
             try { title = new URL(url).hostname; } catch { title = url; }
           }
-          sources.push({ title, url, type: "web" });
+          sources.push({ title, url, sourceType: "web" });
         }
         continue; // Don't double-match standalone URL in same line
       }
@@ -435,7 +453,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
           if (!title || title.length < 3 || title.toLowerCase() === "url") {
             try { title = new URL(url).hostname; } catch { title = url; }
           }
-          sources.push({ title, url, type: "web" });
+          sources.push({ title, url, sourceType: "web" });
         }
       }
     }
@@ -600,20 +618,30 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const renderCitationCapsule = (sourceNum: string, sources: Source[], key: string | number) => {
     const num = parseInt(sourceNum, 10);
     // First try to find by ref_num (Perplexity-style backend numbering)
-    let source = sources.find((s: any) => s.ref_num === num);
+    let source = sources.find((s: Source) => s.ref_num === num);
     // Fallback to array index
     if (!source) {
       source = sources[num - 1];
     }
     if (source && source.url) {
+      let citationHref = source.url;
+      let citationTitle = decodeHtmlEntities(source.title || "");
+
+      if (source.sourceType === "pdf" && source.meta?.page_number) {
+        citationHref = `${source.url}#page=${source.meta.page_number}`;
+        citationTitle = source.title
+          ? `${citationTitle} (página ${source.meta.page_number})`
+          : `Página ${source.meta.page_number}`;
+      }
+
       return (
         <a
           key={key}
-          href={source.url}
+          href={citationHref}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-medium bg-blue-500 hover:bg-blue-400 text-white rounded-full align-super mx-0.5 transition-colors"
-          title={decodeHtmlEntities(source.title || "")}
+          title={citationTitle}
         >
           {sourceNum}
         </a>
@@ -954,7 +982,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     );
   };
 
-  // Strip LLM-generated "Referencias" / "Fuentes" block (redundant with inline citations + sources list)
+  // Strip LLM-generated "Referencias" / "Fuentes" block (we show compact refs + lupa from sources list)
   const stripReferenciasBlock = (text: string): string => {
     const lines = text.split("\n");
     const result: string[] = [];
@@ -962,8 +990,12 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const trimmed = line.trim();
-      // Start of referencias block
-      if (/^(Referencias?|Fuentes?|Bibliograf[ií]a|Sources?):\s*$/i.test(trimmed)) {
+      // Start of referencias block (plain or markdown ##)
+      if (/^(##\s*)?(Referencias?|Fuentes?|Bibliograf[ií]a|Sources?):\s*$/i.test(trimmed)) {
+        stripMode = true;
+        continue;
+      }
+      if (/^##\s+(Referencias?|Fuentes?|Bibliograf[ií]a|Sources?)\s*$/i.test(trimmed)) {
         stripMode = true;
         continue;
       }
@@ -971,7 +1003,10 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       if (stripMode) {
         if (/^\[\d+\]\s*.+/.test(trimmed) || /^\d+\.\s+.+/.test(trimmed)) continue;
         if (trimmed === "" || /^[-*]\s*/.test(trimmed)) continue;
-        stripMode = false;
+        if (/^URL:\s*/i.test(trimmed) || /^Content:\s*/i.test(trimmed) || trimmed === "---") continue;
+        // Exit strip mode when we hit a new section (## or code block) so we don't strip the rest of the report
+        if (/^##\s+/.test(trimmed) || /^```/.test(trimmed)) stripMode = false;
+        else continue; // skip any other line that is part of the reference block (e.g. content body)
       }
       result.push(line);
     }
@@ -982,11 +1017,16 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const normalizeRagToOminis = (text: string): string =>
     text.replace(/\bRAG\b/g, "OMINIS");
 
+  // Remove "OPENSCHOLAR — " or "OPENSCHOLAR - " from titles in content (report references)
+  const stripOpenscholarPrefix = (text: string): string =>
+    text.replace(/\bOPENSCHOLAR\s*[—\-]\s*/gi, "").replace(/\bOPENSCHOLAR\s+/gi, "");
+
   const renderContentWithCitations = (content: string, sources?: Source[]) => {
     const effectiveSrc = sources || [];
     const decodedContent = decodeHtmlEntities(content);
     let contentWithoutReferencias = stripReferenciasBlock(decodedContent);
     contentWithoutReferencias = normalizeRagToOminis(contentWithoutReferencias);
+    contentWithoutReferencias = stripOpenscholarPrefix(contentWithoutReferencias);
     const formattedContent = formatContentWithCitations(contentWithoutReferencias, effectiveSrc.length > 0 ? effectiveSrc : undefined);
 
     // Segment into text and table blocks
@@ -1033,7 +1073,6 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       reader.readAsDataURL(file);
     } else if (ALLOWED_DOC_EXTENSIONS.includes(ext)) {
       // Add placeholder while extracting
-      const idx = Date.now();
       setUploadedFiles((prev) => [...prev, { name: file.name, ext, text: "", extracting: true }]);
 
       // Send to backend for text extraction
@@ -1129,18 +1168,21 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     }
   };
 
-  // Fetch available models from backend (chat + research)
+  // Fetch available models from backend (with optional auth for allowed/reason per model)
   useEffect(() => {
     const fetchModels = async () => {
       try {
-        const modelsRes = await fetch(
-          (process.env.NEXT_PUBLIC_STRAPI_URL || "http://localhost:8000") + "/v1/models"
-        ).catch(() => null);
+        const token = getToken();
+        const headers: HeadersInit = {};
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const modelsRes = await fetch("/api/models", { headers }).catch(() => null);
         if (modelsRes && modelsRes.ok) {
           const data = await modelsRes.json();
           if (data.models?.length > 0) {
             setAvailableModels(data.models);
-            if (data.default) setSelectedModel(data.default);
+            const defaultId = data.default || "ominis-2.0";
+            const defaultAllowed = data.models.find((m: ModelOption) => m.id === defaultId)?.allowed !== false;
+            setSelectedModel(defaultAllowed ? defaultId : "ominis-2.0");
           }
         }
       } catch {
@@ -1148,30 +1190,9 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       }
     };
     fetchModels();
-  }, []);
+  }, [isAuthenticated]);
 
-  // Sync research mode with model selection: research models enable research mode and set 8K/128K
-  useEffect(() => {
-    if (selectedModel === "ominis-2.0-research") {
-      setResearchModeEnabled(true);
-      setSelectedResearchModel("openscholar");
-    } else if (selectedModel === "ominis-2.0-research-128k") {
-      setResearchModeEnabled(true);
-      setSelectedResearchModel("openscholar_128k");
-    } else if (selectedModel === "ominis-2.0" || selectedModel === "ominis-2.0-clinic") {
-      setResearchModeEnabled(false);
-    }
-  }, [selectedModel]);
-
-  // Fetch research instance status when research mode is on (so user can choose 8K vs 128K)
-  useEffect(() => {
-    if (!researchModeEnabled || !isAuthenticated) return;
-    let cancelled = false;
-    getResearchInstanceStatus()
-      .then((status) => { if (!cancelled) setResearchInstanceStatus(status); })
-      .catch(() => { if (!cancelled) setResearchInstanceStatus({ openscholar: null, openscholar_128k: null }); });
-    return () => { cancelled = true; };
-  }, [researchModeEnabled, isAuthenticated]);
+  // Research mode can be used with Ominis 2.0 when OpenScholar 128K is configured (e.g. Vast.ai)
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -1221,6 +1242,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     const currentRagSearch = ragSearchEnabled;
     const currentWebSearch = webSearchEnabled;
     const currentPubmedSearch = pubmedSearchEnabled;
+    const currentOpenscholarSearch = openscholarSearchEnabled;
     clearAllImages(); // Clear all attachments after capturing
     setIsLoading(true);
     setLoadingStatus("Analizando...");
@@ -1233,9 +1255,10 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
 
     try {
       const controller = new AbortController();
+      const timeoutMs = researchModeEnabled ? 300000 : 120000; // 5min research, 2min chat
       const timeoutId = setTimeout(() => {
         controller.abort();
-      }, researchModeEnabled ? 300000 : 120000); // 5min for research, 2min for normal
+      }, timeoutMs);
 
       // Build chat history for context — include ALL previous messages
       // (messages is the state before setMessages runs, so it has the full prior history)
@@ -1243,30 +1266,41 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
         .slice(-20)
         .map(m => ({ role: m.role, content: m.content }));
 
-      // Use streaming endpoint
+      // Research mode uses academic endpoint (OpenScholar 128K when configured); otherwise normal chat
       const endpoint = researchModeEnabled ? "/api/academic-query-stream" : "/api/query-stream";
+      const headers: HeadersInit = { "Content-Type": "application/json" };
+      const token = getToken();
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const body: Record<string, unknown> = {
+        question: question || (currentFileContext ? "Analiza el archivo adjunto" : "Describe esta imagen"),
+        history: history,
+        images: currentImages.length > 0 ? currentImages : undefined,
+        model: selectedModel,
+        rag_search: currentRagSearch,
+        web_search: currentWebSearch,
+        pubmed_search: currentPubmedSearch,
+        openscholar_search: currentOpenscholarSearch,
+        file_context: currentFileContext || undefined,
+      };
+      if (researchModeEnabled) {
+        body.iterations = 4;
+        body.max_total_sources = 30;
+        body.max_follow_links = 8;
+        body.max_trusted_sources = 8;
+        body.time_budget_seconds = 180;
+        body.excluded_sources = Array.from(excludedSources);
+      } else {
+        body.iterations = undefined;
+        body.max_total_sources = undefined;
+        body.max_follow_links = undefined;
+        body.max_trusted_sources = undefined;
+        body.time_budget_seconds = undefined;
+        body.excluded_sources = undefined;
+      }
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          question: question || (currentFileContext ? "Analiza el archivo adjunto" : "Describe esta imagen"),
-          history: history,
-          images: currentImages.length > 0 ? currentImages : undefined,
-          model: selectedModel,
-          research_model: researchModeEnabled ? selectedResearchModel ?? undefined : undefined,
-          rag_search: currentRagSearch,
-          web_search: currentWebSearch,
-          pubmed_search: currentPubmedSearch,
-          file_context: currentFileContext || undefined,
-          iterations: researchModeEnabled ? 5 : undefined,
-          max_total_sources: researchModeEnabled ? 25 : undefined,
-          max_follow_links: researchModeEnabled ? 10 : undefined,
-          max_trusted_sources: researchModeEnabled ? 10 : undefined,
-          time_budget_seconds: researchModeEnabled ? 240 : undefined,
-          excluded_sources: researchModeEnabled && excludedSources.size > 0 ? Array.from(excludedSources) : undefined,
-        }),
+        headers,
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
@@ -1341,11 +1375,14 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
                       id: assistantId,
                       role: "assistant",
                       content: streamedContent,
-                      model: researchModeEnabled ? "ominis-2.0-research" : undefined,
+                      model: undefined,
                     };
                     setMessages((prev) => [...prev, newMsg]);
                   } else {
-                    // Subsequent chunks: update content in-place
+                    // Subsequent chunks (or first chunk after message was created from sources): update content
+                    setIsLoading(false);
+                    setLoadingStatus("");
+                    setLoadingModel(null);
                     setMessages((prev) =>
                       prev.map((m) =>
                         m.id === assistantId
@@ -1356,16 +1393,26 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
                   }
 
                 } else if (eventData.type === "sources") {
-                  // RAG sources arrived (may come during or after streaming)
+                  // RAG sources arrived — show them immediately (often before first chunk)
                   if (eventData.sources && eventData.sources.length > 0) {
                     streamedSources = eventData.sources;
-                    setMessages((prev) =>
-                      prev.map((m) =>
-                        m.id === assistantId
-                          ? { ...m, sources: streamedSources }
-                          : m
-                      )
-                    );
+                    if (!messageAdded) {
+                      messageAdded = true;
+                      setMessages((prev) => [...prev, {
+                        id: assistantId,
+                        role: "assistant",
+                        content: "",
+                        sources: streamedSources,
+                      }]);
+                    } else {
+                      setMessages((prev) =>
+                        prev.map((m) =>
+                          m.id === assistantId
+                            ? { ...m, sources: streamedSources }
+                            : m
+                        )
+                      );
+                    }
                   }
 
                 } else if (eventData.type === "charts") {
@@ -1386,18 +1433,19 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
                   const finalCharts = eventData.charts || undefined;
                   const isReport = !!eventData.is_report;
                   const modelUsed = eventData.model || undefined;
+                  const degradation = eventData.degradation || undefined;
 
                   if (!messageAdded) {
                     setMessages((prev) => [...prev, {
                       id: assistantId, role: "assistant", content: finalContent,
                       sources: finalSources.length > 0 ? finalSources : undefined,
-                      charts: finalCharts, isReport, model: modelUsed,
+                      charts: finalCharts, isReport, model: modelUsed, degradation,
                     }]);
                   } else {
                     setMessages((prev) =>
                       prev.map((m) =>
                         m.id === assistantId
-                          ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : undefined, charts: finalCharts || m.charts, isReport: isReport || m.isReport, model: modelUsed || m.model }
+                          ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : undefined, charts: finalCharts || m.charts, isReport: isReport || m.isReport, model: modelUsed || m.model, degradation }
                           : m
                       )
                     );
@@ -1670,25 +1718,29 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
         .slice(-20)
         .map(m => ({ role: m.role, content: m.content }));
 
-      // Use streaming endpoint
-      const endpoint = researchModeEnabled ? "/api/academic-query-stream" : "/api/query-stream";
+      // Use streaming endpoint (send auth for model access)
+      const endpoint = "/api/query-stream";
+      const headers: HeadersInit = { "Content-Type": "application/json" };
+      const token = getToken();
+      if (token) headers["Authorization"] = `Bearer ${token}`;
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           question: question,
           history: history,
           images: originalMessage.images || undefined,
           model: selectedModel,
-          research_model: researchModeEnabled ? selectedResearchModel ?? undefined : undefined,
+          // Model choice is backend-orchestrated; no research_model sent
           rag_search: ragSearchEnabled,
           web_search: webSearchEnabled,
           pubmed_search: pubmedSearchEnabled,
-          iterations: researchModeEnabled ? 5 : undefined,
-          max_total_sources: researchModeEnabled ? 25 : undefined,
-          max_follow_links: researchModeEnabled ? 10 : undefined,
-          max_trusted_sources: researchModeEnabled ? 10 : undefined,
-          time_budget_seconds: researchModeEnabled ? 240 : undefined,
+          openscholar_search: openscholarSearchEnabled,
+          iterations: undefined,
+          max_total_sources: undefined,
+          max_follow_links: undefined,
+          max_trusted_sources: undefined,
+          time_budget_seconds: undefined,
         }),
         signal: controller.signal,
       });
@@ -1764,17 +1816,21 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                 } else if (eventData.type === "done") {
                   const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
                   const finalSources = eventData.sources?.length > 0 ? eventData.sources : streamedSources;
+                  const degradation = eventData.degradation || undefined;
+                  const isReport = !!eventData.is_report;
 
                   if (!messageAdded) {
                     setMessages((prev) => [...prev, {
                       id: assistantId, role: "assistant",
                       content: finalContent,
                       sources: finalSources.length > 0 ? finalSources : undefined,
+                      degradation,
+                      isReport,
                     }]);
                   } else {
                     setMessages((prev) =>
                       prev.map((m) => m.id === assistantId
-                        ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : m.sources }
+                        ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : m.sources, degradation, isReport }
                         : m)
                     );
                   }
@@ -1871,61 +1927,77 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
       </button>
       <div className="border-t border-white/10 my-1" />
       <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modelo</div>
-      {availableModels.map((m) => (
-        <button key={m.id} onClick={() => setSelectedModel(m.id)} className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedModel === m.id ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"}`}>
-          <div className="flex items-center gap-3 min-w-0">
-            <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
-            <span className="truncate">{m.displayName}</span>
-          </div>
-          {selectedModel === m.id && <svg className="w-4 h-4 text-cyan-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
-        </button>
-      ))}
-      <div className="border-t border-white/10 my-1" />
-      <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modo</div>
-      <button onClick={() => setResearchModeEnabled(!researchModeEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
-        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>Investigación</div>
-        <div className={`w-8 h-5 rounded-full transition-colors ${researchModeEnabled ? "bg-emerald-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${researchModeEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
-      </button>
-      {researchModeEnabled && (researchInstanceStatus.openscholar === "running" || researchInstanceStatus.openscholar_128k === "running") && (
-        <>
-          <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modelo de investigación</div>
-          <button onClick={() => setSelectedResearchModel(null)} className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedResearchModel === null ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"}`}>
-            <span>Automático</span>
-            {selectedResearchModel === null && <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+      {availableModels.map((m) => {
+        const locked = m.allowed === false;
+        const title = locked
+          ? (m.reason === "login_required"
+            ? "Inicia sesión para usar este modelo"
+            : m.reason === "admin_only"
+              ? "Solo administradores pueden usar este modelo (GPT / gpt-oss)"
+              : "Solicita acceso al SuperAdmin para usar este modelo")
+          : undefined;
+        const lockMessage = locked
+          ? (m.reason === "login_required"
+            ? "Inicia sesión para usar este modelo."
+            : m.reason === "admin_only"
+              ? "Solo administradores pueden usar GPT (gpt-oss)."
+              : "Solicita acceso al SuperAdmin para usar este modelo.")
+          : "";
+        return (
+          <button
+            key={m.id}
+            title={title}
+            onClick={() => {
+              if (locked) {
+                setModelAccessMessage(lockMessage);
+                setTimeout(() => setModelAccessMessage(null), 4000);
+                return;
+              }
+              setSelectedModel(m.id);
+            }}
+            className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedModel === m.id ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"} ${locked ? "opacity-80" : ""}`}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+              <span className="truncate">{m.displayName}</span>
+              {locked && <svg className="w-3.5 h-3.5 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>}
+            </div>
+            {selectedModel === m.id && !locked && <svg className="w-4 h-4 text-cyan-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
           </button>
-          {researchInstanceStatus.openscholar === "running" && (
-            <button onClick={() => setSelectedResearchModel("openscholar")} className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedResearchModel === "openscholar" ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"}`}>
-              <span>8K (OpenScholar)</span>
-              {selectedResearchModel === "openscholar" && <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
-            </button>
-          )}
-          {researchInstanceStatus.openscholar_128k === "running" && (
-            <button onClick={() => setSelectedResearchModel("openscholar_128k")} className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedResearchModel === "openscholar_128k" ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"}`}>
-              <span>128K (contexto largo)</span>
-              {selectedResearchModel === "openscholar_128k" && <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
-            </button>
-          )}
-        </>
+        );
+      })}
+      {modelAccessMessage && (
+        <p className="px-4 py-2 text-xs text-amber-300 bg-amber-900/30 rounded mt-1 mx-2">{modelAccessMessage}</p>
       )}
       <div className="border-t border-white/10 my-1" />
       <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Buscar en fuentes</div>
-      <button onClick={() => setRagSearchEnabled(!ragSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+      <button onClick={() => setRagSearchEnabled(!ragSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en fuentes curadas por Ominis (bases de salud)">
         <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>Ominis</div>
         <div className={`w-8 h-5 rounded-full transition-colors ${ragSearchEnabled ? "bg-cyan-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${ragSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
       </button>
-      <button onClick={() => setWebSearchEnabled(!webSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+      <button onClick={() => setPubmedSearchEnabled(!pubmedSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en PubMed (literatura científica)">
+        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>PubMed</div>
+        <div className={`w-8 h-5 rounded-full transition-colors ${pubmedSearchEnabled ? "bg-purple-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${pubmedSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+      </button>
+      <button onClick={() => setWebSearchEnabled(!webSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en la web">
         <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>Web</div>
         <div className={`w-8 h-5 rounded-full transition-colors ${webSearchEnabled ? "bg-blue-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${webSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
       </button>
-      <button onClick={() => setPubmedSearchEnabled(!pubmedSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
-        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>PubMed</div>
-        <div className={`w-8 h-5 rounded-full transition-colors ${pubmedSearchEnabled ? "bg-purple-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${pubmedSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+      <button onClick={() => setOpenscholarSearchEnabled(!openscholarSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en Semantic Scholar (artículos académicos)">
+        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>Open Scholar</div>
+        <div className={`w-8 h-5 rounded-full transition-colors ${openscholarSearchEnabled ? "bg-amber-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${openscholarSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+      </button>
+      <div className="border-t border-white/10 my-1" />
+      <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modo</div>
+      <button onClick={() => setResearchModeEnabled(!researchModeEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>Modo Investigación</div>
+        <div className={`w-8 h-5 rounded-full transition-colors ${researchModeEnabled ? "bg-emerald-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${researchModeEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
       </button>
     </div>
   );
 
   return (
-    <section className="h-screen pt-[calc(4rem+env(safe-area-inset-top))] relative flex flex-col overflow-hidden overflow-x-hidden w-full max-w-[100vw] min-w-0">
+    <section className="h-screen pt-[calc(4rem+var(--banner-height,0px)+env(safe-area-inset-top))] relative flex flex-col overflow-hidden overflow-x-hidden w-full max-w-[100vw] min-w-0">
       {/* Background */}
       <div className="absolute inset-0 z-0">
         <Image
@@ -2108,6 +2180,14 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                 </button>
                               </span>
                             )}
+                            {openscholarSearchEnabled && (
+                              <span className="inline-flex items-center gap-0.5 text-amber-400 bg-amber-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                                Open Scholar
+                                <button onClick={() => setOpenscholarSearchEnabled(false)} className="hover:text-amber-200 transition-colors p-0.5" title="Desactivar">
+                                  <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
+                              </span>
+                            )}
                           </div>
                           <button
                             onClick={sendMessage}
@@ -2214,8 +2294,14 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           {/* Action buttons for assistant messages */}
                           {message.role === "assistant" && (
                             <div className="flex items-center gap-1.5 mt-2 pt-1">
-                              {(message.model === "ominis-2.0-research" || message.model === "ominis-2.0") && (
+                              {(message.model === "ominis-2.0-research" || message.model === "ominis-2.0-research-128k") && (
                                 <span className="text-[9px] text-amber-300 bg-amber-500/15 border border-amber-400/30 rounded px-1.5 py-0.5 mr-1" title="Generado con motor Investigación">Investigación</span>
+                              )}
+                              {message.degradation && (
+                                <span className="inline-flex items-center gap-1 text-amber-400 bg-amber-500/15 text-[10px] px-2 py-0.5 rounded-full" title={message.degradation}>
+                                  <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                                  {message.degradation}
+                                </span>
                               )}
                               {message.isReport && (
                                 <span className="text-[9px] text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 rounded px-1.5 py-0.5 mr-1">REPORTE</span>
@@ -2289,8 +2375,8 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           {/* Sources list */}
                           {effectiveSources && effectiveSources.length > 0 && (() => {
                             const displaySources = effectiveSources
-                              .map((source: any, i: number) => ({ ...source, displayNum: source.ref_num || (i + 1) }))
-                              .filter((s: any) => s.url && s.url.length > 0);
+                              .map((source: Source, i: number) => ({ ...source, displayNum: source.ref_num || (i + 1) }))
+                              .filter((s: Source) => s.url && s.url.length > 0);
                             if (displaySources.length === 0) return null;
 
                             // Show checkboxes if research mode is on and this is a plan message (has "?")
@@ -2302,19 +2388,22 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                   <p className="text-[10px] text-gray-500 mb-1.5">Desmarca las fuentes que no deseas incluir en la investigación:</p>
                                 )}
                                 <ul className="space-y-1.5">
-                                  {displaySources.map((source: any) => {
+                                  {displaySources.map((source: SourceWithDisplayNum) => {
                                     const isExcluded = excludedSources.has(source.url);
-                                    const originLabel = source.type === "pubmed" ? "PubMed" : source.type === "rag" ? "Ominis" : "Web";
-                                    const originIcon = source.type === "pubmed" ? (
+                                    const originLabel = source.sourceType === "pubmed" ? "PubMed" : source.sourceType === "rag" ? "Ominis" : source.sourceType === "openscholar" ? "Open Scholar" : "Web";
+                                    const originIcon = source.sourceType === "pubmed" ? (
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
-                                    ) : source.type === "rag" ? (
+                                    ) : source.sourceType === "rag" ? (
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>
+                                    ) : source.sourceType === "openscholar" ? (
+                                      <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
                                     ) : (
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>
                                     );
                                     const displayTitle = (source.title && source.title.toLowerCase() !== "url")
-                                      ? decodeHtmlEntities(source.title)
+                                      ? stripOpenscholarPrefix(decodeHtmlEntities(source.title))
                                       : (source.url ? (() => { try { return new URL(source.url).hostname; } catch { return source.url.slice(0, 50); } })() : "Sin título");
+                                    const hasMeta = source.authors || source.year || source.doi || source.journal;
                                     return (
                                       <li key={source.displayNum} className={`text-xs ${isExcluded ? "opacity-40" : ""}`}>
                                         <div className="flex items-start gap-1.5">
@@ -2333,18 +2422,39 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                               className="mt-0.5 rounded border-gray-500 bg-white/10 text-cyan-500 focus:ring-cyan-500/30 flex-shrink-0"
                                             />
                                           )}
-                                          <div className="min-w-0">
-                                            <a href={source.url} target="_blank" rel="noopener noreferrer"
-                                              className="text-blue-400 hover:text-blue-300 transition-colors hover:underline">
-                                              [{source.displayNum}] {displayTitle}
-                                            </a>
-                                            <div className="text-[10px] text-gray-500 mt-0.5 flex items-center gap-1">
-                                              <span className="inline-flex items-center">{originIcon}{originLabel}</span>
-                                              {source.authors && <span className="mr-2">· {source.authors.split(",").slice(0, 2).join(", ")}{source.authors.split(",").length > 2 ? " et al." : ""}</span>}
-                                              {source.year && <span className="mr-2">· {source.year}</span>}
-                                              {source.journal && <span>· {source.journal}</span>}
+                                          <div className="min-w-0 flex-1">
+                                            <div className="font-medium text-white">
+                                              [{source.displayNum}]{" "}
+                                              <a href={source.url} target="_blank" rel="noopener noreferrer"
+                                                className="text-blue-400 hover:text-blue-300 transition-colors hover:underline">
+                                                {displayTitle}
+                                              </a>
                                             </div>
+                                            {hasMeta ? (
+                                              <div className="text-[10px] text-gray-400 mt-0.5">
+                                                <span className="inline-flex items-center mr-1.5">{originIcon}{originLabel}</span>
+                                                {source.authors && <span>{source.authors.split(",").slice(0, 3).join(", ")}{source.authors.split(",").length > 3 ? " et al." : ""}</span>}
+                                                {source.year && <span>{source.authors ? " · " : ""}{source.year}</span>}
+                                                {source.journal && <span>{source.authors || source.year ? " · " : ""}{source.journal}</span>}
+                                                {source.doi && <span>{source.authors || source.year || source.journal ? " · " : ""}{source.doi}</span>}
+                                              </div>
+                                            ) : (
+                                              <div className="text-[10px] text-gray-500 mt-0.5 inline-flex items-center">{originIcon}{originLabel}</div>
+                                            )}
+                                            <a href={source.url} target="_blank" rel="noopener noreferrer"
+                                              className="text-[9px] text-gray-500 hover:text-gray-400 truncate block mt-0.5 break-all">
+                                              {source.url}
+                                            </a>
                                           </div>
+                                          <button
+                                            type="button"
+                                            onClick={() => setSourcePreviewSource(source)}
+                                            className="flex-shrink-0 p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded transition-colors"
+                                            title="Vista previa"
+                                            aria-label="Vista previa de la fuente"
+                                          >
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                                          </button>
                                         </div>
                                       </li>
                                     );
@@ -2425,6 +2535,65 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                       <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
                     </svg>
                   </button>
+                </div>
+              )}
+
+              {/* Source preview modal (lupa) */}
+              {sourcePreviewSource && (
+                <div
+                  className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+                  onClick={() => setSourcePreviewSource(null)}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="source-preview-title"
+                >
+                  <div
+                    className="bg-[#0f1d32] border border-white/20 rounded-xl shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+                      <h3 id="source-preview-title" className="text-sm font-semibold text-white">Vista previa de la fuente</h3>
+                      <button
+                        type="button"
+                        onClick={() => setSourcePreviewSource(null)}
+                        className="p-1.5 text-gray-400 hover:text-white transition-colors rounded"
+                        aria-label="Cerrar"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                      </button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3 text-sm">
+                      <div>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Título</p>
+                        <p className="text-white font-medium">{stripOpenscholarPrefix(decodeHtmlEntities(sourcePreviewSource.title)) || "Sin título"}</p>
+                      </div>
+                      {sourcePreviewSource.authors && (
+                        <div>
+                          <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Autor</p>
+                          <p className="text-gray-300">{sourcePreviewSource.authors}</p>
+                        </div>
+                      )}
+                      {(sourcePreviewSource.year || sourcePreviewSource.journal || sourcePreviewSource.doi) && (
+                        <div className="flex flex-wrap gap-x-4 gap-y-1">
+                          {sourcePreviewSource.year && <div><span className="text-[10px] text-gray-500 uppercase">Fecha</span> <span className="text-gray-300">{sourcePreviewSource.year}</span></div>}
+                          {sourcePreviewSource.journal && <div><span className="text-[10px] text-gray-500 uppercase">Publicación</span> <span className="text-gray-300">{sourcePreviewSource.journal}</span></div>}
+                          {sourcePreviewSource.doi && <div><span className="text-[10px] text-gray-500 uppercase">DOI</span> <span className="text-gray-300">{sourcePreviewSource.doi}</span></div>}
+                        </div>
+                      )}
+                      <div>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">URL</p>
+                        <a href={sourcePreviewSource.url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 break-all text-xs">
+                          {sourcePreviewSource.url}
+                        </a>
+                      </div>
+                      {sourcePreviewSource.snippet && (
+                        <div>
+                          <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Fragmento</p>
+                          <p className="text-gray-400 text-xs leading-relaxed whitespace-pre-wrap">{sourcePreviewSource.snippet}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -2585,6 +2754,14 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           </button>
                         </span>
                       )}
+                      {openscholarSearchEnabled && (
+                        <span className="inline-flex items-center gap-0.5 text-amber-400 bg-amber-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                          Open Scholar
+                          <button onClick={() => setOpenscholarSearchEnabled(false)} className="hover:text-amber-200 transition-colors p-0.5" title="Desactivar">
+                            <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </span>
+                      )}
                     </div>
                     <button
                       onClick={sendMessage}
@@ -2731,7 +2908,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
 
       {/* Research Activity Panel (right sidebar) */}
       {showResearchPanel && researchSteps.length > 0 && (
-        <aside className="fixed top-16 right-0 bottom-0 z-40 w-80 bg-[#0b1426]/95 backdrop-blur-md border-l border-white/10 flex flex-col transition-transform duration-300">
+        <aside className="fixed top-[calc(4rem+var(--banner-height,0px)+env(safe-area-inset-top))] right-0 bottom-0 z-40 w-80 bg-[#0b1426]/95 backdrop-blur-md border-l border-white/10 flex flex-col transition-transform duration-300">
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
             <div className="flex items-center gap-2 min-w-0">
               <h3 className="text-sm font-semibold text-white">Actividad de investigación</h3>
