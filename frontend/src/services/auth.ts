@@ -131,17 +131,38 @@ async function fetchApi<T>(
 
 // ==================== Authentication ====================
 
+const LOGIN_TIMEOUT_MS = 15000;
+
 /**
- * Login with email/username and password
+ * Login via same-origin proxy (/api/auth/login) so the backend URL is only needed server-side.
+ * Avoids CORS and wrong NEXT_PUBLIC_API_URL; Next.js route proxies to BACKEND_URL/v1/api/auth/local.
  */
 export async function login(credentials: LoginCredentials): Promise<AuthResponse> {
-  const response = await fetchApi<AuthResponse>('/api/auth/local', {
-    method: 'POST',
-    body: JSON.stringify(credentials),
-  });
-  
-  storeAuth(response.jwt, response.user);
-  return response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LOGIN_TIMEOUT_MS);
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(credentials),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const msg = typeof data?.detail === 'string' ? data.detail : 'Invalid identifier or password';
+      throw new Error(msg);
+    }
+    storeAuth(data.jwt, data.user);
+    return data as AuthResponse;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error) {
+      if (err.name === 'AbortError') throw new Error('El servidor no respondió. Comprueba que el backend esté activo.');
+      throw err;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -515,6 +536,20 @@ export async function getStoreStats(): Promise<{
 }
 
 /**
+ * Health datastore (nightly Mexican health ingestion) status: doc/chunk counts and retrieval test.
+ */
+export async function getHealthDatastoreStatus(): Promise<{
+  enabled: boolean;
+  health_docs: number;
+  health_chunks: number;
+  evidence_pack_test_count: number;
+  opensearch_url_set?: boolean;
+  error?: string;
+}> {
+  return fetchApi('/health-datastore/status');
+}
+
+/**
  * Preview: scrape a URL for PDF, CSV, XLS, XLSX links without indexing
  */
 export async function scrapePreview(url: string): Promise<{
@@ -844,6 +879,7 @@ export async function getChatDefaults(): Promise<{
   web_search: boolean;
   pubmed_search: boolean;
   openscholar_search: boolean;
+  research_2_1: boolean;
 }> {
   return fetchApi('/api/chat-defaults');
 }
@@ -857,12 +893,14 @@ export async function updateChatDefaults(defaults: {
   web_search?: boolean;
   pubmed_search?: boolean;
   openscholar_search?: boolean;
+  research_2_1?: boolean;
 }): Promise<{
   research_mode: boolean;
   rag_search: boolean;
   web_search: boolean;
   pubmed_search: boolean;
   openscholar_search: boolean;
+  research_2_1: boolean;
 }> {
   return fetchApi('/api/chat-defaults', {
     method: 'PATCH',

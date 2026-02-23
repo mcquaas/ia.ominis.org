@@ -12,6 +12,7 @@ import {
   deleteUser,
   updateUser,
   getStoreStats,
+  getHealthDatastoreStatus,
   getServerPerformance,
   getGpuServerPerformance,
   getResearchInstanceStatus,
@@ -305,6 +306,14 @@ export default function DashboardPage() {
   const [health, setHealth] = useState<{ status: string; model: { version: string; status: string }; servers: Record<string, string> } | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [storeStats, setStoreStats] = useState<{ totalDocuments: number; embeddingModel: string; storageType: string } | null>(null);
+  const [healthDatastoreStatus, setHealthDatastoreStatus] = useState<{
+    enabled: boolean;
+    health_docs: number;
+    health_chunks: number;
+    evidence_pack_test_count: number;
+    opensearch_url_set?: boolean;
+    error?: string;
+  } | null>(null);
   const [serverPerf, setServerPerf] = useState<{
     cpu?: { cores: number; loadAvg1m: number; usagePercent: number };
     memory?: { totalMB: number; usedMB: number; availableMB: number; usagePercent: number };
@@ -341,7 +350,7 @@ export default function DashboardPage() {
   const [researchInstanceDetails, setResearchInstanceDetails] = useState<Record<'openscholar' | 'openscholar_128k', InstanceDetails | undefined>>({ openscholar: undefined, openscholar_128k: undefined });
   const [serversStatus, setServersStatus] = useState<ServerWithModels[]>([]);
   const [serverActionKey, setServerActionKey] = useState<string | null>(null);
-  const [chatDefaults, setChatDefaults] = useState<{ research_mode: boolean; rag_search: boolean; web_search: boolean; pubmed_search: boolean; openscholar_search: boolean } | null>(null);
+  const [chatDefaults, setChatDefaults] = useState<{ research_mode: boolean; rag_search: boolean; web_search: boolean; pubmed_search: boolean; openscholar_search: boolean; research_2_1: boolean } | null>(null);
   const [chatDefaultsSaving, setChatDefaultsSaving] = useState(false);
   const [llmServersStatus, setLlmServersStatus] = useState<{
     servers: Array<{ label: string; url: string | null; reachable: boolean; models: string[]; note?: string; error?: string }>;
@@ -375,10 +384,11 @@ export default function DashboardPage() {
     setLoadingData(true);
     setError('');
     try {
-      const [healthRes, statsRes, storeRes, perfRes, gpuRes] = await Promise.allSettled([
+      const [healthRes, statsRes, storeRes, storeHealthRes, perfRes, gpuRes] = await Promise.allSettled([
         getHealth(),
         getSystemStats(),
         getStoreStats(),
+        getHealthDatastoreStatus(),
         getServerPerformance(),
         getGpuServerPerformance(),
       ]);
@@ -386,6 +396,7 @@ export default function DashboardPage() {
       if (healthRes.status === 'fulfilled') setHealth(healthRes.value as typeof health);
       if (statsRes.status === 'fulfilled') setStats((statsRes.value as { data: SystemStats }).data);
       if (storeRes.status === 'fulfilled') setStoreStats(storeRes.value as typeof storeStats);
+      if (storeHealthRes.status === 'fulfilled') setHealthDatastoreStatus(storeHealthRes.value as typeof healthDatastoreStatus);
       if (perfRes.status === 'fulfilled') setServerPerf(perfRes.value as typeof serverPerf);
       if (gpuRes.status === 'fulfilled') setGpuPerf(gpuRes.value as typeof gpuPerf);
 
@@ -577,7 +588,7 @@ export default function DashboardPage() {
     }
   };
 
-  const handleChatDefaultToggle = async (key: 'research_mode' | 'rag_search' | 'web_search' | 'pubmed_search' | 'openscholar_search') => {
+  const handleChatDefaultToggle = async (key: 'research_mode' | 'rag_search' | 'web_search' | 'pubmed_search' | 'openscholar_search' | 'research_2_1') => {
     if (!chatDefaults) return;
     const next = !chatDefaults[key];
     setChatDefaults((prev) => (prev ? { ...prev, [key]: next } : prev));
@@ -995,6 +1006,21 @@ export default function DashboardPage() {
               <StatCard label="Almacenamiento" value={storeStats.storageType || '—'} color="blue" />
             </div>
           )}
+          {healthDatastoreStatus != null && (
+            <Section title="Ingesta nocturna (Health Datastore México)">
+              {!healthDatastoreStatus.enabled ? (
+                <p className="text-gray-400 text-sm">Desactivado. Actívalo en el backend con <code className="text-gray-300">HEALTH_DATASTORE_ENABLED=true</code>.</p>
+              ) : healthDatastoreStatus.error ? (
+                <p className="text-amber-300 text-sm">Error: {healthDatastoreStatus.error}</p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <StatCard label="Documentos salud" value={healthDatastoreStatus.health_docs} color="green" />
+                  <StatCard label="Chunks indexados" value={healthDatastoreStatus.health_chunks} color="green" />
+                  <StatCard label="Prueba retrieval (top 5)" value={healthDatastoreStatus.evidence_pack_test_count} sub="consulta de prueba" color="cyan" />
+                </div>
+              )}
+            </Section>
+          )}
           <Section title="RAG">
             <Link
               href="/rag"
@@ -1186,6 +1212,19 @@ export default function DashboardPage() {
                     status={chatDefaults.research_mode ? 'running' : 'stopped'}
                     loading={chatDefaultsSaving}
                     onToggle={() => handleChatDefaultToggle('research_mode')}
+                    labelOff="Off"
+                    labelOn="On"
+                  />
+                </div>
+                <div className="flex items-center justify-between py-2 border-b border-white/10">
+                  <div>
+                    <p className="text-sm font-medium text-white">Research 2.1</p>
+                    <p className="text-[10px] text-gray-500">Investigación profunda: segunda ronda de fuentes y reporte sección por sección (requiere OpenScholar 128K)</p>
+                  </div>
+                  <ResearchInstanceSwitch
+                    status={chatDefaults.research_2_1 ? 'running' : 'stopped'}
+                    loading={chatDefaultsSaving}
+                    onToggle={() => handleChatDefaultToggle('research_2_1')}
                     labelOff="Off"
                     labelOn="On"
                   />
