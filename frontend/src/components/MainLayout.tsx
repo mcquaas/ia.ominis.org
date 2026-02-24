@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
@@ -47,6 +47,7 @@ interface Message {
   degradation?: string;
   model?: string;  // e.g. "ominis-2.0" from done event (shown as Investigación)
   dbMessageId?: number;  // DB id when persisted (for feedback)
+  reportTitle?: string;   // from backend for PDF filename (e.g. "Salud Digital y Reforma LGS")
 }
 
 interface ModelOption {
@@ -77,6 +78,20 @@ function decodeHtmlEntities(text: string): string {
   });
 }
 
+/** Extract numbered questions (lines ending with ?) from plan message content for "Alcance de la investigación". */
+function parsePlanQuestions(content: string): string[] {
+  if (!content || typeof content !== "string") return [];
+  const questions: string[] = [];
+  const lines = content.split(/\r?\n/);
+  for (const line of lines) {
+    if (questions.length >= 4) break;
+    const trimmed = line.trim();
+    const match = trimmed.match(/^\s*(?:\d+[.)]|[-*])\s*(.+?\?)\s*$/);
+    if (match) questions.push(match[1].trim());
+  }
+  return questions;
+}
+
 // ominis-2.0 (Mexican LLM by FUNSALUD)
 // Data is stored in Mexico (S3 mx-central-1), no 3rd party models
 // Inference runs on GPU for speed via /api/query-stream
@@ -99,14 +114,18 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const [pubmedSearchEnabled, setPubmedSearchEnabled] = useState(true);
   const [openscholarSearchEnabled, setOpenscholarSearchEnabled] = useState(false);
   const [researchModeEnabled, setResearchModeEnabled] = useState(false);
+  const [research21Enabled, setResearch21Enabled] = useState(false); // Research 2.1 (deep multi-round + section-by-section) from Dashboard > Opciones
   const [uploadedImages, setUploadedImages] = useState<Array<{ data: string; name: string }>>([]);
   const [uploadedFiles, setUploadedFiles] = useState<Array<{ name: string; ext: string; text: string; extracting: boolean }>>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
+  const [plusMenuOpenDownward, setPlusMenuOpenDownward] = useState(false);
   const [researchSteps, setResearchSteps] = useState<Array<{ action: string; detail: string; url?: string; result?: string; reasoning?: string; elapsed?: number }>>([]);
   const [researchProgress, setResearchProgress] = useState<{ found: number; read: number; totalSteps: number; elapsedSeconds: number } | null>(null);
   const [showResearchPanel, setShowResearchPanel] = useState(false);
+  const [expandedResearchStepIndex, setExpandedResearchStepIndex] = useState<number | null>(null);
   const [excludedSources, setExcludedSources] = useState<Set<string>>(new Set());
+  const [scopeAnswers, setScopeAnswers] = useState<Record<string, string[]>>({}); // messageId -> answers for plan scope questions
   const [modalImage, setModalImage] = useState<string | null>(null);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([
     { id: "ominis-2.0", displayName: "Ominis 2.0", description: "Uso general (Qwen)", isDefault: true },
@@ -125,6 +144,16 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
 
+  // When + menu opens, choose placement: open downward if more space below the button than above
+  useLayoutEffect(() => {
+    if (!showPlusMenu || !plusMenuRef.current) return;
+    const rect = plusMenuRef.current.getBoundingClientRect();
+    const spaceAbove = rect.top;
+    const spaceBelow = typeof window !== "undefined" ? window.innerHeight - rect.bottom : 0;
+    setPlusMenuOpenDownward(spaceBelow >= spaceAbove);
+  }, [showPlusMenu]);
+  const runStreamRef = useRef<(q: string, history: Message[], userMsg: Message, opts: { messageContent: string; hadImages: boolean; currentImages: string[]; currentFileContext: string }) => Promise<void>>(null);
+
   // Chat history state — closed by default on mobile so it doesn't take space
   const [sidebarOpen, setSidebarOpen] = useState(false);
   useEffect(() => {
@@ -142,6 +171,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
         setWebSearchEnabled(d.web_search);
         setPubmedSearchEnabled(d.pubmed_search);
         setOpenscholarSearchEnabled(d.openscholar_search ?? false);
+        setResearch21Enabled(d.research_2_1 ?? false);
       })
       .catch(() => { /* keep current defaults on error */ });
   }, []);
@@ -1192,7 +1222,28 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     fetchModels();
   }, [isAuthenticated]);
 
-  // Research mode can be used with Ominis 2.0 when OpenScholar 128K is configured (e.g. Vast.ai)
+  // When Modo Investigación is turned on, auto-enable all four search sources so the report has enough sources.
+  useEffect(() => {
+    if (researchModeEnabled) {
+      setRagSearchEnabled(true);
+      setWebSearchEnabled(true);
+      setPubmedSearchEnabled(true);
+      setOpenscholarSearchEnabled(true);
+    }
+  }, [researchModeEnabled]);
+
+  // When Modo Investigación is on, backend uses 128K if available (else 8K). Use Ominis branding only (dashboard can override displayName).
+  const research128KModel = availableModels.find((m) => m.id === "ominis-2.0-research-128k");
+  const research128KAvailable = Boolean(research128KModel && research128KModel.allowed !== false);
+  // Prefer stream model id when available; always show Ominis-based names, never the underlying implementation name.
+  const effectiveResearchModelLabel =
+    researchModeEnabled && loadingModel === "ominis-2.0-research-128k"
+      ? (research128KModel?.displayName || "Ominis 2.0 Research 128K")
+      : researchModeEnabled && loadingModel === "ominis-2.0-research"
+        ? (availableModels.find((m) => m.id === "ominis-2.0-research")?.displayName || "Ominis 2.0 Research 8K")
+        : research128KAvailable
+          ? (research128KModel?.displayName || "Ominis 2.0 Research 128K")
+          : (availableModels.find((m) => m.id === "ominis-2.0-research")?.displayName || "Ominis 2.0 Research 8K");
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -1205,20 +1256,192 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  type RunStreamOpts = { messageContent: string; hadImages: boolean; currentImages: string[]; currentFileContext: string };
+
+  const runStream = async (
+    question: string,
+    historyForRequest: Message[],
+    userMessage: Message,
+    opts: RunStreamOpts,
+  ) => {
+    setMessages((prev) => [...prev, userMessage]);
+    setIsLoading(true);
+    setLoadingStatus("Analizando...");
+    setLoadingModel(selectedModel);
+    if (researchModeEnabled) {
+      setResearchSteps([]);
+      setResearchProgress(null);
+      setExpandedResearchStepIndex(null);
+      setShowResearchPanel(true);
+    }
+    try {
+      const controller = new AbortController();
+      const timeoutMs = researchModeEnabled ? 300000 : 120000;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      const history = historyForRequest.slice(-20).map((m) => ({ role: m.role, content: m.content }));
+      const headers: HeadersInit = { "Content-Type": "application/json" };
+      const token = getToken();
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const body: Record<string, unknown> = {
+        question: question || (opts.currentFileContext ? "Analiza el archivo adjunto" : "Describe esta imagen"),
+        history,
+        images: opts.currentImages.length > 0 ? opts.currentImages : undefined,
+        model: selectedModel,
+        research_mode: researchModeEnabled,
+        // En modo investigación siempre activar las cuatro búsquedas (orden de importancia: Ominis, Academic, PubMed, Web)
+        rag_search: researchModeEnabled ? true : ragSearchEnabled,
+        web_search: researchModeEnabled ? true : webSearchEnabled,
+        pubmed_search: researchModeEnabled ? true : pubmedSearchEnabled,
+        openscholar_search: researchModeEnabled ? true : openscholarSearchEnabled,
+        file_context: opts.currentFileContext || undefined,
+        excluded_sources: researchModeEnabled ? Array.from(excludedSources) : undefined,
+        research_2_1: researchModeEnabled ? research21Enabled : undefined,
+      };
+      const response = await fetch("/api/query-stream", { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
+      if (!response.ok) {
+        clearTimeout(timeoutId);
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const reader = response.body?.getReader();
+      if (!reader) {
+        clearTimeout(timeoutId);
+        throw new Error("No response body");
+      }
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let receivedData = false;
+      let streamedContent = "";
+      let streamedSources: Source[] = [];
+      const assistantId = generateId();
+      let messageAdded = false;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!receivedData) {
+            receivedData = true;
+            clearTimeout(timeoutId);
+          }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const jsonStr = line.slice(6);
+            if (!jsonStr.trim()) continue;
+            try {
+              const eventData = JSON.parse(jsonStr);
+              if (eventData.type === "status") {
+                setLoadingStatus(eventData.message);
+                setLoadingModel(eventData.model ?? null);
+              } else if (eventData.type === "research_step") {
+                if (eventData.step) {
+                  setResearchSteps((prev) => {
+                    if (prev.length === 0) setShowResearchPanel(true);
+                    return [...prev, eventData.step];
+                  });
+                }
+                if (eventData.progress) setResearchProgress(eventData.progress);
+              } else if (eventData.type === "chunk") {
+                streamedContent += eventData.text || "";
+                if (!messageAdded) {
+                  messageAdded = true;
+                  setIsLoading(false);
+                  setLoadingStatus("");
+                  setLoadingModel(null);
+                  setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent, model: undefined }]);
+                } else {
+                  setIsLoading(false);
+                  setLoadingStatus("");
+                  setLoadingModel(null);
+                  setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: streamedContent } : m)));
+                }
+              } else if (eventData.type === "sources") {
+                if (eventData.sources?.length > 0) {
+                  streamedSources = eventData.sources;
+                  if (!messageAdded) {
+                    messageAdded = true;
+                    setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "", sources: streamedSources }]);
+                  } else {
+                    setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, sources: streamedSources } : m)));
+                  }
+                }
+              } else if (eventData.type === "charts") {
+                if (eventData.charts?.length > 0) {
+                  setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, charts: eventData.charts } : m)));
+                }
+              } else if (eventData.type === "done") {
+                const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
+                const finalSources = Array.isArray(eventData.sources) ? eventData.sources : [];
+                const finalCharts = eventData.charts || undefined;
+                const isReport = !!eventData.is_report;
+                const modelUsed = eventData.model || undefined;
+                const degradation = eventData.degradation || undefined;
+                const reportTitle = eventData.report_title || undefined;
+                if (!messageAdded) {
+                  setMessages((prev) => [...prev, {
+                    id: assistantId, role: "assistant", content: finalContent,
+                    sources: finalSources.length > 0 ? finalSources : undefined,
+                    charts: finalCharts, isReport, model: modelUsed, degradation, reportTitle,
+                  }]);
+                } else {
+                  setMessages((prev) => prev.map((m) =>
+                    m.id === assistantId ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : undefined, charts: finalCharts || m.charts, isReport: isReport || m.isReport, model: modelUsed || m.model, degradation, reportTitle: reportTitle ?? m.reportTitle } : m
+                  ));
+                }
+                setResearchSteps([]);
+                setResearchProgress(null);
+                setExpandedResearchStepIndex(null);
+                persistMessages(opts.messageContent, finalContent, finalSources.length > 0 ? finalSources : undefined, opts.hadImages, assistantId);
+                setIsLoading(false);
+                setLoadingStatus("");
+                setLoadingModel(null);
+                if (researchModeEnabled && isReport) setResearchModeEnabled(false);
+                inputRef.current?.focus();
+                clearTimeout(timeoutId);
+                return;
+              } else if (eventData.type === "error") {
+                throw new Error(eventData.message);
+              }
+            } catch (parseError) {
+              if (parseError instanceof Error && parseError.message === (JSON.parse(jsonStr) as { message?: string })?.message) throw parseError;
+            }
+          }
+        }
+        if (streamedContent && !messageAdded) {
+          setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent, sources: streamedSources.length > 0 ? streamedSources : undefined }]);
+        }
+        if (streamedContent) {
+          persistMessages(opts.messageContent, streamedContent, streamedSources.length > 0 ? streamedSources : undefined, opts.hadImages, assistantId);
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } catch (error) {
+      const errorText = error instanceof Error && error.name === "AbortError"
+        ? "Tiempo de espera agotado. Por favor intenta de nuevo."
+        : error instanceof Error ? error.message : "Error desconocido";
+      setMessages((prev) => [...prev, { id: generateId(), role: "assistant", content: `Lo siento, hubo un error: ${errorText}. Por favor intenta de nuevo.` }]);
+    } finally {
+      setLoadingStatus("");
+      setLoadingModel(null);
+      setIsLoading(false);
+      inputRef.current?.focus();
+    }
+  };
+  runStreamRef.current = runStream;
+
   const sendMessage = async () => {
     const question = input.trim();
     const hasAttachments = uploadedImages.length > 0 || uploadedFiles.length > 0;
     if ((!question && !hasAttachments) || isLoading) return;
 
-    // Build user message content with attachment indicators
     const attachmentParts: string[] = [];
     if (uploadedImages.length > 0) {
-      const imageNames = uploadedImages.map((img) => img.name).join(", ");
-      attachmentParts.push(`${uploadedImages.length} imagen${uploadedImages.length > 1 ? "es" : ""}: ${imageNames}`);
+      attachmentParts.push(`${uploadedImages.length} imagen${uploadedImages.length > 1 ? "es" : ""}: ${uploadedImages.map((img) => img.name).join(", ")}`);
     }
     if (uploadedFiles.length > 0) {
-      const fileNames = uploadedFiles.map((f) => f.name).join(", ");
-      attachmentParts.push(`${uploadedFiles.length} archivo${uploadedFiles.length > 1 ? "s" : ""}: ${fileNames}`);
+      attachmentParts.push(`${uploadedFiles.length} archivo${uploadedFiles.length > 1 ? "s" : ""}: ${uploadedFiles.map((f) => f.name).join(", ")}`);
     }
     const messageContent = attachmentParts.length > 0
       ? `${question}${question ? "\n" : ""}[${attachmentParts.join("; ")}]`
@@ -1231,296 +1454,16 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       images: uploadedImages.length > 0 ? uploadedImages.map((img) => img.data) : undefined,
     };
 
-    setMessages((prev) => [...prev, userMessage]);
     setInput("");
-    const currentImages = uploadedImages.map((img) => img.data);
-    const hadImages = uploadedImages.length > 0;
-    const currentFileContext = uploadedFiles
-      .filter((f) => f.text && !f.extracting)
-      .map((f) => `--- ${f.name} ---\n${f.text}`)
-      .join("\n\n");
-    const currentRagSearch = ragSearchEnabled;
-    const currentWebSearch = webSearchEnabled;
-    const currentPubmedSearch = pubmedSearchEnabled;
-    const currentOpenscholarSearch = openscholarSearchEnabled;
-    clearAllImages(); // Clear all attachments after capturing
-    setIsLoading(true);
-    setLoadingStatus("Analizando...");
-    setLoadingModel(selectedModel);
-    if (researchModeEnabled) {
-      setResearchSteps([]);
-      setResearchProgress(null);
-      setShowResearchPanel(true);
-    }
-
-    try {
-      const controller = new AbortController();
-      const timeoutMs = researchModeEnabled ? 300000 : 120000; // 5min research, 2min chat
-      const timeoutId = setTimeout(() => {
-        controller.abort();
-      }, timeoutMs);
-
-      // Build chat history for context — include ALL previous messages
-      // (messages is the state before setMessages runs, so it has the full prior history)
-      const history = messages
-        .slice(-20)
-        .map(m => ({ role: m.role, content: m.content }));
-
-      // Research mode uses academic endpoint (OpenScholar 128K when configured); otherwise normal chat
-      const endpoint = researchModeEnabled ? "/api/academic-query-stream" : "/api/query-stream";
-      const headers: HeadersInit = { "Content-Type": "application/json" };
-      const token = getToken();
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      const body: Record<string, unknown> = {
-        question: question || (currentFileContext ? "Analiza el archivo adjunto" : "Describe esta imagen"),
-        history: history,
-        images: currentImages.length > 0 ? currentImages : undefined,
-        model: selectedModel,
-        rag_search: currentRagSearch,
-        web_search: currentWebSearch,
-        pubmed_search: currentPubmedSearch,
-        openscholar_search: currentOpenscholarSearch,
-        file_context: currentFileContext || undefined,
-      };
-      if (researchModeEnabled) {
-        body.iterations = 4;
-        body.max_total_sources = 30;
-        body.max_follow_links = 8;
-        body.max_trusted_sources = 8;
-        body.time_budget_seconds = 180;
-        body.excluded_sources = Array.from(excludedSources);
-      } else {
-        body.iterations = undefined;
-        body.max_total_sources = undefined;
-        body.max_follow_links = undefined;
-        body.max_trusted_sources = undefined;
-        body.time_budget_seconds = undefined;
-        body.excluded_sources = undefined;
-      }
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        clearTimeout(timeoutId);
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      // Read the SSE stream
-      const reader = response.body?.getReader();
-      if (!reader) {
-        clearTimeout(timeoutId);
-        throw new Error("No response body");
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let receivedData = false;
-      let streamedContent = "";
-      let streamedSources: Source[] = [];
-      const assistantId = generateId();
-      let messageAdded = false;
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          // Clear timeout once we start receiving data
-          if (!receivedData) {
-            receivedData = true;
-            clearTimeout(timeoutId);
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const jsonStr = line.slice(6);
-              if (!jsonStr.trim()) continue;
-
-              try {
-                const eventData = JSON.parse(jsonStr);
-
-                if (eventData.type === "status") {
-                  setLoadingStatus(eventData.message);
-                  setLoadingModel(eventData.model ?? null);
-
-                } else if (eventData.type === "research_step") {
-                  if (eventData.step) {
-                    setResearchSteps((prev) => {
-                      if (prev.length === 0) setShowResearchPanel(true);
-                      return [...prev, eventData.step];
-                    });
-                  }
-                  if (eventData.progress) {
-                    setResearchProgress(eventData.progress);
-                  }
-
-                } else if (eventData.type === "chunk") {
-                  // Token-by-token streaming: append text as it arrives
-                  streamedContent += eventData.text || "";
-                  if (!messageAdded) {
-                    // First chunk: create the assistant message
-                    messageAdded = true;
-                    setIsLoading(false);
-                    setLoadingStatus("");
-                    setLoadingModel(null);
-                    const newMsg: Message = {
-                      id: assistantId,
-                      role: "assistant",
-                      content: streamedContent,
-                      model: undefined,
-                    };
-                    setMessages((prev) => [...prev, newMsg]);
-                  } else {
-                    // Subsequent chunks (or first chunk after message was created from sources): update content
-                    setIsLoading(false);
-                    setLoadingStatus("");
-                    setLoadingModel(null);
-                    setMessages((prev) =>
-                      prev.map((m) =>
-                        m.id === assistantId
-                          ? { ...m, content: streamedContent }
-                          : m
-                      )
-                    );
-                  }
-
-                } else if (eventData.type === "sources") {
-                  // RAG sources arrived — show them immediately (often before first chunk)
-                  if (eventData.sources && eventData.sources.length > 0) {
-                    streamedSources = eventData.sources;
-                    if (!messageAdded) {
-                      messageAdded = true;
-                      setMessages((prev) => [...prev, {
-                        id: assistantId,
-                        role: "assistant",
-                        content: "",
-                        sources: streamedSources,
-                      }]);
-                    } else {
-                      setMessages((prev) =>
-                        prev.map((m) =>
-                          m.id === assistantId
-                            ? { ...m, sources: streamedSources }
-                            : m
-                        )
-                      );
-                    }
-                  }
-
-                } else if (eventData.type === "charts") {
-                  // Chart images generated by backend
-                  if (eventData.charts && eventData.charts.length > 0) {
-                    setMessages((prev) =>
-                      prev.map((m) =>
-                        m.id === assistantId
-                          ? { ...m, charts: eventData.charts }
-                          : m
-                      )
-                    );
-                  }
-
-                } else if (eventData.type === "done") {
-                  const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
-                  const finalSources = Array.isArray(eventData.sources) ? eventData.sources : [];
-                  const finalCharts = eventData.charts || undefined;
-                  const isReport = !!eventData.is_report;
-                  const modelUsed = eventData.model || undefined;
-                  const degradation = eventData.degradation || undefined;
-
-                  if (!messageAdded) {
-                    setMessages((prev) => [...prev, {
-                      id: assistantId, role: "assistant", content: finalContent,
-                      sources: finalSources.length > 0 ? finalSources : undefined,
-                      charts: finalCharts, isReport, model: modelUsed, degradation,
-                    }]);
-                  } else {
-                    setMessages((prev) =>
-                      prev.map((m) =>
-                        m.id === assistantId
-                          ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : undefined, charts: finalCharts || m.charts, isReport: isReport || m.isReport, model: modelUsed || m.model, degradation }
-                          : m
-                      )
-                    );
-                  }
-
-                  persistMessages(messageContent, finalContent, finalSources.length > 0 ? finalSources : undefined, hadImages, assistantId);
-
-                  setIsLoading(false);
-                  setLoadingStatus("");
-                  setLoadingModel(null);
-                  // Auto-disable research mode only after a report (flagged by backend)
-                  if (researchModeEnabled && isReport) {
-                    setResearchModeEnabled(false);
-                  }
-                  inputRef.current?.focus();
-                  return;
-
-                } else if (eventData.type === "error") {
-                  throw new Error(eventData.message);
-                }
-              } catch (parseError) {
-                // Re-throw actual errors
-                if (parseError instanceof Error && parseError.message === (JSON.parse(jsonStr) as { message?: string })?.message) {
-                  throw parseError;
-                }
-              }
-            }
-          }
-        }
-
-        // Stream ended without a done event: finalize with what we have
-        if (streamedContent && !messageAdded) {
-          const assistantMessage: Message = {
-            id: assistantId,
-            role: "assistant",
-            content: streamedContent,
-            sources: streamedSources.length > 0 ? streamedSources : undefined,
-          };
-          setMessages((prev) => [...prev, assistantMessage]);
-        }
-
-        // Persist even if no done event
-        if (streamedContent) {
-          persistMessages(
-            messageContent,
-            streamedContent,
-            streamedSources.length > 0 ? streamedSources : undefined,
-            hadImages,
-            assistantId,
-          );
-        }
-      } finally {
-        clearTimeout(timeoutId);
-      }
-    } catch (error) {
-      let errorText = "Error desconocido";
-      if (error instanceof Error) {
-        if (error.name === "AbortError") {
-          errorText = "Tiempo de espera agotado. Por favor intenta de nuevo.";
-        } else {
-          errorText = error.message;
-        }
-      }
-      const errorMessage: Message = {
-        id: generateId(),
-        role: "assistant",
-        content: `Lo siento, hubo un error: ${errorText}. Por favor intenta de nuevo.`,
-      };
-      setMessages((prev) => [...prev, errorMessage]);
-    } finally {
-      setLoadingStatus("");
-      setLoadingModel(null);
-      setIsLoading(false);
-      inputRef.current?.focus();
-    }
+    clearAllImages();
+    if (researchModeEnabled && messages.length === 0) setExcludedSources(new Set());
+    const opts: RunStreamOpts = {
+      messageContent,
+      hadImages: uploadedImages.length > 0,
+      currentImages: uploadedImages.map((img) => img.data),
+      currentFileContext: uploadedFiles.filter((f) => f.text && !f.extracting).map((f) => `--- ${f.name} ---\n${f.text}`).join("\n\n"),
+    };
+    await runStream(question, messages, userMessage, opts);
   };
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -1731,11 +1674,11 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
           history: history,
           images: originalMessage.images || undefined,
           model: selectedModel,
-          // Model choice is backend-orchestrated; no research_model sent
-          rag_search: ragSearchEnabled,
-          web_search: webSearchEnabled,
-          pubmed_search: pubmedSearchEnabled,
-          openscholar_search: openscholarSearchEnabled,
+          // En modo investigación siempre activar las cuatro búsquedas
+          rag_search: researchModeEnabled ? true : ragSearchEnabled,
+          web_search: researchModeEnabled ? true : webSearchEnabled,
+          pubmed_search: researchModeEnabled ? true : pubmedSearchEnabled,
+          openscholar_search: researchModeEnabled ? true : openscholarSearchEnabled,
           iterations: undefined,
           max_total_sources: undefined,
           max_follow_links: undefined,
@@ -1920,7 +1863,11 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
   const [footerExpanded, setFooterExpanded] = useState(false);
 
   const renderPlusMenu = () => (
-    <div className="absolute bottom-full left-0 mb-2 bg-[#1a2744] border border-white/10 rounded-xl shadow-xl py-2 min-w-[200px] z-50">
+    <div
+      className={`absolute left-0 z-50 min-w-[200px] max-h-[min(60vh,420px)] overflow-y-auto rounded-xl border border-white/10 bg-[#1a2744] py-2 shadow-xl ${
+        plusMenuOpenDownward ? "top-full mt-2" : "bottom-full mb-2"
+      }`}
+    >
       <button onClick={() => fileInputRef.current?.click()} className="w-full flex items-center gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
         Adjuntar archivos
@@ -1984,14 +1931,27 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
         <div className={`w-8 h-5 rounded-full transition-colors ${webSearchEnabled ? "bg-blue-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${webSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
       </button>
       <button onClick={() => setOpenscholarSearchEnabled(!openscholarSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en Semantic Scholar (artículos académicos)">
-        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>Open Scholar</div>
-        <div className={`w-8 h-5 rounded-full transition-colors ${openscholarSearchEnabled ? "bg-amber-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${openscholarSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+        <div className="flex items-center gap-3"><svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg><span className="min-w-0 truncate">OpenScholar</span></div>
+        <div className={`w-8 h-5 flex-shrink-0 rounded-full transition-colors ${openscholarSearchEnabled ? "bg-amber-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${openscholarSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
       </button>
       <div className="border-t border-white/10 my-1" />
       <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modo</div>
       <button onClick={() => setResearchModeEnabled(!researchModeEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
-        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>Modo Investigación</div>
-        <div className={`w-8 h-5 rounded-full transition-colors ${researchModeEnabled ? "bg-emerald-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${researchModeEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+        <div className="flex flex-col items-start gap-0.5">
+          <div className="flex items-center gap-3">
+            <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>
+            <span>Investigación</span>
+          </div>
+          {researchModeEnabled && (
+            <span className="text-[10px] text-gray-400 pl-7">
+              Ominis-2.0-Research
+            </span>
+          )}
+          {!researchModeEnabled && research128KAvailable && (
+            <span className="text-[10px] text-gray-500 pl-7">Al activar: Ominis-2.0-Research</span>
+          )}
+        </div>
+        <div className={`w-8 h-5 rounded-full flex-shrink-0 transition-colors ${researchModeEnabled ? "bg-emerald-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${researchModeEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
       </button>
     </div>
   );
@@ -2080,7 +2040,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         {researchModeEnabled && (
                           <span className="flex items-center gap-1 text-emerald-400 bg-emerald-500/15 backdrop-blur-sm border border-emerald-400/20 pl-2 pr-1 py-1 rounded-full">
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>
-                            Investigación
+                            Modo investigación
                             <button onClick={() => setResearchModeEnabled(false)} className="ml-0.5 hover:text-emerald-200 transition-colors" title="Desactivar">
                               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                             </button>
@@ -2182,7 +2142,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                             )}
                             {openscholarSearchEnabled && (
                               <span className="inline-flex items-center gap-0.5 text-amber-400 bg-amber-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
-                                Open Scholar
+                                OpenScholar
                                 <button onClick={() => setOpenscholarSearchEnabled(false)} className="hover:text-amber-200 transition-colors p-0.5" title="Desactivar">
                                   <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                                 </button>
@@ -2320,7 +2280,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                     )}
                                   </button>
                                   <button
-                                    onClick={() => handleDownloadPdf(message.content, message.content.split("\n")[0]?.replace(/^#+ /, "") || "Reporte")}
+                                    onClick={() => handleDownloadPdf(message.content, message.reportTitle || message.content.split("\n")[0]?.replace(/^#+ /, "") || "Reporte")}
                                     className="text-gray-500 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
                                     title="Descargar PDF"
                                   >
@@ -2353,6 +2313,62 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                             </div>
                           )}
 
+                          {/* Alcance de la investigación (plan message) + Proceder */}
+                          {researchModeEnabled && message.role === "assistant" && message.content.includes("?") && !message.content.includes("## Referencias") && !isLoading && (() => {
+                            const questions = parsePlanQuestions(message.content);
+                            if (questions.length === 0) return null;
+                            const answersForInput = scopeAnswers[message.id] ?? questions.map(() => "");
+                            return (
+                              <div className="mt-4 pt-3 border-t border-white/10">
+                                <h4 className="text-sm font-semibold text-white mb-0.5">Alcance de la investigación</h4>
+                                <p className="text-[11px] text-gray-400 mb-3">Para acotar mejor el alcance de mi investigación, por favor comenta mis planteamientos (opcional).</p>
+                                <div className="space-y-3 mb-4">
+                                  {questions.map((q, i) => (
+                                    <div key={i}>
+                                      <p className="text-xs text-gray-300 mb-1">{q}</p>
+                                      <input
+                                        type="text"
+                                        value={answersForInput[i] ?? ""}
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          setScopeAnswers(prev => {
+                                            const arr = prev[message.id] ?? questions.map(() => "");
+                                            const next = [...arr];
+                                            while (next.length <= i) next.push("");
+                                            next[i] = val;
+                                            return { ...prev, [message.id]: next };
+                                          });
+                                        }}
+                                        placeholder="Tu comentario (opcional)"
+                                        className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const answers = scopeAnswers[message.id] ?? questions.map(() => "");
+                                    const parts = answers.map((a, i) => (a.trim() ? `${i + 1}. ${a.trim()}` : "")).filter(Boolean);
+                                    const proceedMessage = parts.length > 0 ? "Proceder\n\n" + parts.join("\n") : "Proceder";
+                                    const userMsg: Message = { id: generateId(), role: "user", content: proceedMessage };
+                                    const opts: RunStreamOpts = {
+                                      messageContent: proceedMessage,
+                                      hadImages: false,
+                                      currentImages: [],
+                                      currentFileContext: uploadedFiles.filter((f) => f.text && !f.extracting).map((f) => `--- ${f.name} ---\n${f.text}`).join("\n\n"),
+                                    };
+                                    runStreamRef.current?.(proceedMessage, messages, userMsg, opts);
+                                  }}
+                                  disabled={isLoading}
+                                  className="w-full sm:w-auto mt-2 px-4 py-2.5 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-400/30 hover:bg-cyan-500/30 hover:text-white transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  Iniciar investigación
+                                </button>
+                              </div>
+                            );
+                          })()}
+
                           {/* Charts */}
                           {message.charts && message.charts.length > 0 && (
                             <div className="mt-3 space-y-3">
@@ -2372,25 +2388,27 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                             </div>
                           )}
 
-                          {/* Sources list */}
-                          {effectiveSources && effectiveSources.length > 0 && (() => {
-                            const displaySources = effectiveSources
-                              .map((source: Source, i: number) => ({ ...source, displayNum: source.ref_num || (i + 1) }))
-                              .filter((s: Source) => s.url && s.url.length > 0);
+                          {/* Sources list: en modo investigación solo después del reporte final (solo fuentes citadas) */}
+                          {effectiveSources && effectiveSources.length > 0 && (!researchModeEnabled || message.isReport === true) && (() => {
+                            const withNum = effectiveSources
+                              .filter((s: Source) => s.url && s.url.length > 0)
+                              .map((source: Source, i: number) => ({ ...source, displayNum: source.ref_num ?? (i + 1) }));
+                            const displaySources = [...withNum].sort((a, b) => (a.displayNum as number) - (b.displayNum as number));
                             if (displaySources.length === 0) return null;
 
-                            // Show checkboxes if research mode is on and this is a plan message (has "?")
-                            const showCheckboxes = researchModeEnabled && message.content.includes("?") && !isLoading;
+                            // Show checkboxes for plan-phase sources: research mode, no References section, not loading, and plan-like content
+                            const isPlanMessage = message.content.includes("?") || /plan|fuentes|proceder/i.test(message.content || "");
+                            const showCheckboxes = researchModeEnabled && isPlanMessage && !message.content.includes("## Referencias") && !isLoading;
 
                             return (
                               <div className="mt-3 pt-3 border-t border-white/10">
                                 {showCheckboxes && (
-                                  <p className="text-[10px] text-gray-500 mb-1.5">Desmarca las fuentes que no deseas incluir en la investigación:</p>
+                                  <p className="text-[10px] text-gray-500 mb-1.5">Por favor desmarca fuentes que no te parezcan relevantes.</p>
                                 )}
                                 <ul className="space-y-1.5">
-                                  {displaySources.map((source: SourceWithDisplayNum) => {
+                                  {displaySources.map((source: SourceWithDisplayNum, idx: number) => {
                                     const isExcluded = excludedSources.has(source.url);
-                                    const originLabel = source.sourceType === "pubmed" ? "PubMed" : source.sourceType === "rag" ? "Ominis" : source.sourceType === "openscholar" ? "Open Scholar" : "Web";
+                                    const originLabel = source.sourceType === "pubmed" ? "PubMed" : source.sourceType === "rag" ? "Ominis" : source.sourceType === "openscholar" ? "OpenScholar" : "Web";
                                     const originIcon = source.sourceType === "pubmed" ? (
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
                                     ) : source.sourceType === "rag" ? (
@@ -2405,7 +2423,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                       : (source.url ? (() => { try { return new URL(source.url).hostname; } catch { return source.url.slice(0, 50); } })() : "Sin título");
                                     const hasMeta = source.authors || source.year || source.doi || source.journal;
                                     return (
-                                      <li key={source.displayNum} className={`text-xs ${isExcluded ? "opacity-40" : ""}`}>
+                                      <li key={source.url || `src-${idx}`} className={`text-xs ${isExcluded ? "opacity-40" : ""}`}>
                                         <div className="flex items-start gap-1.5">
                                           {showCheckboxes && (
                                             <input
@@ -2460,6 +2478,36 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                     );
                                   })}
                                 </ul>
+                                {showCheckboxes && (() => {
+                                  const questions = parsePlanQuestions(message.content);
+                                  const ensureAnswers = (): string[] => {
+                                    const cur = scopeAnswers[message.id];
+                                    if (cur && cur.length >= questions.length) return cur;
+                                    return questions.map((_, i) => (scopeAnswers[message.id]?.[i] ?? "") || "");
+                                  };
+                                  return (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const answers = ensureAnswers();
+                                        const parts = answers.map((a, i) => (a.trim() ? `${i + 1}. ${a.trim()}` : "")).filter(Boolean);
+                                        const proceedMessage = parts.length > 0 ? "Proceder\n\n" + parts.join("\n") : "Proceder";
+                                        const userMsg: Message = { id: generateId(), role: "user", content: proceedMessage };
+                                        const opts: RunStreamOpts = {
+                                          messageContent: proceedMessage,
+                                          hadImages: false,
+                                          currentImages: [],
+                                          currentFileContext: uploadedFiles.filter((f) => f.text && !f.extracting).map((f) => `--- ${f.name} ---\n${f.text}`).join("\n\n"),
+                                        };
+                                        runStreamRef.current?.(proceedMessage, messages, userMsg, opts);
+                                      }}
+                                      disabled={isLoading}
+                                      className="mt-4 px-4 py-2 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-400/30 hover:bg-cyan-500/30 hover:text-white transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                      Iniciar investigación
+                                    </button>
+                                  );
+                                })()}
                               </div>
                             );
                           })()}
@@ -2483,7 +2531,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           {loadingStatus && loadingModel && <span className="text-gray-500 mx-1">·</span>}
                           {loadingModel && (
                             <span className="text-[10px] text-cyan-300/90 font-medium whitespace-nowrap" title="LLM en uso">
-                              {availableModels.find(m => m.id === loadingModel)?.displayName ?? (loadingModel === "ominis-2.0-research" ? "OpenScholar 8K" : loadingModel === "ominis-2.0-research-128k" ? "128K" : loadingModel)}
+                              {availableModels.find(m => m.id === loadingModel)?.displayName ?? (loadingModel === "ominis-2.0-research" ? "Ominis 2.0 Research 8K" : loadingModel === "ominis-2.0-research-128k" ? "Ominis 2.0 Research 128K" : loadingModel)}
                             </span>
                           )}
                           {researchModeEnabled && (
@@ -2499,7 +2547,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
                             <span>{researchProgress.found} fuentes · {researchProgress.read} leídas</span>
                             <span className="flex items-center gap-1.5">
-                              <span className="text-amber-300/90 font-medium">ominis-2.0-research</span>
+                              <span className="text-amber-300/90 font-medium">{effectiveResearchModelLabel}</span>
                               <span>{researchProgress.elapsedSeconds}s</span>
                             </span>
                           </div>
@@ -2514,6 +2562,39 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           </button>
                         </div>
                       )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Research progress bar while document is streaming (after first chunk, until done) */}
+                {!isLoading && researchSteps.length > 0 && (researchProgress != null) && (
+                  <div className="flex justify-start">
+                    <div className="bg-white/10 backdrop-blur-md border border-white/10 text-gray-100 rounded-2xl rounded-bl-sm p-3 max-w-[85%]">
+                      <div className="flex items-center gap-3">
+                        <div className="w-5 h-5 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
+                        <span className="text-gray-300 text-sm">Generando documento…</span>
+                        {researchModeEnabled && (
+                          <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 bg-amber-500/20 border border-amber-400/30 rounded">Investigación</span>
+                        )}
+                      </div>
+                      <div className="mt-3">
+                        <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
+                          <span>{researchProgress.found} fuentes · {researchProgress.read} leídas</span>
+                          <span className="flex items-center gap-1.5">
+                            <span className="text-amber-300/90 font-medium">{effectiveResearchModelLabel}</span>
+                            <span>{researchProgress.elapsedSeconds}s</span>
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                          <div className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, researchProgress.elapsedSeconds / 2.4)}%` }} />
+                        </div>
+                        <button
+                          onClick={() => setShowResearchPanel(!showResearchPanel)}
+                          className="mt-2 text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors"
+                        >
+                          {showResearchPanel ? "Ocultar actividad" : `Ver actividad (${researchSteps.length} pasos)`}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -2681,7 +2762,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
                         </svg>
-                        Investigación
+                        Modo investigación
                         <button onClick={() => setResearchModeEnabled(false)} className="ml-0.5 hover:text-emerald-200 transition-colors" title="Desactivar">
                           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
@@ -2756,7 +2837,7 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                       )}
                       {openscholarSearchEnabled && (
                         <span className="inline-flex items-center gap-0.5 text-amber-400 bg-amber-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
-                          Open Scholar
+                          OpenScholar
                           <button onClick={() => setOpenscholarSearchEnabled(false)} className="hover:text-amber-200 transition-colors p-0.5" title="Desactivar">
                             <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                           </button>
@@ -2782,7 +2863,9 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                 ⚠️ Siempre verifica con las fuentes originales · Una iniciativa de{" "}
                 <a href="https://www.funsalud.org.mx" target="_blank" rel="noopener noreferrer" className="text-gray-400 hover:text-white transition-colors">FUNSALUD</a>
                 {" · IA hecha en México · modelo LLM: "}
-                <a href="/modelo" className="text-gray-400 hover:text-white transition-colors">ominis-2.0</a>
+                <a href="/modelo" className="text-gray-400 hover:text-white transition-colors">
+                  {researchModeEnabled ? `${effectiveResearchModelLabel} (investigación)` : "ominis-2.0"}
+                </a>
                 {" · "}
                 <button
                   onClick={() => setFooterExpanded(true)}
@@ -2934,15 +3017,34 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
           )}
           <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
             {researchSteps.map((step, i) => {
-              const iconMap: Record<string, string> = { plan: "📋", search: "🔍", search_result: "📄", refine: "🎯", filter: "⚙️", read: "📖", read_done: "✅", read_fail: "❌", read_start: "📚", read_skip: "⏸️", follow: "🔗", complete: "🏁", sources: "📊", relevance: "🎯", relevance_done: "✓" };
+              const iconMap: Record<string, string> = { plan: "📋", search: "🔍", search_result: "📄", refine: "🎯", filter: "⚙️", read: "📖", read_done: "✅", read_fail: "❌", read_start: "📚", read_skip: "⏸️", follow: "🔗", complete: "🏁", sources: "📊", relevance: "🎯", relevance_done: "✓", structure: "📑", round2: "🔄", round3: "🧠", gaps: "🕳️", outline: "📝", outline_done: "✅", writing: "✍️" };
               const icon = iconMap[step.action] || "•";
+              const reasoningPreviewLen = 90;
+              const showReasoningPreview = step.reasoning && step.reasoning.length > reasoningPreviewLen;
+              const isExpanded = expandedResearchStepIndex === i;
+              const reasoningDisplay = step.reasoning
+                ? (isExpanded ? step.reasoning : (showReasoningPreview ? step.reasoning.slice(0, reasoningPreviewLen) + "…" : step.reasoning))
+                : null;
               return (
                 <div key={i} className="text-[11px] leading-relaxed">
                   <div className="flex items-start gap-1.5">
                     <span className="flex-shrink-0 mt-0.5">{icon}</span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-gray-300">{step.detail}</p>
-                      {step.reasoning && <p className="text-amber-200/80 italic mt-0.5">{step.reasoning}</p>}
+                    <div className="min-w-0 flex-1 break-words">
+                      <p className="text-gray-300 break-words">{step.detail}</p>
+                      {reasoningDisplay && (
+                        <p
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setExpandedResearchStepIndex(isExpanded ? null : i)}
+                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpandedResearchStepIndex(isExpanded ? null : i); } }}
+                          className="text-amber-200/80 italic mt-0.5 cursor-pointer hover:bg-white/5 rounded px-1 -mx-1 py-0.5 transition-colors"
+                          title={showReasoningPreview && !isExpanded ? "Clic para ver descripción completa" : undefined}
+                        >
+                          {reasoningDisplay}
+                          {showReasoningPreview && !isExpanded && <span className="text-amber-400/90 ml-0.5"> (clic para ver más)</span>}
+                          {showReasoningPreview && isExpanded && <span className="text-amber-400/90 ml-0.5"> (clic para cerrar)</span>}
+                        </p>
+                      )}
                       {step.result && <p className="text-gray-500">{step.result}</p>}
                       {step.url && (
                         <a href={step.url} target="_blank" rel="noopener noreferrer" className="text-cyan-500 hover:text-cyan-400 truncate block">{step.url.replace(/^https?:\/\//, '').substring(0, 50)}</a>

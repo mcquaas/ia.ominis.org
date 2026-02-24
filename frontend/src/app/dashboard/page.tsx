@@ -13,6 +13,7 @@ import {
   updateUser,
   getStoreStats,
   getHealthDatastoreStatus,
+  getHealthDatastoreRecentActivity,
   getServerPerformance,
   getGpuServerPerformance,
   getResearchInstanceStatus,
@@ -314,6 +315,12 @@ export default function DashboardPage() {
     opensearch_url_set?: boolean;
     error?: string;
   } | null>(null);
+  const [healthDatastoreRecentActivity, setHealthDatastoreRecentActivity] = useState<Array<{
+    title: string;
+    source_url: string;
+    source_type: string;
+    date_ingested: string | null;
+  }>>([]);
   const [serverPerf, setServerPerf] = useState<{
     cpu?: { cores: number; loadAvg1m: number; usagePercent: number };
     memory?: { totalMB: number; usedMB: number; availableMB: number; usagePercent: number };
@@ -384,11 +391,12 @@ export default function DashboardPage() {
     setLoadingData(true);
     setError('');
     try {
-      const [healthRes, statsRes, storeRes, storeHealthRes, perfRes, gpuRes] = await Promise.allSettled([
+      const [healthRes, statsRes, storeRes, storeHealthRes, storeActivityRes, perfRes, gpuRes] = await Promise.allSettled([
         getHealth(),
         getSystemStats(),
         getStoreStats(),
         getHealthDatastoreStatus(),
+        getHealthDatastoreRecentActivity(30),
         getServerPerformance(),
         getGpuServerPerformance(),
       ]);
@@ -397,6 +405,10 @@ export default function DashboardPage() {
       if (statsRes.status === 'fulfilled') setStats((statsRes.value as { data: SystemStats }).data);
       if (storeRes.status === 'fulfilled') setStoreStats(storeRes.value as typeof storeStats);
       if (storeHealthRes.status === 'fulfilled') setHealthDatastoreStatus(storeHealthRes.value as typeof healthDatastoreStatus);
+      if (storeActivityRes.status === 'fulfilled') {
+        const v = storeActivityRes.value as { items?: typeof healthDatastoreRecentActivity };
+        setHealthDatastoreRecentActivity(Array.isArray(v?.items) ? v.items : []);
+      }
       if (perfRes.status === 'fulfilled') setServerPerf(perfRes.value as typeof serverPerf);
       if (gpuRes.status === 'fulfilled') setGpuPerf(gpuRes.value as typeof gpuPerf);
 
@@ -494,7 +506,7 @@ export default function DashboardPage() {
     setResearchInstanceAction(key);
     try {
       await startResearchInstance(key);
-      showMsg(key === 'openscholar_128k' ? 'Iniciando modelo 128K. Se apagará en 60 min.' : 'Iniciando OpenScholar (ominis-2.0-research).');
+      showMsg(key === 'openscholar_128k' ? 'Iniciando Ominis 2.0 Research 128K. Se apagará en 60 min.' : 'Iniciando Ominis 2.0 Research 8K (ominis-2.0-research).');
       const ri = await getResearchInstanceStatus();
       setResearchInstances({ openscholar: ri.openscholar, openscholar_128k: ri.openscholar_128k });
       setResearchInstanceDetails(ri.details ?? { openscholar: undefined, openscholar_128k: undefined });
@@ -652,7 +664,7 @@ export default function DashboardPage() {
             { id: 'overview' as const, label: 'Visión general' },
             { id: 'servers' as const, label: 'Servidores' },
             { id: 'llms' as const, label: 'LLMs' },
-            { id: 'rag' as const, label: 'RAG' },
+            { id: 'rag' as const, label: 'DataStore' },
             { id: 'users' as const, label: 'Usuarios' },
             { id: 'options' as const, label: 'Opciones' },
           ]).map(({ id, label }) => (
@@ -895,7 +907,7 @@ export default function DashboardPage() {
           <Section title="Servidores GPU">
             <p className="text-[11px] text-gray-500 mb-4">
               Cada tarjeta es una instancia EC2. Prender/apagar afecta todo el servidor (todos los modelos que corren en él).
-              Si no hay servidores, configura OLLAMA_INSTANCE_ID, OLLAMA_CLINIC_INSTANCE_ID, OPENSCHOLAR_INSTANCE_ID y/o OPENSCHOLAR_128K_INSTANCE_ID en el backend.
+              Si no hay servidores, configura los instance IDs de investigación (8K y 128K) en el backend.
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {serversStatus.map((srv) => {
@@ -996,37 +1008,104 @@ export default function DashboardPage() {
         </>
         )}
 
-        {/* ===== RAG ===== */}
+        {/* ===== DataStore ===== */}
         {activeTab === 'rag' && (
         <div className="mb-6 space-y-4">
-          {storeStats && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {/* Workers */}
+          <Section title="Workers">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="bg-white/5 rounded-lg p-3 border border-white/10">
+                <p className="text-gray-400 uppercase tracking-wider text-xs mb-1">Indexación de fuentes</p>
+                <p className="text-white">Este servidor (en segundo plano)</p>
+                <p className="text-gray-500 text-xs mt-1">Archivos, URLs y fuentes que agregues aquí se indexan en el mismo servidor que la API.</p>
+              </div>
+              <div className="bg-white/5 rounded-lg p-3 border border-white/10">
+                <p className="text-gray-400 uppercase tracking-wider text-xs mb-1">Health Datastore (ingesta nocturna)</p>
+                <p className="text-white">Worker pipeline</p>
+                <p className="text-gray-500 text-xs mt-1">PubMed, url_list, crawl y ZIP se ejecutan en un worker externo (cron o manual). Métricas abajo.</p>
+              </div>
+            </div>
+          </Section>
+          {/* Embeddings (antes Almacenamiento) */}
+          <Section
+            title="Embeddings"
+            action={
+              <Link
+                href="/rag"
+                className="text-xs text-cyan-300 hover:text-cyan-200 border border-cyan-500/40 hover:border-cyan-400/60 rounded-lg px-2.5 py-1.5 transition-colors"
+              >
+                Gestionar
+              </Link>
+            }
+          >
+            {storeStats && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
               <StatCard label="Documentos" value={storeStats.totalDocuments} color="purple" />
               <StatCard label="Modelo de embeddings" value={storeStats.embeddingModel || '—'} color="cyan" />
-              <StatCard label="Almacenamiento" value={storeStats.storageType || '—'} color="blue" />
+              <StatCard label="pgvector (RAG)" value={storeStats.storageType || '—'} color="blue" />
             </div>
-          )}
-          {healthDatastoreStatus != null && (
-            <Section title="Ingesta nocturna (Health Datastore México)">
+            )}
+            {healthDatastoreStatus != null && (
+              <>
+                <h4 className="text-sm font-medium text-gray-300 mb-2">Ingesta nocturna (Health Datastore México)</h4>
               {!healthDatastoreStatus.enabled ? (
                 <p className="text-gray-400 text-sm">Desactivado. Actívalo en el backend con <code className="text-gray-300">HEALTH_DATASTORE_ENABLED=true</code>.</p>
               ) : healthDatastoreStatus.error ? (
                 <p className="text-amber-300 text-sm">Error: {healthDatastoreStatus.error}</p>
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <StatCard label="Documentos salud" value={healthDatastoreStatus.health_docs} color="green" />
-                  <StatCard label="Chunks indexados" value={healthDatastoreStatus.health_chunks} color="green" />
-                  <StatCard label="Prueba retrieval (top 5)" value={healthDatastoreStatus.evidence_pack_test_count} sub="consulta de prueba" color="cyan" />
-                </div>
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <StatCard label="Documentos salud" value={healthDatastoreStatus.health_docs} color="green" />
+                    <StatCard label="Chunks indexados" value={healthDatastoreStatus.health_chunks} color="green" />
+                    <StatCard label="Prueba retrieval (top 5)" value={healthDatastoreStatus.evidence_pack_test_count} sub="consulta de prueba" color="cyan" />
+                  </div>
+                  <p className="text-gray-500 text-xs mt-2">Origen: Lambda (pubmed, url_list) + pipeline --from-s3 en backend/worker.</p>
+                  {healthDatastoreRecentActivity.length > 0 && (
+                    <div className="mt-4">
+                      <h4 className="text-sm font-medium text-gray-300 mb-2">Últimas actividades (documentos ingestados)</h4>
+                      <div className="overflow-x-auto rounded-lg border border-white/10">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-gray-400 text-xs uppercase border-b border-white/10 bg-white/5">
+                              <th className="py-2 px-3">Título / URL</th>
+                              <th className="py-2 px-3 w-28">Fuente</th>
+                              <th className="py-2 px-3 w-40">Fecha</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/5">
+                            {healthDatastoreRecentActivity.slice(0, 20).map((item, i) => (
+                              <tr key={i} className="hover:bg-white/5">
+                                <td className="py-2 px-3">
+                                  {item.source_url ? (
+                                    <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="text-cyan-300 hover:underline truncate block max-w-md" title={item.source_url}>
+                                      {item.title || item.source_url}
+                                    </a>
+                                  ) : (
+                                    <span className="text-gray-300">{item.title || '—'}</span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-3 text-gray-400">{item.source_type || '—'}</td>
+                                <td className="py-2 px-3 text-gray-500 text-xs">
+                                  {item.date_ingested ? new Date(item.date_ingested).toLocaleString('es-MX') : '—'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
-            </Section>
-          )}
-          <Section title="RAG">
+              </>
+            )}
+          </Section>
+          <Section title="DataStore">
             <Link
               href="/rag"
               className="block p-6 text-center bg-white/5 rounded-xl border border-white/10 hover:border-cyan-500/30 hover:bg-white/10 transition-colors"
             >
-              <p className="text-white font-medium">Gestión de fuentes RAG</p>
+              <p className="text-white font-medium">Gestión de fuentes DataStore</p>
               <p className="text-gray-400 text-sm mt-1">Ingestión, búsqueda y filtrado por taxonomía</p>
             </Link>
           </Section>
@@ -1219,7 +1298,7 @@ export default function DashboardPage() {
                 <div className="flex items-center justify-between py-2 border-b border-white/10">
                   <div>
                     <p className="text-sm font-medium text-white">Research 2.1</p>
-                    <p className="text-[10px] text-gray-500">Investigación profunda: segunda ronda de fuentes y reporte sección por sección (requiere OpenScholar 128K)</p>
+                    <p className="text-[10px] text-gray-500">Investigación profunda: segunda ronda de fuentes y reporte sección por sección (requiere Ominis 2.0 Research 128K)</p>
                   </div>
                   <ResearchInstanceSwitch
                     status={chatDefaults.research_2_1 ? 'running' : 'stopped'}
@@ -1270,7 +1349,7 @@ export default function DashboardPage() {
                 </div>
                 <div className="flex items-center justify-between py-2">
                   <div>
-                    <p className="text-sm font-medium text-white">Open Scholar</p>
+                    <p className="text-sm font-medium text-white">OpenScholar</p>
                     <p className="text-[10px] text-gray-500">Búsqueda en Semantic Scholar (artículos académicos)</p>
                   </div>
                   <ResearchInstanceSwitch
@@ -1379,7 +1458,7 @@ export default function DashboardPage() {
                         {feedbackModalItem.sources.map((s, i) => (
                           <li key={i} className="bg-white/5 rounded-lg px-3 py-2 text-xs">
                             <span className="text-cyan-400 font-medium">
-                              {s.type === 'pubmed' ? 'PubMed' : s.type === 'rag' ? 'Ominis' : s.type === 'web' ? 'Web' : s.type === 'openscholar' ? 'Open Scholar' : 'Fuente'}
+                              {s.type === 'pubmed' ? 'PubMed' : s.type === 'rag' ? 'Ominis' : s.type === 'web' ? 'Web' : s.type === 'openscholar' ? 'OpenScholar' : 'Fuente'}
                             </span>
                             {s.title && <p className="text-white mt-0.5 truncate" title={s.title}>{s.title}</p>}
                             {s.url && (
