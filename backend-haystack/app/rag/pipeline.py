@@ -1,13 +1,9 @@
 """
 Haystack RAG Pipeline definition — Haystack 2.23 native architecture.
-
-Uses OllamaChatGenerator with ChatMessage objects for proper chat/multimodal support.
-Uses PgvectorDocumentStore for persistent document storage.
-Supports multiple LLM models sharing the same retriever and document store.
-Includes a separate vision generator for image analysis via ImageContent.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from haystack.components.embedders import SentenceTransformersTextEmbedder
@@ -30,6 +26,19 @@ from app.rag.document_store import get_document_store, migrate_chunks_from_s3
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# ---------------------------------------------------------------------------
+# Current datetime for agent awareness (injected into system prompts)
+# ---------------------------------------------------------------------------
+def _current_datetime_context() -> str:
+    """Return a short line with current UTC date/time for system prompts."""
+    now = datetime.now(timezone.utc)
+    # ISO format + readable for Spanish locale
+    return (
+        f"Fecha y hora actual (UTC): {now.strftime('%Y-%m-%d')} a las {now.strftime('%H:%M')} UTC. "
+        "Úsala para responder preguntas sobre el día actual, la fecha o la hora."
+    )
+
 
 # ---------------------------------------------------------------------------
 # System prompt (shared across all models – the agent persona stays the same)
@@ -116,6 +125,13 @@ REGLAS ABSOLUTAS (NUNCA las violes):
 8. Enfoque geográfico: México, a menos que se indique otro país."""
 
 
+MED_ORCHESTRATOR_INSTRUCTION = (
+    "\n\nComo orquestador clínico: (1) Evalúa si las imágenes o archivos adjuntos son relevantes para la pregunta; "
+    "si no lo son, no los cites ni bases conclusiones en ellos. (2) Decide si la respuesta se beneficia de una tabla "
+    "o gráfica (solo cuando tenga sentido médico: datos comparativos, evolución, rangos de referencia, etc.); "
+    "si es así, indica brevemente qué datos deben mostrarse en tabla o gráfica."
+)
+
 def build_chat_messages(
     question: str,
     documents: list[Document],
@@ -124,17 +140,22 @@ def build_chat_messages(
     file_context: str = "",
     system_prompt: str | None = None,
     max_content_per_doc: int = 800,
+    med_orchestrator: bool = False,
 ) -> list[ChatMessage]:
     """
     Build a list of ChatMessage objects for the OllamaChatGenerator.
     This is the Haystack-native way to construct prompts with proper roles.
     If system_prompt is provided (e.g. from dashboard config), it overrides the default SYSTEM_PROMPT.
     max_content_per_doc: max chars per document content (smaller = faster prefill for large models like gpt-oss).
+    med_orchestrator: when True (Ominis Med as orchestrator), appends instructions to decide image/file relevance and table/chart use.
     """
     messages: list[ChatMessage] = []
 
     # 1. System message (per-model override from dashboard or default)
     prompt = (system_prompt or "").strip() or SYSTEM_PROMPT
+    if med_orchestrator:
+        prompt = prompt.rstrip() + MED_ORCHESTRATOR_INSTRUCTION
+    prompt = _current_datetime_context() + "\n\n" + prompt
     messages.append(ChatMessage.from_system(prompt))
 
     # 2. Conversation history
@@ -226,7 +247,8 @@ def build_research_messages(
     Provides a structured plan and evidence list for a final report.
     """
     messages: list[ChatMessage] = []
-    messages.append(ChatMessage.from_system(RESEARCH_SYSTEM_PROMPT))
+    research_system = _current_datetime_context() + "\n\n" + RESEARCH_SYSTEM_PROMPT
+    messages.append(ChatMessage.from_system(research_system))
 
     if history:
         for msg in history:

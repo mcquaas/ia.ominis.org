@@ -357,7 +357,7 @@ export default function DashboardPage() {
   const [researchInstanceDetails, setResearchInstanceDetails] = useState<Record<'openscholar' | 'openscholar_128k', InstanceDetails | undefined>>({ openscholar: undefined, openscholar_128k: undefined });
   const [serversStatus, setServersStatus] = useState<ServerWithModels[]>([]);
   const [serverActionKey, setServerActionKey] = useState<string | null>(null);
-  const [chatDefaults, setChatDefaults] = useState<{ research_mode: boolean; rag_search: boolean; web_search: boolean; pubmed_search: boolean; openscholar_search: boolean; research_2_1: boolean } | null>(null);
+  const [chatDefaults, setChatDefaults] = useState<{ research_mode: boolean; rag_search: boolean; web_search: boolean; pubmed_search: boolean; openscholar_search: boolean; research_2_1: boolean; default_model?: string } | null>(null);
   const [chatDefaultsSaving, setChatDefaultsSaving] = useState(false);
   const [llmServersStatus, setLlmServersStatus] = useState<{
     servers: Array<{ label: string; url: string | null; reachable: boolean; models: string[]; note?: string; error?: string }>;
@@ -609,6 +609,22 @@ export default function DashboardPage() {
       const updated = await updateChatDefaults({ [key]: next });
       setChatDefaults(updated);
       showMsg('Opciones por defecto guardadas.');
+    } catch (e) {
+      setChatDefaults(chatDefaults);
+      showError(e instanceof Error ? e.message : 'Error al guardar');
+    } finally {
+      setChatDefaultsSaving(false);
+    }
+  };
+
+  const handleDefaultModelChange = async (modelId: string) => {
+    if (!chatDefaults) return;
+    setChatDefaults((prev) => (prev ? { ...prev, default_model: modelId } : prev));
+    setChatDefaultsSaving(true);
+    try {
+      const updated = await updateChatDefaults({ default_model: modelId });
+      setChatDefaults(updated);
+      showMsg('Modelo por defecto guardado.');
     } catch (e) {
       setChatDefaults(chatDefaults);
       showError(e instanceof Error ? e.message : 'Error al guardar');
@@ -1282,6 +1298,21 @@ export default function DashboardPage() {
             </p>
             {chatDefaults && (
               <div className="space-y-3">
+                <div className="flex items-center justify-between py-2 border-b border-white/10">
+                  <div>
+                    <p className="text-sm font-medium text-white">Modelo por defecto</p>
+                    <p className="text-[10px] text-gray-500">Modelo que verán los usuarios al abrir el chat (Ominis 2.0 u Ominis 2.0 Med)</p>
+                  </div>
+                  <select
+                    value={chatDefaults.default_model || 'ominis-2.0'}
+                    onChange={(e) => handleDefaultModelChange(e.target.value)}
+                    disabled={chatDefaultsSaving}
+                    className="bg-white/10 border border-white/20 text-white text-sm rounded-lg px-3 py-1.5 focus:ring-1 focus:ring-cyan-400"
+                  >
+                    <option value="ominis-2.0">Ominis 2.0</option>
+                    <option value="ominis-2.0-med">Ominis 2.0 Med</option>
+                  </select>
+                </div>
                 <div className="flex items-center justify-between py-2 border-b border-white/10">
                   <div>
                     <p className="text-sm font-medium text-white">Investigación</p>

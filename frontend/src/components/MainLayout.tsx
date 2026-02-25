@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
@@ -120,6 +121,8 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
   const [plusMenuOpenDownward, setPlusMenuOpenDownward] = useState(false);
+  const [plusMenuPosition, setPlusMenuPosition] = useState<{ left: number; top: number; openUpward?: boolean } | null>(null);
+  const menuPortalRef = useRef<HTMLDivElement | null>(null);
   const [researchSteps, setResearchSteps] = useState<Array<{ action: string; detail: string; url?: string; result?: string; reasoning?: string; elapsed?: number }>>([]);
   const [researchProgress, setResearchProgress] = useState<{ found: number; read: number; totalSteps: number; elapsedSeconds: number } | null>(null);
   const [showResearchPanel, setShowResearchPanel] = useState(false);
@@ -144,13 +147,19 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
 
-  // When + menu opens, choose placement: open downward if more space below the button than above
+  // When + menu opens, choose placement and position for portal (so it's not clipped by overflow-hidden)
   useLayoutEffect(() => {
-    if (!showPlusMenu || !plusMenuRef.current) return;
+    if (!showPlusMenu || !plusMenuRef.current) {
+      setPlusMenuPosition(null);
+      return;
+    }
     const rect = plusMenuRef.current.getBoundingClientRect();
     const spaceAbove = rect.top;
     const spaceBelow = typeof window !== "undefined" ? window.innerHeight - rect.bottom : 0;
     setPlusMenuOpenDownward(spaceBelow >= spaceAbove);
+    const openUpward = spaceBelow < 220;
+    const top = openUpward ? rect.top : rect.top + rect.height / 2;
+    setPlusMenuPosition({ left: rect.right + 8, top, openUpward });
   }, [showPlusMenu]);
   const runStreamRef = useRef<(q: string, history: Message[], userMsg: Message, opts: { messageContent: string; hadImages: boolean; currentImages: string[]; currentFileContext: string }) => Promise<void>>(null);
 
@@ -1245,12 +1254,13 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
           ? (research128KModel?.displayName || "Ominis 2.0 Research 128K")
           : (availableModels.find((m) => m.id === "ominis-2.0-research")?.displayName || "Ominis 2.0 Research 8K");
 
-  // Close menu when clicking outside
+  // Close menu when clicking outside (consider both trigger and portaled menu)
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (plusMenuRef.current && !plusMenuRef.current.contains(event.target as Node)) {
-        setShowPlusMenu(false);
-      }
+      const target = event.target as Node;
+      if (plusMenuRef.current?.contains(target)) return;
+      if (menuPortalRef.current?.contains(target)) return;
+      setShowPlusMenu(false);
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
@@ -1862,99 +1872,127 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
   const hasMessages = messages.length > 0;
   const [footerExpanded, setFooterExpanded] = useState(false);
 
-  const renderPlusMenu = () => (
-    <div
-      className={`absolute left-0 z-50 min-w-[200px] max-h-[min(60vh,420px)] overflow-y-auto rounded-xl border border-white/10 bg-[#1a2744] py-2 shadow-xl ${
-        plusMenuOpenDownward ? "top-full mt-2" : "bottom-full mb-2"
-      }`}
-    >
-      <button onClick={() => fileInputRef.current?.click()} className="w-full flex items-center gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
-        Adjuntar archivos
-      </button>
-      <div className="border-t border-white/10 my-1" />
-      <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modelo</div>
-      {availableModels.map((m) => {
-        const locked = m.allowed === false;
-        const title = locked
-          ? (m.reason === "login_required"
-            ? "Inicia sesión para usar este modelo"
-            : m.reason === "admin_only"
-              ? "Solo administradores pueden usar este modelo (GPT / gpt-oss)"
-              : "Solicita acceso al SuperAdmin para usar este modelo")
-          : undefined;
-        const lockMessage = locked
-          ? (m.reason === "login_required"
-            ? "Inicia sesión para usar este modelo."
-            : m.reason === "admin_only"
-              ? "Solo administradores pueden usar GPT (gpt-oss)."
-              : "Solicita acceso al SuperAdmin para usar este modelo.")
-          : "";
-        return (
-          <button
-            key={m.id}
-            title={title}
-            onClick={() => {
-              if (locked) {
-                setModelAccessMessage(lockMessage);
-                setTimeout(() => setModelAccessMessage(null), 4000);
-                return;
-              }
-              setSelectedModel(m.id);
-            }}
-            className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedModel === m.id ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"} ${locked ? "opacity-80" : ""}`}
-          >
-            <div className="flex items-center gap-3 min-w-0">
-              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
-              <span className="truncate">{m.displayName}</span>
-              {locked && <svg className="w-3.5 h-3.5 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>}
+  const renderPlusMenu = () => {
+    if (!showPlusMenu) return null;
+    const menuContent = (
+      <>
+        <button onClick={() => fileInputRef.current?.click()} className="w-full flex items-center gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+          Adjuntar archivos
+        </button>
+        <div className="border-t border-white/10 my-1" />
+        <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modelo</div>
+        {availableModels.map((m) => {
+          const locked = m.allowed === false;
+          const title = locked
+            ? (m.reason === "login_required"
+              ? "Inicia sesión para usar este modelo"
+              : m.reason === "admin_only"
+                ? "Solo administradores pueden usar este modelo (GPT / gpt-oss)"
+                : "Solicita acceso al SuperAdmin para usar este modelo")
+            : undefined;
+          const lockMessage = locked
+            ? (m.reason === "login_required"
+              ? "Inicia sesión para usar este modelo."
+              : m.reason === "admin_only"
+                ? "Solo administradores pueden usar GPT (gpt-oss)."
+                : "Solicita acceso al SuperAdmin para usar este modelo.")
+            : "";
+          return (
+            <button
+              key={m.id}
+              title={title}
+              onClick={() => {
+                if (locked) {
+                  setModelAccessMessage(lockMessage);
+                  setTimeout(() => setModelAccessMessage(null), 4000);
+                  return;
+                }
+                setSelectedModel(m.id);
+              }}
+              className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedModel === m.id ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"} ${locked ? "opacity-80" : ""}`}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+                <span className="truncate">{m.displayName}</span>
+                {locked && <svg className="w-3.5 h-3.5 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>}
+              </div>
+              {selectedModel === m.id && !locked && <svg className="w-4 h-4 text-cyan-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+            </button>
+          );
+        })}
+        {modelAccessMessage && (
+          <p className="px-4 py-2 text-xs text-amber-300 bg-amber-900/30 rounded mt-1 mx-2">{modelAccessMessage}</p>
+        )}
+        <div className="border-t border-white/10 my-1" />
+        <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Buscar en fuentes</div>
+        <button onClick={() => setRagSearchEnabled(!ragSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en fuentes curadas por Ominis (bases de salud)">
+          <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>Ominis</div>
+          <div className={`w-8 h-5 rounded-full transition-colors ${ragSearchEnabled ? "bg-cyan-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${ragSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+        </button>
+        <button onClick={() => setPubmedSearchEnabled(!pubmedSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en PubMed (literatura científica)">
+          <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>PubMed</div>
+          <div className={`w-8 h-5 rounded-full transition-colors ${pubmedSearchEnabled ? "bg-purple-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${pubmedSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+        </button>
+        <button onClick={() => setWebSearchEnabled(!webSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en la web">
+          <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>Web</div>
+          <div className={`w-8 h-5 rounded-full transition-colors ${webSearchEnabled ? "bg-blue-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${webSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+        </button>
+        <button onClick={() => setOpenscholarSearchEnabled(!openscholarSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en Semantic Scholar (artículos académicos)">
+          <div className="flex items-center gap-3"><svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg><span className="min-w-0 truncate">OpenScholar</span></div>
+          <div className={`w-8 h-5 flex-shrink-0 rounded-full transition-colors ${openscholarSearchEnabled ? "bg-amber-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${openscholarSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+        </button>
+        <div className="border-t border-white/10 my-1" />
+        <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modo</div>
+        <button onClick={() => setResearchModeEnabled(!researchModeEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
+          <div className="flex flex-col items-start gap-0.5">
+            <div className="flex items-center gap-3">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>
+              <span>Investigación</span>
             </div>
-            {selectedModel === m.id && !locked && <svg className="w-4 h-4 text-cyan-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
-          </button>
-        );
-      })}
-      {modelAccessMessage && (
-        <p className="px-4 py-2 text-xs text-amber-300 bg-amber-900/30 rounded mt-1 mx-2">{modelAccessMessage}</p>
-      )}
-      <div className="border-t border-white/10 my-1" />
-      <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Buscar en fuentes</div>
-      <button onClick={() => setRagSearchEnabled(!ragSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en fuentes curadas por Ominis (bases de salud)">
-        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>Ominis</div>
-        <div className={`w-8 h-5 rounded-full transition-colors ${ragSearchEnabled ? "bg-cyan-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${ragSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
-      </button>
-      <button onClick={() => setPubmedSearchEnabled(!pubmedSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en PubMed (literatura científica)">
-        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>PubMed</div>
-        <div className={`w-8 h-5 rounded-full transition-colors ${pubmedSearchEnabled ? "bg-purple-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${pubmedSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
-      </button>
-      <button onClick={() => setWebSearchEnabled(!webSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en la web">
-        <div className="flex items-center gap-3"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>Web</div>
-        <div className={`w-8 h-5 rounded-full transition-colors ${webSearchEnabled ? "bg-blue-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${webSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
-      </button>
-      <button onClick={() => setOpenscholarSearchEnabled(!openscholarSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en Semantic Scholar (artículos académicos)">
-        <div className="flex items-center gap-3"><svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg><span className="min-w-0 truncate">OpenScholar</span></div>
-        <div className={`w-8 h-5 flex-shrink-0 rounded-full transition-colors ${openscholarSearchEnabled ? "bg-amber-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${openscholarSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
-      </button>
-      <div className="border-t border-white/10 my-1" />
-      <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modo</div>
-      <button onClick={() => setResearchModeEnabled(!researchModeEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
-        <div className="flex flex-col items-start gap-0.5">
-          <div className="flex items-center gap-3">
-            <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>
-            <span>Investigación</span>
+            {researchModeEnabled && (
+              <span className="text-[10px] text-gray-400 pl-7">
+                Ominis-2.0-Research
+              </span>
+            )}
+            {!researchModeEnabled && research128KAvailable && (
+              <span className="text-[10px] text-gray-500 pl-7">Al activar: Ominis-2.0-Research</span>
+            )}
           </div>
-          {researchModeEnabled && (
-            <span className="text-[10px] text-gray-400 pl-7">
-              Ominis-2.0-Research
-            </span>
-          )}
-          {!researchModeEnabled && research128KAvailable && (
-            <span className="text-[10px] text-gray-500 pl-7">Al activar: Ominis-2.0-Research</span>
-          )}
-        </div>
-        <div className={`w-8 h-5 rounded-full flex-shrink-0 transition-colors ${researchModeEnabled ? "bg-emerald-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${researchModeEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
-      </button>
-    </div>
-  );
+          <div className={`w-8 h-5 rounded-full flex-shrink-0 transition-colors ${researchModeEnabled ? "bg-emerald-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${researchModeEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+        </button>
+      </>
+    );
+    const wrapperClass = "min-w-[200px] max-h-[min(60vh,420px)] overflow-y-auto rounded-xl border border-white/10 bg-[#1a2744] py-2 shadow-xl z-[200]";
+    if (plusMenuPosition && typeof document !== "undefined") {
+      const isAbove = plusMenuPosition.openUpward === true;
+      return createPortal(
+        <div
+          ref={(el) => { menuPortalRef.current = el; }}
+          className={wrapperClass}
+          style={{
+            position: "fixed",
+            left: plusMenuPosition.left,
+            top: plusMenuPosition.top,
+            transform: isAbove ? "translateY(-100%)" : "translateY(-50%)",
+            zIndex: 200,
+          }}
+        >
+          {menuContent}
+        </div>,
+        document.body
+      );
+    }
+    return (
+      <div
+        className={`absolute left-0 ${wrapperClass} ${
+          plusMenuOpenDownward ? "top-full mt-2" : "bottom-full mb-2"
+        }`}
+      >
+        {menuContent}
+      </div>
+    );
+  };
 
   return (
     <section className="h-screen pt-[calc(4rem+var(--banner-height,0px)+env(safe-area-inset-top))] relative flex flex-col overflow-hidden overflow-x-hidden w-full max-w-[100vw] min-w-0">

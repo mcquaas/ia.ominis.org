@@ -146,6 +146,8 @@ class ChatDefaults(Base):
     web_search = Column(Boolean, default=True, nullable=False)
     pubmed_search = Column(Boolean, default=True, nullable=False)
     openscholar_search = Column(Boolean, default=False, nullable=False)  # Semantic Scholar (default off)
+    research_2_1 = Column(Boolean, default=False, nullable=False)  # Research 2.1: deep multi-round + section-by-section (default off)
+    default_model = Column(String(80), nullable=True)  # Default chat model id (e.g. ominis-2.0, ominis-2.0-med)
 
     updated_at = Column(
         DateTime(timezone=True),

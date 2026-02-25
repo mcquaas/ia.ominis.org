@@ -44,6 +44,7 @@ Analiza la pregunta del usuario (y el contexto si aplica) y produce este objeto 
   "exclude": {},
   "depth": "shallow" | "standard" | "deep",
   "needs_pubmed": true | false,
+  "needs_recent_info": true | false,
   "clinical_risk": "low" | "medium" | "high",
   "needs_long_context": true | false
 }
@@ -60,6 +61,7 @@ REGLAS:
 - needs_pubmed: true si la pregunta requiere literatura científica, estudios, evidencia clínica o autores.
 - clinical_risk: "low" solo si es informativa general sin implicación clínica. "medium" si menciona tratamientos, diagnósticos, riesgos de medicamentos, seguridad de fármacos, agonistas (ej. GLP-1), inhibidores o efectos adversos; "high" si pide recomendación clínica, dosificación o decisión diagnóstica/terapéutica.
 - needs_long_context: true solo si la pregunta implica ≥15 documentos, revisión narrativa, meta-análisis o análisis histórico multi-fuente extenso.
+- needs_recent_info: true si la pregunta pide información de actualidad, cambios recientes, algo ocurrido después de la fecha de corte del modelo (ej. "cambios en enero", "reforma reciente", "qué pasó este año", "últimas modificaciones", "cómo cambió la LGS recientemente"). En esos casos el sistema activará búsqueda web automáticamente para obtener información actualizada.
 
 Pregunta y contexto:
 """
@@ -100,6 +102,7 @@ def _sanitize_intent(raw: dict) -> dict:
 
     needs_pubmed = bool(raw.get("needs_pubmed", False))
     needs_long_context = bool(raw.get("needs_long_context", False))
+    needs_recent_info = bool(raw.get("needs_recent_info", False))
 
     priority_tags = raw.get("priority_tags")
     if not isinstance(priority_tags, list):
@@ -114,8 +117,9 @@ def _sanitize_intent(raw: dict) -> dict:
         "exclude": exclude,
         "depth": depth,
         "needs_pubmed": needs_pubmed,
-        "clinical_risk": clinical_risk,
         "needs_long_context": needs_long_context,
+        "needs_recent_info": needs_recent_info,
+        "clinical_risk": clinical_risk,
     }
 
 
@@ -161,9 +165,10 @@ async def run_metadata_intent_mapper(
         if raw:
             intent = _sanitize_intent(raw)
             logger.info(
-                "Intent: depth=%s needs_pubmed=%s clinical_risk=%s needs_long_context=%s",
+                "Intent: depth=%s needs_pubmed=%s needs_recent_info=%s clinical_risk=%s needs_long_context=%s",
                 intent["depth"],
                 intent["needs_pubmed"],
+                intent["needs_recent_info"],
                 intent["clinical_risk"],
                 intent["needs_long_context"],
             )
@@ -180,6 +185,7 @@ async def run_metadata_intent_mapper(
         "exclude": {},
         "depth": DEPTH_STANDARD,
         "needs_pubmed": False,
+        "needs_recent_info": False,
         "clinical_risk": CLINICAL_RISK_LOW,
         "needs_long_context": False,
     })
@@ -293,6 +299,48 @@ def should_use_clinical_validator(intent: dict[str, Any], documents: list) -> bo
         if "tratamiento" in func or "diagnostico" in func:
             return True
     return False
+
+
+# Orchestrator route: who handles the request (Med, Research 128K, or Ominis 2.0)
+ORCHESTRATOR_ROUTE_MEDICAL = "medical"
+ORCHESTRATOR_ROUTE_RESEARCH = "research"
+ORCHESTRATOR_ROUTE_SIMPLE = "simple"
+
+
+def orchestrate_route(
+    question: str,
+    has_image: bool,
+    has_file: bool,
+    user_requested_research: bool,
+    intent: dict[str, Any] | None,
+) -> str:
+    """
+    Decide orchestrator route for Haystack: medical (Ominis Med), research (Research 128K), or simple (Ominis 2.0).
+    - research: user explicitly requested research/web search, or query implies deep investigation.
+    - medical: clinical/medical question (Med orchestrator: image relevance, tables/charts when appropriate).
+    - simple: common question, no attachments or search; answer directly with Ominis 2.0.
+    """
+    if user_requested_research:
+        return ORCHESTRATOR_ROUTE_RESEARCH
+    if not intent:
+        # No intent: default to simple (Ominis 2.0); search flags will still trigger search in query-stream
+        if has_image or has_file:
+            return ORCHESTRATOR_ROUTE_MEDICAL  # Attachments + no intent: let Med decide relevance
+        return ORCHESTRATOR_ROUTE_SIMPLE
+    clinical_risk = intent.get("clinical_risk") or CLINICAL_RISK_LOW
+    needs_long = bool(intent.get("needs_long_context"))
+    needs_pubmed = bool(intent.get("needs_pubmed"))
+    # Research path: explicit user request already handled; or query implies investigation
+    if needs_long and needs_pubmed:
+        return ORCHESTRATOR_ROUTE_RESEARCH
+    # Medical path: clinical risk → Med orchestrator (images, files, tables, charts)
+    if clinical_risk in (CLINICAL_RISK_MEDIUM, CLINICAL_RISK_HIGH):
+        return ORCHESTRATOR_ROUTE_MEDICAL
+    if has_image or has_file:
+        # Attachments present: prefer Med to decide relevance (clinical or not)
+        if needs_pubmed or "médico" in (question or "").lower() or "clínico" in (question or "").lower() or "diagnóstico" in (question or "").lower() or "tratamiento" in (question or "").lower():
+            return ORCHESTRATOR_ROUTE_MEDICAL
+    return ORCHESTRATOR_ROUTE_SIMPLE
 
 
 def decide_research_model(

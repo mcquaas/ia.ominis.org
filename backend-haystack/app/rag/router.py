@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import get_optional_user
 from app.auth.models import RoleEnum, User
 from app.database import get_db
-from app.admin.models import LLMModelConfig
+from app.admin.models import ChatDefaults, LLMModelConfig
 
 from haystack import Document
 from haystack.dataclasses import ChatMessage, StreamingChunk
@@ -384,7 +384,7 @@ def _deduplicate_and_rank(documents: list[Document], max_total: int = 10) -> lis
         source_type = d.meta.get("source_type", "rag")
         score = d.score or 0
         # 1 Ominis, 2 OpenScholar, 3 PubMed, 4 Web
-        type_priority = {"rag": 0, "health_datastore": 0, "openscholar": 1, "pubmed": 2, "web": 3, "webpage": 3}.get(source_type, 3)
+        type_priority = {"rag": 0, "pdf": 0, "health_datastore": 0, "openscholar": 1, "pubmed": 2, "web": 3, "webpage": 3}.get(source_type, 3)
         return (type_priority, -score)
 
     unique.sort(key=sort_key)
@@ -870,34 +870,102 @@ async def _gather_sources(
     """
     tasks = []
 
-    # RAG retrieval: top_k from orchestrator intent (depth + constraints) so filtered result has enough docs
+    # RAG retrieval: request enough candidates so specific DataStore docs (e.g. ASQ Modoris) can appear
     top_k_mult = get_rag_top_k_multiplier(intent)
-    rag_top_k = num_sources * top_k_mult
+    rag_top_k = max(num_sources * top_k_mult, 24)
+
+    logger.info("RAG search enabled: %s. Query: %s", rag_search, question[:80])
 
     if rag_search:
-        async def do_rag():
+        async def do_rag(q: str = question):
             try:
                 text_embedder = manager.get_text_embedder()
                 retriever = manager.get_retriever()
-                embed_result = text_embedder.run(text=question)
+                embed_result = text_embedder.run(text=q)
                 query_embedding = embed_result["embedding"]
                 result = retriever.run(
                     query_embedding=query_embedding,
                     top_k=rag_top_k,
                 )
                 docs = result.get("documents", [])
+                logger.info("RAG: retriever.run returned %s docs (raw). Query: %s", len(docs), q[:80])
+                if docs:
+                    top_scores = [d.score for d in docs[:5]]
+                    logger.info("RAG: Top 5 scores (raw): %s", top_scores)
+
                 valid = []
                 for d in docs:
                     score = d.score or 0
-                    if d.content and d.meta.get("url") and score >= 0.5:
+                    # Lower threshold 0.5 -> 0.35 so relevant DataStore docs (e.g. ASQ Modoris) are not dropped
+                    if d.content and d.meta.get("url") and score >= 0.35:
                         d.meta["source_type"] = d.meta.get("source_type", "rag")
                         valid.append(d)
                 valid.sort(key=lambda d: d.score or 0, reverse=True)
-                return valid[: num_sources * 2]  # keep more for post-filter
+                out = valid[: num_sources * 2]
+                if docs and not out:
+                    logger.warning(
+                        "RAG: all %s docs filtered (score < 0.35 or missing url). Top score: %s. Query: %s",
+                        len(docs), (docs[0].score if docs else None), q[:80],
+                    )
+                return out
             except Exception as e:
                 logger.error(f"RAG retrieval error: {e}", exc_info=True)
                 return []
+
         tasks.append(do_rag())
+
+        # Keyword search: find docs by exact terms (acronyms, proper nouns) that vector search misses
+        async def do_rag_keyword():
+            try:
+                from app.rag.document_store import _build_pgvector_conn_str
+                import psycopg2
+                conn_str = _build_pgvector_conn_str()
+                conn = psycopg2.connect(conn_str)
+                cur = conn.cursor()
+                stop_words = {"qué", "que", "cómo", "como", "cuál", "cual", "por", "para", "con", "sin", "los", "las", "del", "una", "uno", "este", "esta", "ese", "esa", "son", "está", "hay", "más", "muy", "todo", "sobre", "entre"}
+                words = [w.strip("¿?¡!.,;:()\"'") for w in question.split() if len(w.strip("¿?¡!.,;:()\"'")) >= 3 and w.strip("¿?¡!.,;:()\"'").lower() not in stop_words]
+                if not words:
+                    conn.close()
+                    return []
+                # Strategy: find source_ids from rag_sources by title/URL match, then fetch their chunks
+                src_conditions = []
+                src_params = []
+                for w in words[:4]:
+                    src_conditions.append("(title ILIKE %s OR source_url ILIKE %s)")
+                    src_params.extend([f"%{w}%", f"%{w}%"])
+                cur.execute(
+                    f"SELECT id FROM rag_sources WHERE ({' OR '.join(src_conditions)}) AND status = 'active' LIMIT 10",
+                    src_params,
+                )
+                source_ids = [r[0] for r in cur.fetchall()]
+                if not source_ids:
+                    conn.close()
+                    logger.info("RAG keyword: no rag_sources match words %s", words[:4])
+                    return []
+                # Fetch chunks for these sources (fast: indexed by meta->source_id)
+                placeholders = ",".join(["%s"] * len(source_ids))
+                cur.execute(
+                    f'SELECT id, content, meta FROM "public"."haystack_documents" WHERE (meta->>%s) IN ({placeholders}) LIMIT %s',
+                    ["source_id"] + [str(s) for s in source_ids] + [rag_top_k],
+                )
+                rows = cur.fetchall()
+                conn.close()
+                logger.info("RAG keyword: %s chunks from %s sources for words %s", len(rows), len(source_ids), words[:4])
+                from haystack import Document as HDoc
+                import json as _json
+                kw_docs = []
+                for row in rows:
+                    doc_id, content, meta_raw = row
+                    meta = meta_raw if isinstance(meta_raw, dict) else (_json.loads(meta_raw) if isinstance(meta_raw, str) else {})
+                    if content and meta.get("url"):
+                        meta["source_type"] = meta.get("source_type", "rag")
+                        kw_docs.append(HDoc(id=doc_id, content=content, meta=meta, score=0.8))
+                return kw_docs[:num_sources * 2]
+            except Exception as e:
+                logger.warning("RAG keyword search error: %s", e)
+                return []
+
+        tasks.append(do_rag_keyword())
 
     # Web search (Haystack WebSearchComponent)
     if web_search:
@@ -957,9 +1025,13 @@ async def _gather_sources(
                 return []
         tasks.append(do_health_datastore())
 
-    # Also search with refined queries if provided
+    # Also search with refined queries if provided (more phrasings -> better chance to hit DataStore docs like ASQ Modoris)
     if refined_queries:
         for rq in refined_queries:
+            if rag_search:
+                async def do_rag_refined(q=rq):
+                    return await do_rag(q)
+                tasks.append(do_rag_refined())
             if web_search:
                 async def do_web_refined(q=rq):
                     try:
@@ -1296,6 +1368,8 @@ async def health_datastore_recent_activity(limit: int = 20):
         return {"items": items}
     except Exception as e:
         return {"items": [], "error": str(e)}
+
+@router.get("/models")
 async def list_models(
     user: User | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
@@ -1316,7 +1390,18 @@ async def list_models(
         mid = m["id"]
         allowed, reason = _model_access(user, mid, researcher_allowed)
         result_models.append({**m, "allowed": allowed, **({"reason": reason} if reason else {})})
-    return {"models": result_models, "default": DEFAULT_MODEL_ID}
+
+    # Default model: from chat_defaults if set and present in list, else DEFAULT_MODEL_ID
+    default_id = DEFAULT_MODEL_ID
+    try:
+        row = (await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))).scalar_one_or_none()
+        if row and getattr(row, "default_model", None):
+            candidate = (row.default_model or "").strip()
+            if candidate and any(x["id"] == candidate for x in result_models):
+                default_id = candidate
+    except Exception:
+        pass
+    return {"models": result_models, "default": default_id}
 
 
 # --- Streaming endpoint ---
@@ -1345,9 +1430,9 @@ async def query_stream(
             "message": "Conectando...",
             "model": default_public_id,
         })
-        # Orchestrator: intent and route (was blocking the response before)
+        # Orchestrator: intent and route (run intent whenever we have a question so we can auto-enable web for recency)
         intent = None
-        if body.rag_search or body.web_search or body.pubmed_search or body.openscholar_search or body.image or (body.file_context or "").strip():
+        if (body.question or "").strip():
             try:
                 intent = await asyncio.wait_for(
                     run_metadata_intent_mapper(
@@ -1363,6 +1448,11 @@ async def query_stream(
         has_file = bool((body.file_context or "").strip())
         route = orchestrate_route(body.question, has_image, has_file, body.research_mode, intent)
         logger.info("Orchestrator route: %s (research_mode=%s, clinical_risk=%s)", route, body.research_mode, (intent or {}).get("clinical_risk"))
+
+        # Auto-enable web search when the user asks about current events (after model cutoff)
+        if intent and intent.get("needs_recent_info") and not body.web_search:
+            body.web_search = True
+            logger.info("Auto-enabled web search: needs_recent_info=true for question about current events")
 
         if route == ORCHESTRATOR_ROUTE_RESEARCH and _research_128k_available() and _model_access(user, ACADEMIC_MODEL_ID_128K, researcher_allowed)[0]:
             research_body = ResearchRequest(
@@ -1535,7 +1625,7 @@ async def _chat_event_generator(
                     logger.info("RAG filtered by intent: %s -> %s docs (constraints=%s)", before, len(filtered_rag), list((k, v) for k, v in (intent.get("retrieval_constraints") or {}).items() if v))
                 raw_documents = filtered_rag + other_docs
 
-            documents = _deduplicate_and_rank(raw_documents, max_total=8)
+            documents = _deduplicate_and_rank(raw_documents, max_total=24)
 
             all_sources_list = []
             for i, doc in enumerate(documents):

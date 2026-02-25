@@ -39,6 +39,20 @@ rsync -avz --progress \
     "$BACKEND_DIR/" \
     "$SSH_USER@$BACKEND_IP:$REMOTE_DIR/"
 
+echo "Syncing nightly health datastore pipeline..."
+PIPELINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/pipeline"
+if [ -d "$PIPELINE_DIR" ]; then
+  rsync -avz --progress \
+      --exclude '__pycache__' \
+      --exclude '*.pyc' \
+      --exclude 'faiss_out' \
+      --exclude 'logs' \
+      -e "ssh -o StrictHostKeyChecking=no -i $KEY_FILE" \
+      "$PIPELINE_DIR/" \
+      "$SSH_USER@$BACKEND_IP:$REMOTE_DIR/pipeline/"
+  echo "  ✓ Pipeline synced"
+fi
+
 echo "  ✓ Code synced"
 
 echo ""
@@ -48,6 +62,7 @@ cd /opt/ominis-backend
 source venv/bin/activate
 pip install -r requirements.txt -q 2>/dev/null || true
 alembic upgrade head
+if [ -f pipeline/requirements.txt ]; then pip install -r pipeline/requirements.txt; fi
 sudo systemctl restart ominis-backend
 sleep 2
 sudo systemctl status ominis-backend --no-pager

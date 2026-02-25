@@ -190,8 +190,16 @@ app.include_router(sinba_router, prefix="/v1")
 @app.get("/v1/health", tags=["system"])
 async def health_check():
     """Public health check endpoint."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(get_settings().database_url)
+        host = (parsed.hostname or "") if parsed else ""
+        database = "rds" if host and "rds.amazonaws.com" in host else "local"
+    except Exception:
+        database = "unknown"
     return {
         "status": "healthy",
         "service": "ominis-agent",
         "version": "2.0.0",
+        "database": database,
     }

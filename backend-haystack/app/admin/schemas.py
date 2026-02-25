@@ -78,6 +78,19 @@ class FileUploadResponse(BaseModel):
     status: str
 
 
+# --- Batch URLs (multiple URLs + optional crawl) ---
+
+class UrlsBatchRequest(BaseModel):
+    urls: list[str]
+    crawl: bool = False
+    category: Optional[str] = None
+
+
+class UrlsBatchResponse(BaseModel):
+    queued: int
+    message: str
+
+
 # --- Scrape schemas ---
 
 class ScrapeUrlRequest(BaseModel):

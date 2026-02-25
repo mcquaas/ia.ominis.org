@@ -1,0 +1,59 @@
+# Ominis LibreChat: build client from frontend-librechat source, then overlay on official API image.
+# Build context must be repo root so that frontend-librechat and infrastructure/librechat-ominis-build exist.
+# Build: docker build -f infrastructure/librechat-ominis-build/Dockerfile.from-source .
+#
+# Optional build arg (default 6144): NODE_MAX_OLD_SPACE_SIZE for frontend build (avoid OOM).
+ARG NODE_MAX_OLD_SPACE_SIZE=6144
+
+# ---- Stage 1: build client from source ----
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy full LibreChat monorepo (needed for workspaces and npm run frontend)
+COPY frontend-librechat/package.json frontend-librechat/package-lock.json ./
+COPY frontend-librechat/api/package.json ./api/
+COPY frontend-librechat/client/package.json ./client/
+COPY frontend-librechat/packages/data-provider/package.json ./packages/data-provider/
+COPY frontend-librechat/packages/data-schemas/package.json ./packages/data-schemas/
+COPY frontend-librechat/packages/api/package.json ./packages/api/
+COPY frontend-librechat/packages/client/package.json ./packages/client/
+
+RUN npm config set fetch-retry-maxtimeout 600000 && \
+    npm config set fetch-retries 5 && \
+    npm ci --no-audit
+
+COPY frontend-librechat/ .
+
+RUN NODE_OPTIONS="--max-old-space-size=${NODE_MAX_OLD_SPACE_SIZE}" npm run frontend
+
+# ---- Stage 2: official image + our client + overrides ----
+FROM ghcr.io/danny-avila/librechat:latest
+
+# Replace client dist with our built frontend
+COPY --from=builder /app/client/dist /app/client/dist
+
+# Overrides (CSS, logo, footer script)
+COPY infrastructure/librechat-ominis-build/overrides/ominis-overrides.css /app/client/dist/ominis-overrides.css
+COPY infrastructure/librechat-ominis-build/overrides/ominis-footer.js /app/client/dist/ominis-footer.js
+COPY infrastructure/librechat-ominis-build/overrides/logo.svg /app/client/dist/logo.svg
+COPY infrastructure/librechat-ominis-build/overrides/background-light.png /app/client/dist/background-light.png
+RUN mkdir -p /app/client/dist/images && cp /app/client/dist/logo.svg /app/client/dist/images/logo.svg
+
+# Meta description, favicon, inject overrides in index.html
+RUN set -e; \
+  F="/app/client/dist/index.html"; \
+  if [ -f "$F" ]; then \
+    sed -i 's|LibreChat - An open source chat application with support for multiple AI models|Asistente de IA para investigadores en salud. Accede a fuentes de datos, estudios y documentación sobre el sistema de salud en México.|g' "$F"; \
+    if grep -q '</head>' "$F"; then \
+      sed -i 's|</head>|<link rel="icon" href="/logo.svg" type="image/svg+xml"></head>|' "$F"; \
+    fi; \
+    if grep -q '</body>' "$F"; then \
+      sed -i 's|</body>|<link rel="stylesheet" href="/ominis-overrides.css"><script src="/ominis-footer.js"></script></body>|' "$F"; \
+    else \
+      sed -i 's|</head>|<link rel="stylesheet" href="/ominis-overrides.css"><script src="/ominis-footer.js"></script></head>|' "$F"; \
+    fi; \
+  fi
+
+# Same entrypoint as official image (npm run backend)
+# USER unchanged

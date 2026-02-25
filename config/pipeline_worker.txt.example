@@ -1,0 +1,6 @@
+# Pipeline worker (ingestion only). Copy to pipeline_worker.txt and set values.
+# Worker runs the nightly pipeline so the API server is not saturated.
+#
+# PIPELINE_WORKER_IP=           # Worker EC2 public IP (e.g. after launching in same region/VPC as RDS)
+# PIPELINE_WORKER_USER=ubuntu
+# PIPELINE_WORKER_KEY_FILE=    # Optional; default: config/ominis-ollama-key.pem

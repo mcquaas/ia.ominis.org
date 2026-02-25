@@ -1,5 +1,5 @@
 """
-EC2 start/stop and status for research GPU instances (OpenScholar 8K and 128K).
+EC2 start/stop and status for research GPU instances (Ominis 2.0 Research 8K and 128K).
 Used by admin dashboard and by RAG router to choose which research endpoint to use.
 """
 
@@ -25,10 +25,10 @@ INSTANCE_SPECS: dict[str, dict[str, int]] = {
     "p3.2xlarge": {"vram_gb": 16, "ram_gb": 61},
 }
 
-# Model base and description per research key
+# Model display name and description per research key (user-facing: Ominis branding only)
 RESEARCH_MODEL_INFO: dict[str, tuple[str, str]] = {
-    "openscholar": ("OpenScholar 8K", "vLLM, contexto 8K"),
-    "openscholar_128k": ("OpenScholar 128K", "vLLM, contexto 128K (se apaga a los 60 min)"),
+    "openscholar": ("Ominis 2.0 Research 8K", "vLLM, contexto 8K"),
+    "openscholar_128k": ("Ominis 2.0 Research 128K", "vLLM, contexto 128K (se apaga a los 60 min)"),
 }
 
 # When 128k instance was started (unix timestamp); stop it after auto_stop_minutes

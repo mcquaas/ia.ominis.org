@@ -24,6 +24,7 @@ ENV/
 *.pem
 *credentials*
 *secret*
+config/rds.txt
 
 # Build
 dist/
@@ -47,3 +48,9 @@ lambda/**/package/
 # Local data
 data/
 *.faiss
+
+# Lambda / pipeline output
+.lambda_*.json
+
+# Local pipeline config (use config/pipeline_worker.txt.example)
+config/pipeline_worker.txt

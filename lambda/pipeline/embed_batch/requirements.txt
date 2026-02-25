@@ -1,0 +1,7 @@
+# Embed-batch Lambda: use a container image (sentence-transformers + torch are too large for zip).
+# Dockerfile example: FROM public.ecr.aws/lambda/python:3.12
+# RUN pip install sentence-transformers boto3
+# COPY embed_batch/handler.py ${LAMBDA_TASK_ROOT}/
+# CMD ["handler.handler"]
+sentence-transformers>=2.3.0
+boto3>=1.34.0

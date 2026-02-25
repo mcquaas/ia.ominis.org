@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { getSiteConfig } from "@/services/auth";
@@ -15,6 +15,7 @@ export default function Header() {
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const profileButtonRef = useRef<HTMLButtonElement>(null);
+  const bannerRef = useRef<HTMLDivElement>(null);
   const { user, isAuthenticated, isAdmin, isDeveloper, logout, loading } = useAuth();
 
   useEffect(() => {
@@ -23,9 +24,32 @@ export default function Header() {
     window.addEventListener('focus', load);
     return () => window.removeEventListener('focus', load);
   }, []);
-  useEffect(() => {
-    document.documentElement.style.setProperty('--banner-height', bannerMessage ? '2.5rem' : '0px');
+
+  // Sync --banner-height with actual banner height so content shifts down and title isn't cut off. useLayoutEffect runs before paint.
+  useLayoutEffect(() => {
+    if (!bannerMessage) {
+      document.documentElement.style.setProperty('--banner-height', '0px');
+      return () => { document.documentElement.style.removeProperty('--banner-height'); };
+    }
+    const el = bannerRef.current;
+    if (el) {
+      const h = el.offsetHeight;
+      document.documentElement.style.setProperty('--banner-height', `${h}px`);
+    } else {
+      document.documentElement.style.setProperty('--banner-height', '2.5rem');
+    }
     return () => { document.documentElement.style.removeProperty('--banner-height'); };
+  }, [bannerMessage]);
+
+  // Update --banner-height when banner content might change height (e.g. wrap)
+  useEffect(() => {
+    if (!bannerMessage || !bannerRef.current) return;
+    const el = bannerRef.current;
+    const ro = new ResizeObserver(() => {
+      document.documentElement.style.setProperty('--banner-height', `${el.offsetHeight}px`);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [bannerMessage]);
 
   const displayName = user?.full_name?.trim() || user?.username || "";
@@ -70,7 +94,7 @@ export default function Header() {
   return (
     <header className="fixed top-0 left-0 right-0 z-[9999] bg-[#0a1628]/90 backdrop-blur-sm border-b border-white/10 pt-[env(safe-area-inset-top)]">
       {bannerMessage && (
-        <div className="bg-amber-500/20 text-amber-200 border-b border-amber-500/30 px-4 sm:px-6 lg:px-8 py-2 text-center text-sm">
+        <div ref={bannerRef} className="bg-amber-500/20 text-amber-200 border-b border-amber-500/30 px-4 sm:px-6 lg:px-8 py-2 text-center text-sm min-h-[2.5rem] flex items-center justify-center">
           {bannerMessage}
         </div>
       )}
@@ -248,7 +272,7 @@ export default function Header() {
                               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                               </svg>
-                              RAG
+                              DataStore
                             </span>
                           </Link>
                         </>
@@ -414,7 +438,7 @@ export default function Header() {
                           className="block text-gray-300 hover:text-white transition-colors"
                           onClick={() => setIsMenuOpen(false)}
                         >
-                          RAG
+                          DataStore
                         </Link>
                       </>
                     )}

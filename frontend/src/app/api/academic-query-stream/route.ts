@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300; // research can take longer (ominis-2.0 deep research)
+export const maxDuration = 900; // 15 min — Research 2.1 deep multi-round
 
 /**
  * Modo Investigación — ominis-2.0 pipeline.
@@ -36,6 +36,7 @@ export async function POST(request: NextRequest) {
         max_trusted_sources: body.max_trusted_sources || 8,
         time_budget_seconds: body.time_budget_seconds || 180,
         excluded_sources: body.excluded_sources || [],
+        research_2_1: body.research_2_1 === true,
       };
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };

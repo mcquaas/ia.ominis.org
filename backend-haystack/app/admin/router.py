@@ -10,10 +10,11 @@ import re
 import tempfile
 import time
 import uuid
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, cast
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status  # Query used for research-instances
@@ -32,6 +33,8 @@ from app.admin.schemas import (
     DatasetPreviewRequest,
     DatasetPreviewResponse,
     DatasetResourceItem,
+    UrlsBatchRequest,
+    UrlsBatchResponse,
     FileUploadResponse,
     QueryStatsOut,
     RAGSourceCreate,
@@ -76,8 +79,9 @@ settings = get_settings()
 router = APIRouter(tags=["admin"])
 
 # Allowed file extensions for upload
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".html", ".htm", ".csv", ".xlsx", ".xls", ".sav"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".html", ".htm", ".csv", ".xlsx", ".xls", ".sav", ".zip"}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+MAX_CRAWL_PAGES = 50
 
 
 # --- Helpers ---
@@ -120,6 +124,65 @@ def _safe_title(text: str, max_len: int = 250) -> str:
     if len(text) <= max_len:
         return text
     return text[:max_len].rsplit(" ", 1)[0] + "…"
+
+
+# Crawl: fetch seed URLs and same-domain links (for urls-batch with crawl=True)
+_HREF_RE = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def _html_to_text(html: str) -> str:
+    t = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<style[^>]*>.*?</style>", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:300_000]
+
+
+def _crawl_urls_sync(seed_urls: list[str], max_pages: int) -> list[dict]:
+    """Fetch seed URLs and optionally same-domain links; return list of {url, title, text}."""
+    to_fetch: set[str] = set()
+    for u in seed_urls:
+        u = (u or "").strip()
+        if not u or not u.startswith(("http://", "https://")):
+            continue
+        to_fetch.add(u)
+    results: list[dict] = []
+    fetched: set[str] = set()
+    with httpx.Client(timeout=30, follow_redirects=True) as client:
+        while to_fetch and len(results) < max_pages:
+            url = to_fetch.pop()
+            if url in fetched:
+                continue
+            fetched.add(url)
+            try:
+                r = client.get(url)
+                r.raise_for_status()
+                body = r.text
+            except Exception as e:
+                logger.warning("Crawl fetch %s: %s", url[:60], e)
+                continue
+            ct = r.headers.get("content-type", "")
+            if "text/html" not in ct:
+                continue
+            text = _html_to_text(body)
+            if len(text) < 50:
+                continue
+            title = urlparse(url).path.rstrip("/").split("/")[-1] or url[:80]
+            results.append({"url": url, "title": title, "text": text[:300_000]})
+            # Discover same-domain links
+            parsed = urlparse(url)
+            netloc = parsed.netloc.lower()
+            for m in _HREF_RE.finditer(body):
+                href = m.group(1).strip().split("#")[0].split("?")[0]
+                if not href or href.startswith(("mailto:", "tel:")):
+                    continue
+                try:
+                    full = urljoin(url, href)
+                    if urlparse(full).netloc.lower() == netloc and full not in fetched:
+                        to_fetch.add(full)
+                except Exception:
+                    pass
+    return results
 
 
 async def _extract_and_save_metadata(source_id: int, kwargs: dict):
@@ -1228,6 +1291,77 @@ async def create_rag_source(
     return {"data": _source_to_out(source)}
 
 
+@router.post("/api/rag-sources/urls-batch", response_model=UrlsBatchResponse)
+async def create_rag_sources_urls_batch(
+    body: UrlsBatchRequest,
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create multiple RAG sources from URLs. If crawl=True, follow same-domain links up to MAX_CRAWL_PAGES."""
+    urls = [u.strip() for u in (body.urls or []) if (u or "").strip().startswith(("http://", "https://"))]
+    if not urls:
+        raise HTTPException(status_code=400, detail="Provide at least one valid URL")
+    category = (body.category or "").strip()
+    if body.crawl:
+        pages = await asyncio.to_thread(_crawl_urls_sync, urls, MAX_CRAWL_PAGES)
+        for i, item in enumerate(pages):
+            title = _safe_title(item["title"])
+            slug = _slugify(title)
+            existing = await db.execute(select(RAGSource).where(RAGSource.slug == slug))
+            if existing.scalar_one_or_none():
+                slug = f"{slug}-{int(time.time())}-{i}"
+            source = RAGSource(
+                title=title,
+                slug=slug,
+                source_type="webpage",
+                source_url=item["url"],
+                content=item["text"],
+                category=category,
+                language="es",
+                status=SourceStatus.indexing,
+            )
+            db.add(source)
+            await db.flush()
+            asyncio.create_task(_run_indexing_in_background(
+                source_id=source.id,
+                method="text",
+                content=item["text"],
+                title=title,
+                url=item["url"],
+                category=category,
+                language="es",
+            ))
+        await db.commit()
+        return UrlsBatchResponse(queued=len(pages), message=f"{len(pages)} páginas en cola (crawl mismo dominio)")
+    for i, url in enumerate(urls):
+        title = _safe_title(urlparse(url).path.rstrip("/").split("/")[-1] or url[:80])
+        slug = _slugify(title)
+        existing = await db.execute(select(RAGSource).where(RAGSource.slug == slug))
+        if existing.scalar_one_or_none():
+            slug = f"{slug}-{int(time.time())}-{i}"
+        source = RAGSource(
+            title=title,
+            slug=slug,
+            source_type="webpage",
+            source_url=url,
+            category=category,
+            language="es",
+            status=SourceStatus.indexing,
+        )
+        db.add(source)
+        await db.flush()
+        asyncio.create_task(_run_indexing_in_background(
+            source_id=source.id,
+            method="url",
+            url=url,
+            title=title,
+            category=category,
+            language="es",
+        ))
+    await db.commit()
+    return UrlsBatchResponse(queued=len(urls), message=f"{len(urls)} URL(s) en cola para indexación")
+
+
 @router.post("/api/rag-sources/upload", response_model=FileUploadResponse)
 async def upload_rag_source(
     file: UploadFile = File(...),
@@ -1259,6 +1393,63 @@ async def upload_rag_source(
         raise HTTPException(status_code=400, detail="File too large (max 50MB)")
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="File is empty")
+
+    if ext == ".zip":
+        import io
+        created = 0
+        first_id = None
+        try:
+            with zipfile.ZipFile(io.BytesIO(content), "r") as zf:
+                for name in zf.namelist():
+                    if name.endswith("/") or not name.lower().endswith(".txt"):
+                        continue
+                    try:
+                        raw = zf.read(name)
+                        text = raw.decode("utf-8", errors="replace").strip()
+                    except Exception as e:
+                        logger.warning("Zip read %s: %s", name, e)
+                        continue
+                    if len(text) < 50:
+                        continue
+                    file_title = _safe_title(Path(name).stem or name[:80])
+                    slug = _slugify(file_title)
+                    existing = await db.execute(select(RAGSource).where(RAGSource.slug == slug))
+                    if existing.scalar_one_or_none():
+                        slug = f"{slug}-{int(time.time())}-{created}"
+                    source = RAGSource(
+                        title=file_title,
+                        slug=slug,
+                        source_type="txt",
+                        content=text[:500_000],
+                        category=category,
+                        language=language,
+                        status=SourceStatus.indexing,
+                    )
+                    db.add(source)
+                    await db.flush()
+                    if first_id is None:
+                        first_id = source.id
+                    asyncio.create_task(_run_indexing_in_background(
+                        source_id=source.id,
+                        method="text",
+                        content=text[:500_000],
+                        title=file_title,
+                        url="",
+                        category=category,
+                        language=language,
+                    ))
+                    created += 1
+            await db.commit()
+        except zipfile.BadZipFile as e:
+            raise HTTPException(status_code=400, detail=f"ZIP inválido: {e}")
+        if created == 0:
+            raise HTTPException(status_code=400, detail="El ZIP no contiene archivos .txt válidos")
+        return FileUploadResponse(
+            message=f"ZIP: {created} archivo(s) .txt en cola para indexación.",
+            sourceId=first_id or 0,
+            chunksCount=0,
+            status="indexing",
+        )
 
     # Create RAG source record
     title = _safe_title(title)
@@ -2002,7 +2193,7 @@ async def health_check():
 async def research_instances_status(
     _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
 ):
-    """Get EC2 status for OpenScholar (ominis-2.0-research) and 128K. Any authenticated user can see which research models are available."""
+    """Get EC2 status for Ominis 2.0 Research (8K and 128K). Any authenticated user can see which research models are available."""
     return get_research_instance_status()
 
 
@@ -2292,6 +2483,7 @@ async def get_chat_defaults(db: AsyncSession = Depends(get_db)):
             web_search=True,
             pubmed_search=True,
             openscholar_search=False,
+            research_2_1=False,
         )
         db.add(row)
         await db.commit()
@@ -2302,6 +2494,8 @@ async def get_chat_defaults(db: AsyncSession = Depends(get_db)):
         "web_search": row.web_search,
         "pubmed_search": row.pubmed_search,
         "openscholar_search": getattr(row, "openscholar_search", False),
+        "research_2_1": getattr(row, "research_2_1", False),
+        "default_model": getattr(row, "default_model", None) or "ominis-2.0",
     }
 
 
@@ -2315,7 +2509,7 @@ async def update_chat_defaults(
     result = await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))
     row = result.scalar_one_or_none()
     if row is None:
-        row = ChatDefaults(id=1, research_mode=False, rag_search=True, web_search=True, pubmed_search=True, openscholar_search=False)
+        row = ChatDefaults(id=1, research_mode=False, rag_search=True, web_search=True, pubmed_search=True, openscholar_search=False, research_2_1=False)
         db.add(row)
         await db.flush()
     if "research_mode" in body:
@@ -2328,6 +2522,10 @@ async def update_chat_defaults(
         row.pubmed_search = bool(body["pubmed_search"])
     if "openscholar_search" in body:
         row.openscholar_search = bool(body["openscholar_search"])
+    if "research_2_1" in body:
+        row.research_2_1 = bool(body["research_2_1"])
+    if "default_model" in body:
+        row.default_model = (body["default_model"] or "").strip() or None
     await db.commit()
     await db.refresh(row)
     return {
@@ -2336,6 +2534,8 @@ async def update_chat_defaults(
         "web_search": row.web_search,
         "pubmed_search": row.pubmed_search,
         "openscholar_search": getattr(row, "openscholar_search", False),
+        "research_2_1": getattr(row, "research_2_1", False),
+        "default_model": getattr(row, "default_model", None) or "ominis-2.0",
     }
 
 

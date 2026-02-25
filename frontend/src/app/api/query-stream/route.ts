@@ -3,7 +3,7 @@ import { NextRequest } from 'next/server';
 // Force dynamic runtime for streaming
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 120; // 2 minutes max
+export const maxDuration = 900; // 15 min — Research 2.1 deep multi-round can take 10-15 min
 
 // Ominis Agent backend - Streaming endpoint
 const GPU_API = (process.env.BACKEND_URL || 'http://localhost:8000') + '/v1/query-stream';
@@ -20,20 +20,25 @@ export async function POST(request: NextRequest) {
     try {
       const body = await request.json();
 
-      // Transform request for backend API
-      const apiBody = {
+      // Transform request for backend API (orchestrator uses research_mode to route to Research 128K)
+      const apiBody: Record<string, unknown> = {
         question: body.question,
         history: body.history,
         image: body.images && body.images.length > 0 ? body.images[0] : undefined,
         model: body.model || undefined,
+        research_mode: body.research_mode === true,
         rag_search: body.rag_search !== false,
         web_search: body.web_search !== false,
         pubmed_search: body.pubmed_search !== false,
         openscholar_search: body.openscholar_search === true,
         file_context: body.file_context || undefined,
       };
+      if (body.research_mode) {
+        apiBody.research_2_1 = body.research_2_1 === true;
+        if (Array.isArray(body.excluded_sources)) apiBody.excluded_sources = body.excluded_sources;
+      }
 
-      console.log('[query-stream] Request:', apiBody.question?.slice(0, 50), 'model:', apiBody.model || 'default');
+      console.log('[query-stream] Request:', typeof apiBody.question === 'string' ? apiBody.question.slice(0, 50) : '', 'model:', apiBody.model || 'default');
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 130_000); // 130s, slightly above backend 120s

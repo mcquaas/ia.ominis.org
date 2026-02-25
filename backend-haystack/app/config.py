@@ -265,6 +265,19 @@ class Settings(BaseSettings):
     # Open Scholar (Semantic Scholar) — academic paper search as a source option (default off)
     semantic_scholar_api_key: str = ""  # Set in .env for higher rate limits; optional for low-volume use
 
+    # Health datastore (nightly Mexican health pipeline: FAISS + OpenSearch)
+    health_datastore_enabled: bool = True
+    health_faiss_s3_bucket: str = ""  # e.g. omnis-health-embeddings-mx
+    health_faiss_s3_prefix: str = "health-datastore/faiss"
+    health_faiss_path: str = ""  # Optional: local path to index (overrides S3 if set)
+    health_embedding_dim: int = 384  # Must match pipeline HEALTH_EMBEDDING_DIM
+    health_boost_country_mexico: float = 0.15
+    health_boost_year_recent: float = 0.10
+    health_boost_nom_gpc: float = 0.12
+    opensearch_url: str = ""  # e.g. https://xxx.us-east-1.es.amazonaws.com
+    opensearch_index: str = "health-chunks"
+    opensearch_auth: str = ""  # optional user:pass
+
     # LiveAvatar (HeyGen) — for /live page. FULL mode uses HeyGen LLM; CUSTOM mode uses Pipecat + Ominis Med
     heygen_live_avatar_api_key: str = ""  # From app.liveavatar.com. Required for HeyGen FULL mode.
     heygen_live_avatar_avatar_id: str = "bf00036b-558a-44b5-b2ff-1e3cec0f4ceb"  # Marianne Sitting

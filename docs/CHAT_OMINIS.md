@@ -1,12 +1,14 @@
-# Chat.Ominis.org — Ominis-styled chat (Haystack backend)
+# Chat.Ominis.org — Same backend as ia.ominis.org
 
-Chat at **chat.ominis.org** runs a LibreChat-based UI with Ominis branding and the same Haystack backend as ia.ominis.org.
+Chat at **chat.ominis.org** uses the **same backend as ia.ominis.org**: **api.ominis.org** (Haystack). Only the UI is different (LibreChat instead of Next.js). Auth and all completions/RAG go to api.ominis.org.
 
 ## Architecture
 
-- **Frontend:** LibreChat (Docker) on a dedicated EC2 (t3.small), branded as “Ominis” (no LibreChat references).
-- **Backend:** Existing Haystack API at **api.ominis.org**.
-- **API:** LibreChat calls the OpenAI-compatible endpoint `POST /v1/chat/completions` on the Haystack backend; users authenticate with an **API key** (same as ia.ominis.org profile API keys).
+- **Frontend:** LibreChat (Docker) on a dedicated EC2 (t3.small), branded as “Ominis”.
+- **Backend (same as ia.ominis.org):** Haystack API at **api.ominis.org**:
+  - **Auth:** OIDC so users log in with the same account as ia.ominis.org (no separate LibreChat registration).
+  - **Completions/RAG:** `POST /v1/chat/completions` — same models, same RAG, same API keys.
+- **On the chat server:** Only LibreChat API + MongoDB run locally to serve the UI and store **conversation history** (list of chats, messages). All “brain” and user identity live on api.ominis.org.
 
 ## Deploy
 
@@ -42,6 +44,8 @@ Ensure the Haystack backend allows requests from chat.ominis.org:
   - `APP_TITLE=Ominis`
   - `DOMAIN_SERVER=https://chat.ominis.org`
   - `MONGO_URI=mongodb://mongodb:27017/Ominis`
+  - **OIDC** (recommended): same login as ia.ominis.org — see [LIBRECHAT_OIDC.md](LIBRECHAT_OIDC.md). Set `OPENID_CLIENT_SECRET` (same as backend `OIDC_LIBRECHAT_CLIENT_SECRET`), `ALLOW_REGISTRATION=false`, `ALLOW_EMAIL_LOGIN=false`.
+  - **API key for completions:** `OMINIS_API_KEY=...` (create at ia.ominis.org → Profile → API keys). The LibreChat UI uses this to call api.ominis.org; same backend as ia.ominis.org.
 
 ### 4. Sync and run LibreChat
 
@@ -63,22 +67,42 @@ This syncs the contents of `infrastructure/librechat-chat/` to the EC2, starts D
 
 ## Custom Ominis image (theme and logo)
 
-To apply the Ominis palette and logo (and allow further customizations):
+Two ways to build the custom image:
 
-1. **Build the image on the chat server** (one-time or after theme changes):
+### A) Overlay-only (CSS/logo on official image)
+
+Fast; no compilation. Use after changing only overrides (CSS, logo, footer script).
+
+1. **Build on chat server:**
    ```bash
    ./infrastructure/28-build-chat-image.sh
    ```
-   This syncs `infrastructure/librechat-ominis-build/` to the EC2 and runs `docker build -t librechat-ominis:latest`.
+   Syncs `infrastructure/librechat-ominis-build/` and runs `docker build -t librechat-ominis:latest` (overlay Dockerfile).
 
-2. **Use the custom image:** In `infrastructure/librechat-chat/.env` add:
+2. **Use the image:** In `infrastructure/librechat-chat/.env` set `CHAT_IMAGE=librechat-ominis:latest`.
+
+3. **Deploy:** `./infrastructure/26-sync-chat-librechat.sh`.
+
+### B) From-source (your compiled client)
+
+Use when you change code or strings in `frontend-librechat/`. Builds the client from source and overlays it on the official API image.
+
+1. **Ensure submodule:** `git submodule update --init --recursive` (so `frontend-librechat/` exists).
+
+2. **Build on chat server** (syncs frontend-librechat + overrides, runs Docker build; ~10–15 min):
    ```bash
-   CHAT_IMAGE=librechat-ominis:latest
+   ./infrastructure/28b-build-chat-image-from-source.sh
    ```
+   Or **build locally** (for testing): from repo root,  
+   `./infrastructure/librechat-ominis-build/build-from-source-local.sh`  
+   then push the image to your registry if you deploy from there.
 
-3. **Deploy:** Run `./infrastructure/26-sync-chat-librechat.sh` as usual. The sync script skips `docker compose pull` when `CHAT_IMAGE=librechat-ominis` is set.
+3. **Use the image:** In `infrastructure/librechat-chat/.env` set `CHAT_IMAGE=librechat-ominis:latest`.
 
-- **Build context:** `infrastructure/librechat-ominis-build/` — `Dockerfile` (FROM official LibreChat, injects CSS and logo into `client/dist`), `overrides/ominis-overrides.css`, `overrides/logo.svg`. Edit these and re-run 28 then 26 to update the live site.
+4. **Deploy:** `./infrastructure/26-sync-chat-librechat.sh`.
+
+- **Overlay build context:** `infrastructure/librechat-ominis-build/` — `Dockerfile` (overlay), `overrides/`. See [FRONTEND_LIBRECHAT.md](FRONTEND_LIBRECHAT.md).
+- **From-source:** `Dockerfile.from-source` (build context = repo root; see same doc).
 
 ## Look and feel (Ominis)
 
@@ -89,18 +113,20 @@ To apply the Ominis palette and logo (and allow further customizations):
 
 ## Usage
 
-- Users open **https://chat.ominis.org** and register or log in (or use existing auth if configured).
-- To use the Haystack backend, they must set an **API key** in the LibreChat UI : set **OMINIS_API_KEY** in `.env` (create key at ia.ominis.org → Profile → API keys), then run `./infrastructure/26-sync-chat-librechat.sh`. Without it you get "No se encontró ninguna clave". The custom endpoint “Ominis” is configured in `librechat.yaml` with `apiKey: "${OMINIS_API_KEY}" (set OMINIS_API_KEY in .env; create key at ia.ominis.org)`.
-- Models available in the UI (from `librechat.yaml`): **ominis-2.0**, **ominis-2.0-clinic**, **ominis-2.0-power** (same as backend).
+- Users open **https://chat.ominis.org** and log in via **Ominis** (OIDC → same account as ia.ominis.org). No separate registration.
+- Completions use the **same backend** (api.ominis.org): set **OMINIS_API_KEY** in `.env` (create key at ia.ominis.org → Profile → API keys). The custom endpoint “Ominis” in `librechat.yaml` points to api.ominis.org/v1. Models: **ominis-2.0**, **ominis-2.0-med**, **ominis-2.0-research-128k** (same as ia.ominis.org).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
+| **`frontend-librechat/`** | **Full LibreChat source** (git submodule). Edit UI/API here; see [FRONTEND_LIBRECHAT.md](FRONTEND_LIBRECHAT.md). |
 | `infrastructure/25-deploy-chat-ec2.sh` | Create EC2 and write `config/chat_server.txt` |
 | `infrastructure/26-sync-chat-librechat.sh` | Sync config, start LibreChat + Nginx on EC2 |
-| `infrastructure/28-build-chat-image.sh` | Build Ominis-themed image on chat server (`librechat-ominis:latest`) |
-| `infrastructure/librechat-ominis-build/` | Dockerfile + overrides (CSS, logo) for custom image |
+| `infrastructure/28-build-chat-image.sh` | Build overlay image on chat server (CSS/logo only) |
+| `infrastructure/28b-build-chat-image-from-source.sh` | Build image from `frontend-librechat` source on chat server |
+| `infrastructure/librechat-ominis-build/build-from-source-local.sh` | Build from-source image locally (repo root) |
+| `infrastructure/librechat-ominis-build/` | Dockerfile, Dockerfile.from-source, overrides (CSS, logo) |
 | `infrastructure/librechat-chat/librechat.yaml` | Custom endpoint “Ominis” → api.ominis.org/v1 |
 | `infrastructure/librechat-chat/docker-compose.yml` | LibreChat + MongoDB (minimal) |
 | `infrastructure/librechat-chat/.env.example` | Env template (CREDS_KEY, CREDS_IV, APP_TITLE, etc.) |
@@ -108,7 +134,7 @@ To apply the Ominis palette and logo (and allow further customizations):
 
 ## Login and 403 "login_required"
 
-The backend treats a valid API key as the key’s owner (authenticated user). Requests from chat.ominis.org with `OMINIS_API_KEY` no longer get `403 login_required`. No login modal is required in LibreChat for that.
+With **OIDC**, users log in on ia.ominis.org; no LibreChat login. The backend (api.ominis.org) treats a valid API key as the key’s owner. Requests from chat.ominis.org with `OMINIS_API_KEY` do not get `403 login_required`.
 
 ## Ominis RAG and search
 

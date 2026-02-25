@@ -415,6 +415,20 @@ export async function createRagSource(data: Partial<RagSource>): Promise<{ data:
 }
 
 /**
+ * Create multiple RAG sources from URLs; optional crawl (follow same-domain links).
+ */
+export async function createRagSourcesBatch(params: {
+  urls: string[];
+  crawl?: boolean;
+  category?: string;
+}): Promise<{ queued: number; message: string }> {
+  return fetchApi('/api/rag-sources/urls-batch', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+/**
  * Update a RAG source
  */
 export async function updateRagSource(id: number, data: Partial<RagSource>): Promise<{ data: RagSource }> {
@@ -547,6 +561,17 @@ export async function getHealthDatastoreStatus(): Promise<{
   error?: string;
 }> {
   return fetchApi('/health-datastore/status');
+}
+
+/**
+ * Health datastore recent ingestion activity (last N docs with URL, source type, date).
+ */
+export async function getHealthDatastoreRecentActivity(limit = 20): Promise<{
+  items: Array<{ title: string; source_url: string; source_type: string; date_ingested: string | null }>;
+  error?: string;
+  note?: string;
+}> {
+  return fetchApi(`/health-datastore/recent-activity?limit=${limit}`);
 }
 
 /**
@@ -726,7 +751,7 @@ export async function getServerPerformance(): Promise<{
 }
 
 /**
- * Get research GPU instance status (OpenScholar 8K and 128K)
+ * Get research GPU instance status (Ominis 2.0 Research 8K and 128K)
  * Admin only.
  */
 export async function getResearchInstanceStatus(): Promise<{
@@ -880,6 +905,7 @@ export async function getChatDefaults(): Promise<{
   pubmed_search: boolean;
   openscholar_search: boolean;
   research_2_1: boolean;
+  default_model?: string;
 }> {
   return fetchApi('/api/chat-defaults');
 }
@@ -894,6 +920,7 @@ export async function updateChatDefaults(defaults: {
   pubmed_search?: boolean;
   openscholar_search?: boolean;
   research_2_1?: boolean;
+  default_model?: string;
 }): Promise<{
   research_mode: boolean;
   rag_search: boolean;
@@ -901,6 +928,7 @@ export async function updateChatDefaults(defaults: {
   pubmed_search: boolean;
   openscholar_search: boolean;
   research_2_1: boolean;
+  default_model?: string;
 }> {
   return fetchApi('/api/chat-defaults', {
     method: 'PATCH',

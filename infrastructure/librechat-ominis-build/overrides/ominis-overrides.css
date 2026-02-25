@@ -433,7 +433,7 @@ button svg,
   padding: 1rem 1.25rem !important;
 }
 
-/* Glass panels: sidebar and nav (same blur as chat bubbles) — transparent glass */
+/* Glass panels: sidebar and nav (same blur as chat bubbles) — transparent glass, no border on panels */
 #root aside,
 #root [data-testid="sidebar"],
 #root nav,
@@ -455,11 +455,11 @@ button svg,
   background: var(--primary-glass) !important;
   backdrop-filter: saturate(180%) blur(12px) !important;
   -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
-  border: 1px solid var(--border-subtle) !important;
+  border: none !important;
   color: var(--foreground) !important;
 }
 
-/* Left sidebar only: darker like header (no border on right so it blends) */
+/* Left sidebar only: darker like header, no border */
 html.dark #root > div > aside:first-of-type,
 html.dark #root [data-testid="sidebar"],
 .dark #root > div > aside:first-of-type,
@@ -468,7 +468,6 @@ html.dark #root [data-testid="sidebar"],
   backdrop-filter: saturate(180%) blur(12px) !important;
   -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
   border: none !important;
-  border-right: 1px solid var(--border-subtle) !important;
 }
 
 /* Right panel (Constructor de Agentes): no border, semi-transparent */
@@ -481,7 +480,16 @@ html.dark #root [data-testid="sidebar"],
   box-shadow: none !important;
 }
 
-/* Chat list items and nav links: translucent glass (not solid white) */
+/* Right panel inner content wrapper (flex flex-col gap-1 px-3 py-2.5): no border */
+#root [class*="Constructor"] [class*="flex-col"][class*="gap-1"][class*="px-3"][class*="py-2.5"],
+#root [class*="constructor"] [class*="flex-col"][class*="gap-1"][class*="px-3"][class*="py-2.5"],
+#root [class*="slide-over"] [class*="flex-col"][class*="gap-1"][class*="px-3"][class*="py-2.5"],
+#root [data-testid="slide-over"] [class*="flex-col"][class*="gap-1"][class*="px-3"][class*="py-2.5"] {
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* Chat list items and nav links: translucent glass, no border (only buttons/inputs/textareas use --border-subtle) */
 #root aside a,
 #root aside [class*="chat"] > div,
 #root aside [class*="conversation"] > a,
@@ -502,7 +510,7 @@ html.dark #root [data-testid="sidebar"],
   background: var(--glass-bg) !important;
   backdrop-filter: saturate(180%) blur(12px) !important;
   -webkit-backdrop-filter: saturate(180%) blur(12px) !important;
-  border-color: var(--border-subtle) !important;
+  border: none !important;
   color: var(--foreground) !important;
 }
 

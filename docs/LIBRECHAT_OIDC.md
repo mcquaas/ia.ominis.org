@@ -1,6 +1,6 @@
-# LibreChat + OIDC (single login with ia.ominis.org)
+# LibreChat + OIDC — Same backend as ia.ominis.org
 
-Registration and login happen only on **ia.ominis.org**. **chat.ominis.org** (LibreChat) uses OpenID Connect so users sign in with the same account.
+**Auth** for chat.ominis.org uses the same backend as ia.ominis.org: **api.ominis.org**. Registration and login happen only on **ia.ominis.org**; **chat.ominis.org** (LibreChat) uses OpenID Connect so users sign in with the same account.
 
 ## Flow
 

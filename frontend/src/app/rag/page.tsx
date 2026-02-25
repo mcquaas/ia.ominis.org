@@ -11,6 +11,7 @@ import {
   getSourceChunks,
   uploadRagFile,
   createRagSource,
+  createRagSourcesBatch,
   deleteRagSource,
   reindexSource,
   classifySource,
@@ -137,6 +138,7 @@ export default function RagPage() {
   const [uploadTitle, setUploadTitle] = useState('');
   const [uploadCategory, setUploadCategory] = useState('');
   const [uploadUrl, setUploadUrl] = useState('');
+  const [uploadFollowLinks, setUploadFollowLinks] = useState(false);
   const [uploadText, setUploadText] = useState('');
   const [uploadMode, setUploadMode] = useState<'file' | 'text' | 'url' | 'scrape' | 'dataset' | 'tainacan'>('file');
   const [uploading, setUploading] = useState(false);
@@ -328,9 +330,28 @@ export default function RagPage() {
         await createRagSource({ title, content: uploadText, category: uploadCategory, sourceType: 'text' });
         showMsg('Texto indexado correctamente');
       } else if (uploadMode === 'url' && uploadUrl.trim()) {
-        const title = uploadTitle || uploadUrl;
-        await createRagSource({ title, sourceUrl: uploadUrl, category: uploadCategory, sourceType: 'webpage' });
-        showMsg('URL enviada para indexación');
+        const urls = uploadUrl.trim().split(/\n/).map((u) => u.trim()).filter(Boolean);
+        if (urls.length === 0) {
+          showMsg('Escribe al menos una URL');
+          setUploading(false);
+          return;
+        }
+        if (urls.length > 1 || uploadFollowLinks) {
+          const res = await createRagSourcesBatch({
+            urls,
+            crawl: uploadFollowLinks,
+            category: uploadCategory,
+          });
+          showMsg(res.message || `${res.queued} fuentes en cola`);
+        } else {
+          await createRagSource({
+            title: uploadTitle || urls[0],
+            sourceUrl: urls[0],
+            category: uploadCategory,
+            sourceType: 'webpage',
+          });
+          showMsg('URL enviada para indexación');
+        }
       } else {
         showMsg('Proporciona un archivo, texto o URL');
         setUploading(false);
@@ -533,8 +554,8 @@ export default function RagPage() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-20 pb-12">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-6">
           <div>
-            <h1 className="text-2xl font-bold text-white">RAG</h1>
-            <p className="text-gray-400 text-sm mt-1">Ingestion, búsqueda y filtrado por taxonomía</p>
+            <h1 className="text-2xl font-bold text-white">DataStore</h1>
+            <p className="text-gray-400 text-sm mt-1">Ingestión, búsqueda y filtrado por taxonomía</p>
           </div>
           <div className="flex items-center gap-2">
             <Link
@@ -586,7 +607,7 @@ export default function RagPage() {
 
         {/* Ingest */}
         <div className="mb-6">
-          <Section title="Agregar Fuente RAG">
+          <Section title="Agregar fuente">
             <div className="flex gap-2 mb-4">
               {(['file', 'text', 'url', 'scrape', 'dataset', 'tainacan'] as const).map((m) => (
                 <button
@@ -887,7 +908,7 @@ export default function RagPage() {
                       <input
                         ref={fileInputRef}
                         type="file"
-                        accept=".pdf,.docx,.txt,.html,.htm,.csv,.xlsx,.xls,.sav"
+                        accept=".pdf,.docx,.txt,.html,.htm,.csv,.xlsx,.xls,.sav,.zip"
                         className="hidden"
                         onChange={(e) => {
                           const f = e.target.files?.[0];
@@ -902,7 +923,7 @@ export default function RagPage() {
                       ) : (
                         <div>
                           <p className="text-gray-400">Arrastra un archivo o haz clic</p>
-                          <p className="text-gray-500 text-xs mt-1">PDF, DOCX, TXT, HTML</p>
+                          <p className="text-gray-500 text-xs mt-1">PDF, DOCX, TXT, HTML, CSV, XLS, XLSX, SAV, ZIP</p>
                         </div>
                       )}
                     </div>
@@ -917,13 +938,24 @@ export default function RagPage() {
                     />
                   )}
                   {uploadMode === 'url' && (
-                    <input
-                      type="url"
-                      value={uploadUrl}
-                      onChange={(e) => setUploadUrl(e.target.value)}
-                      placeholder="https://..."
-                      className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
-                    />
+                    <div className="space-y-2">
+                      <textarea
+                        value={uploadUrl}
+                        onChange={(e) => setUploadUrl(e.target.value)}
+                        placeholder="Una o más URLs (una por línea)&#10;https://www.gob.mx/salud&#10;https://www.imss.gob.mx"
+                        rows={4}
+                        className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50 resize-y"
+                      />
+                      <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={uploadFollowLinks}
+                          onChange={(e) => setUploadFollowLinks(e.target.checked)}
+                          className="rounded border-gray-500 bg-white/10 text-cyan-500 focus:ring-cyan-500/30"
+                        />
+                        Seguir enlaces encontrados en estas URLs (crawl mismo dominio)
+                      </label>
+                    </div>
                   )}
                 </div>
                 <div className="space-y-3">
@@ -1053,7 +1085,7 @@ export default function RagPage() {
 
         {/* Sources table */}
         <Section
-          title={`Fuentes RAG (${totalSources})`}
+          title={`Fuentes DataStore (${totalSources})`}
           action={
             <button
               type="button"
