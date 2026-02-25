@@ -16,8 +16,8 @@ import hashlib
 logger = logging.getLogger()
 
 # Configuration - Haystack backend API
-API_URL = os.environ.get('API_URL', os.environ.get('STRAPI_URL', 'http://localhost:8000'))
-API_TIMEOUT = int(os.environ.get('API_TIMEOUT', os.environ.get('STRAPI_TIMEOUT', '5')))
+API_URL = os.environ.get('API_URL', 'http://localhost:8000')
+API_TIMEOUT = int(os.environ.get('API_TIMEOUT', '5'))
 AUTH_CACHE_TTL = int(os.environ.get('AUTH_CACHE_TTL', '300'))  # 5 minutes
 
 # In-memory cache for API key validation (reduces backend calls)
@@ -172,7 +172,7 @@ def log_query_to_backend(
         }).encode('utf-8')
         
         # Get internal API token from environment
-        internal_token = os.environ.get('API_INTERNAL_TOKEN', os.environ.get('STRAPI_API_TOKEN'))
+        internal_token = os.environ.get('API_INTERNAL_TOKEN')
         headers = {'Content-Type': 'application/json'}
         if internal_token:
             headers['Authorization'] = f'Bearer {internal_token}'

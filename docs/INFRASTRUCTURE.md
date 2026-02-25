@@ -12,7 +12,6 @@ Complete inventory of servers, services, domains, and IPs for the ia.ominis.org 
 | **ai.ominis.org** | Alternate frontend URL | 78.13.37.163 |
 | **chat.ominis.org** | Chat UI (Ominis-styled, Haystack backend) | *see Chat Server* |
 | **api.ominis.org** | API gateway (Haystack + legacy RAG) | 78.12.33.205 |
-| **admin.ominis.org** | (Legacy; admin via api.ominis.org) | — |
 | **ominis.org** | Main website / Tainacan content source | — |
 | **roclab.ominis.org** | ROC Lab | — |
 

@@ -30,18 +30,17 @@ The Ominis Health LLM is a multi-component system with:
 │                              Users                                       │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
-        ┌───────────────────────────┼───────────────────────────┐
-        ▼                           ▼                           ▼
-┌───────────────┐         ┌───────────────┐         ┌───────────────┐
-│  ai.ominis.org│         │admin.ominis.org│        │ api.ominis.org│
-│  (Frontend)   │         │ (Haystack API)│         │  (RAG API)    │
-│               │         │               │         │               │
-│  - Chat UI    │         │  - Auth       │         │  - Query      │
-│  - /modelo    │         │  - API Keys   │         │  - Sources    │
-│  - Login/Reg  │         │  - Sources    │         │  - Inference  │
-└───────────────┘         └───────────────┘         └───────────────┘
-        │                           │                           │
-        └───────────────────────────┼───────────────────────────┘
+        ┌───────────────────────────┴───────────────────────────┐
+        ▼                           ▼
+┌───────────────┐         ┌───────────────────────────────────────┐
+│  ai.ominis.org│         │ api.ominis.org (Haystack backend)       │
+│  (Frontend)   │         │  - Auth, API Keys, RAG sources          │
+│  - Chat UI    │         │  - Query, inference, health             │
+│  - /modelo    │         └───────────────────────────────────────┘
+│  - Login/Reg  │
+└───────────────┘
+        │                           │
+        └───────────────────────────┘
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     Data Layer (AWS mx-central-1)                        │
@@ -514,4 +513,4 @@ When GPU inference is used:
 ---
 
 For development guide, see [DEVELOPMENT.md](DEVELOPMENT.md).
-For API documentation, see [API_STRAPI.md](API_STRAPI.md).
+For API documentation, run the Haystack backend and open `/docs`.

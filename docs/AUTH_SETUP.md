@@ -2,7 +2,7 @@
 
 This guide covers the configuration of authentication features: email/SMS verification, password reset, and Google OAuth.
 
-**Note:** The production backend is now the Haystack API (FastAPI). The steps below were written for the legacy Strapi backend; adapt URLs and configuration to the Haystack backend (e.g. `api.ominis.org`, `NEXT_PUBLIC_API_URL`) where applicable.
+**Note:** The production backend is the Haystack API (FastAPI) at **api.ominis.org**. Use `NEXT_PUBLIC_API_URL=https://api.ominis.org` in the frontend.
 
 ## 1. Phone Field (Already Implemented)
 
@@ -23,72 +23,9 @@ ALTER TABLE up_users ADD COLUMN IF NOT EXISTS "emailVerified" BOOLEAN DEFAULT fa
 
 ---
 
-## 2. Email Service (Strapi)
+## 2. Email Service
 
-Strapi uses providers for sending emails. Configure in the admin panel or via environment variables.
-
-### Option A: Nodemailer (SMTP)
-
-1. Install the provider:
-   ```bash
-   cd backend && npm install @strapi/provider-email-nodemailer
-   ```
-
-2. Configure in `config/plugins.js`:
-   ```javascript
-   module.exports = ({ env }) => ({
-     // ... existing config
-     email: {
-       config: {
-         provider: 'nodemailer',
-         providerOptions: {
-           host: env('SMTP_HOST', 'smtp.example.com'),
-           port: env.int('SMTP_PORT', 587),
-           auth: {
-             user: env('SMTP_USER'),
-             pass: env('SMTP_PASS'),
-           },
-           secure: env.bool('SMTP_SECURE', false),
-         },
-         settings: {
-           defaultFrom: env('SMTP_FROM', 'noreply@ominis.org'),
-           defaultReplyTo: env('SMTP_REPLY_TO', 'support@ominis.org'),
-         },
-       },
-     },
-   });
-   ```
-
-3. Add to `.env`:
-   ```
-   SMTP_HOST=smtp.sendgrid.net
-   SMTP_PORT=587
-   SMTP_USER=apikey
-   SMTP_PASS=your-sendgrid-api-key
-   SMTP_FROM=noreply@ominis.org
-   ```
-
-### Option B: SendGrid
-
-1. Install: `npm install @strapi/provider-email-sendgrid`
-2. Configure with SendGrid API key in plugins
-3. See [Strapi SendGrid docs](https://market.strapi.io/providers/@strapi-provider-email-sendgrid)
-
-### Option C: AWS SES
-
-1. Install: `npm install @strapi/provider-email-amazon-ses`
-2. Configure with AWS credentials
-
-### Email Templates
-
-Configure in **Admin Panel → Users & Permissions → Email Templates**:
-- **Email address confirmation**: Sent when `Enable email confirmation` is ON
-- **Reset password**: Sent when user requests password reset
-
-Configure **Advanced Settings**:
-- **Reset password page**: `https://ia.ominis.org/reset-password`
-- **Enable email confirmation**: Toggle as needed
-- **Redirection url**: `https://ia.ominis.org/login` (after email confirmation)
+Email (password reset, verification) is configured in the **Haystack backend** (`backend-haystack`). Configure SMTP or your provider via the backend's environment variables and any email templates used by the auth routes. Reset password and confirmation URLs are set in backend config (e.g. redirect to `https://ia.ominis.org/reset-password`, `https://ia.ominis.org/login`).
 
 ---
 
@@ -114,7 +51,7 @@ TWILIO_PHONE_NUMBER=+1234567890
 
 ### Custom Endpoints Needed
 
-The following custom Strapi routes need to be implemented (via plugin extension):
+The following auth flows are implemented in the Haystack backend:
 
 1. **POST /api/auth/send-phone-verification** – Send SMS with verification code
 2. **POST /api/auth/verify-phone** – Verify code and set `phoneVerified: true`
@@ -140,7 +77,7 @@ await client.messages.create({
 
 ### Current Flow (Email)
 
-- **Forgot password**: User enters email → Strapi sends reset link
+- **Forgot password**: User enters email → backend sends reset link
 - **Reset password**: User clicks link → lands on `/reset-password?code=xxx` → enters new password
 
 ### Extended Flow (Email + Phone)
@@ -226,7 +163,7 @@ The login page already includes "Continuar con Google". It redirects the user to
 - [ ] Implement custom phone verification endpoints (optional)
 - [ ] Implement custom forgot-password-phone endpoint (optional)
 - [ ] Create Google Cloud project and OAuth credentials
-- [ ] Configure Google provider in Strapi admin
+- [ ] Configure Google provider in backend (api.ominis.org)
 - [ ] Set correct redirect URIs in Google Console
-- [ ] Configure reset password page URL in Strapi advanced settings
-- [ ] Enable email confirmation in Strapi if desired
+- [ ] Configure reset password page URL in backend settings
+- [ ] Enable email confirmation in backend if desired

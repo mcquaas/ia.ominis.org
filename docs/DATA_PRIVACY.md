@@ -294,6 +294,6 @@ For anonymous users:
 ---
 
 For technical details, see [ARCHITECTURE.md](ARCHITECTURE.md).
-For API documentation, see [API_STRAPI.md](API_STRAPI.md).
+For API documentation, see the Haystack backend `/docs` (e.g. https://api.ominis.org/docs).
 
 **Contact**: ominis@funsalud.org.mx

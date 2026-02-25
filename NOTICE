@@ -59,31 +59,21 @@ Backend - Python (RAG Engine):
    License: MIT License
    https://github.com/ollama/ollama
 
-Backend - Node.js (Admin Panel):
-
-9. Strapi
-   License: MIT License
-   https://github.com/strapi/strapi
-
-10. bcrypt
-    License: MIT License
-    https://github.com/kelektiv/node.bcrypt.js
-
 Frontend - Node.js:
 
-11. Next.js
+9. Next.js
     License: MIT License
     https://github.com/vercel/next.js
 
-12. React
+10. React
     License: MIT License
     https://github.com/facebook/react
 
-13. Tailwind CSS
+11. Tailwind CSS
     License: MIT License
     https://github.com/tailwindlabs/tailwindcss
 
-14. TypeScript
+12. TypeScript
     License: Apache License 2.0
     https://github.com/microsoft/TypeScript
 
@@ -138,6 +128,6 @@ of information obtained through this software.
 CONTACT
 
 Website: https://ai.ominis.org
-Admin: https://admin.ominis.org
+API / Admin: https://api.ominis.org
 Email: ominis@funsalud.org.mx
 Organization: Fundación Mexicana para la Salud A.C.

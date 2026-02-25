@@ -164,7 +164,7 @@ ia.ominis.org/
 │   ├── ARCHITECTURE.md
 │   ├── DATA_PRIVACY.md
 │   ├── MODEL.md
-│   ├── API_STRAPI.md
+│   ├── (Backend API: run backend-haystack and open /docs)
 │   └── DEVELOPMENT.md
 │
 ├── config/                      # Configuration
@@ -329,28 +329,14 @@ module.exports = async (ctx, next) => {
 };
 ```
 
-### Custom Policies
-
-```javascript
-// src/policies/is-admin.js
-module.exports = async (policyContext, config, { strapi }) => {
-  const user = policyContext.state.user;
-  return user?.role?.type === 'admin' || user?.role?.type === 'superadmin';
-};
-```
-
-### Environment Variables
+### Backend (Haystack) Environment
 
 ```env
-# backend/.env
+# backend-haystack/.env
 HOST=0.0.0.0
-PORT=1337
-APP_KEYS=generated-keys
-ADMIN_JWT_SECRET=generated-secret
-API_TOKEN_SALT=generated-salt
-JWT_SECRET=generated-secret
-DATABASE_CLIENT=sqlite
+PORT=8000
 FRONTEND_URL=http://localhost:3000
+# See backend-haystack/app/config.py and .env.example for full list
 ```
 
 ## RAG Engine Development
@@ -417,8 +403,8 @@ results = store.search(query_embedding, k=5)
 # Terminal 1: Frontend
 cd frontend && npm run dev
 
-# Terminal 2: Backend
-cd backend && npm run develop
+# Terminal 2: Backend (Haystack)
+cd backend-haystack && uvicorn app.main:app --reload --port 8000
 
 # Terminal 3: Ollama
 ollama serve
@@ -438,7 +424,7 @@ curl http://localhost:11434/api/generate -d '{
 }'
 
 # Test backend
-curl http://localhost:1337/v1/system-stats/health
+curl http://localhost:8000/v1/health
 
 # Test Frontend
 open http://localhost:3000
@@ -454,11 +440,11 @@ npm run lint
 npx tsc --noEmit
 ```
 
-### Backend
+### Backend (Haystack)
 
 ```bash
-cd backend
-npm run lint
+cd backend-haystack
+ruff check . && ruff format --check .
 ```
 
 ### RAG Engine
@@ -578,5 +564,4 @@ feat(frontend): add PubMed search toggle
 
 ---
 
-For API documentation, see [API_STRAPI.md](API_STRAPI.md).
-For architecture details, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For API documentation, run the Haystack backend and open `/docs`. For architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).

@@ -1,6 +1,6 @@
 # Ominis Health LLM
 
-A Retrieval-Augmented Generation (RAG) health Q&A system powered by **ominis-2.0**, the first Mexican LLM specialized in health.
+A Retrieval-Augmented Generation (RAG) health Q&A system powered by **ominis-2.0**, an LLM specialized in health.
 
 Released by [Fundación Mexicana para la Salud A.C.](https://funsalud.org.mx/) through [ai.ominis.org](https://ai.ominis.org)
 
@@ -10,8 +10,13 @@ Released by [Fundación Mexicana para la Salud A.C.](https://funsalud.org.mx/) t
 - [Key Features](#key-features)
 - [Architecture](#architecture)
 - [Components](#components)
+- [Model equivalents](#model-equivalents)
+- [Infrastructure & LLM endpoints](#infrastructure--llm-endpoints)
 - [ominis-2.0 Model](#ominis-20-model)
 - [Technology Stack](#technology-stack)
+- [Frontends and chat.ominis.org](#frontends-and-chatominisorg-librechat)
+- [Pipeline and DataStores](#pipeline-and-datastores)
+- [Live Avatar and Lambdas](#live-avatar-and-lambdas)
 - [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [Data Privacy & Residency](#data-privacy--residency)
@@ -98,7 +103,7 @@ For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITE
 
 Modern web interface with:
 - Chat interface with multi-source search (RAG, Web, PubMed)
-- **Multi-model selection**: ominis-2.0 (BioMistral) and falcon-40b-instruct
+- **Multi-model selection**: Ominis 2.0, Ominis 2.0 Med, Modo Investigación (OpenScholar), optional Power/Open
 - Model information page (`/modelo`)
 - User authentication (login, register, forgot password)
 - User profile management
@@ -123,15 +128,86 @@ Python-based API server with:
 - **Vector Store**: PostgreSQL with pgvector / FAISS
 - **Query**: Multiple LLM options for response generation
 
-### Infrastructure
+### Model equivalents
 
-- **Data Storage**: AWS S3 in Mexico (mx-central-1)
-- **Haystack Backend**: EC2 t3.large in Mexico
-- **GPU Inference**: 
-  - EC2 g4dn.xlarge (T4) for ominis-2.0
-  - EC2 g5.2xlarge (A10G) for falcon-40b-instruct
-- **CDN**: CloudFront for global delivery
-- **Monitoring**: Status watchdog for health checks
+| Chat option | Backend model_id | Underlying model | Notes |
+|-------------|------------------|------------------|--------|
+| **Ominis 2.0** | `ominis-2.0` | **Qwen 2.5 14B** (Ollama) | General health Q&A. Default `OLLAMA_MODEL=qwen2.5:14b`. |
+| **Ominis 2.0 Med** | `ominis-2.0-med` | **Med42-v2** (M42 Health, via Ollama) | Clinical/medical focus. `OLLAMA_MED_MODEL=med42` (or med42-v2-8b). |
+| **Ominis 2.0 Research** (Modo investigación 8K) | `ominis-2.0-research` | **OpenScholar** (Llama-3.1_OpenScholar-8B, vLLM) | Academic synthesis, 8K context. |
+| **Ominis 2.0 Research 128K** | `ominis-2.0-research-128k` | **OpenScholar 128K** (vLLM, long context) | Deep research, long reports. |
+| Ominis 2.0 Clinic | `ominis-2.0-clinic` | **BioMistral 7B** (Ollama) | Legacy medical; often same server as Ominis 2.0. |
+| Ominis 2.0 Open | `ominis-2.0-open` | e.g. **Qwen 3** / **Llama 3.3** (Ollama) | Optional; only if `OLLAMA_OPEN_MODEL` is set. |
+| Ominis 2.0 Power | (admin-only) | **gpt-oss** (vLLM, 20B) | Optional; when `POWER_API_URL` is set. |
+
+See [docs/LLM_ROUTING.md](docs/LLM_ROUTING.md) for routing and env vars.
+
+### Infrastructure & LLM endpoints
+
+The **Haystack backend** (api.ominis.org) calls LLM services over HTTP. Infrastructure can be **EC2** (fixed instances) or **Vast.ai** (on-demand GPUs).
+
+| Purpose | Env / config | Typical host | Protocol |
+|--------|----------------|--------------|----------|
+| **Ominis 2.0** (Qwen) | `OLLAMA_URL`, `OLLAMA_MODEL` | EC2 g4dn.xlarge (T4) or Vast | Ollama `:11434` |
+| **Ominis 2.0 Med** (Med42) | `OLLAMA_MED_URL`, `OLLAMA_MED_MODEL` | Same as above or **Vast.ai** | Ollama |
+| **Vision** (images) | `OLLAMA_URL`, vision model | Same Ollama server | Ollama |
+| **Modo Investigación 8K** | `OPENSCHOLAR_API_URL` | EC2 g5.2xlarge (A10G) | vLLM OpenAI-compatible `:8000` |
+| **Modo Investigación 128K** | `OPENSCHOLAR_128K_API_URL` | EC2 g5.2xlarge or **Vast.ai** | vLLM OpenAI-compatible |
+| **Ominis 2.0 Power** (optional) | `POWER_API_URL` | EC2 or **Vast.ai** vLLM | OpenAI-compatible |
+| Clinical translator (research) | `MED42_API_URL` | Optional A100 / Vast | OpenAI-compatible |
+
+- **Data & API**: Backend and RAG (PostgreSQL, S3) in **AWS mx-central-1** (Mexico). GPU inference often in **us-east-1** or **Vast.ai**.
+- **Config files**: `config/ollama_gpu_server.txt`, `config/ollama_med_server.txt`, `config/openscholar_server.txt`, `config/openscholar_128k_server.txt`. See [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) and [docs/VAST_AI_POWER.md](docs/VAST_AI_POWER.md) for Vast.ai setup.
+
+## Frontends and chat.ominis.org (LibreChat)
+
+The project has **two chat frontends**, both using the **same backend** (api.ominis.org):
+
+| Frontend | URL | Stack | Purpose |
+|----------|-----|--------|---------|
+| **Next.js** | ia.ominis.org / ai.ominis.org | `frontend/` (Next.js 16, React 19) | Main chat UI: RAG, PubMed, OpenScholar, model selector, dashboard. |
+| **LibreChat** | chat.ominis.org | `frontend-librechat/` (submodule) | Alternative chat UI (LibreChat), same models and RAG; OIDC so users share the same account as ia.ominis.org. |
+
+**Interactions:**
+
+- **Auth:** Both can use the same identity. LibreChat is configured with OIDC against api.ominis.org, so login is unified (no separate LibreChat registration).
+- **Completions:** Both send requests to **api.ominis.org** (e.g. `POST /v1/chat/completions`). Same LLMs, same RAG, same API keys.
+- **Conversation history:** Next.js frontend relies on the backend/session; LibreChat stores **conversation history** (chats, messages) in **MongoDB** on its own EC2 (chat server). The “brain” and user identity stay on api.ominis.org.
+
+**LibreChat layout:** `frontend-librechat/client/` (React/Vite UI), `frontend-librechat/api/` (Node API used by the Docker image; we proxy completions to api.ominis.org). Build and overrides: `infrastructure/librechat-ominis-build/` (CSS, logo, footer). See [docs/CHAT_OMINIS.md](docs/CHAT_OMINIS.md) and [docs/FRONTEND_LIBRECHAT.md](docs/FRONTEND_LIBRECHAT.md).
+
+## Pipeline and DataStores
+
+**Pipeline** (`pipeline/`): Ingests health content, chunks, embeds, and indexes it for retrieval.
+
+- **Ingest:** PubMed, URL lists, ZIPs, crawl (`pipeline/ingest/`). Output: raw docs → normalized docs.
+- **Chunk:** Semantic chunker (`pipeline/chunk/`).
+- **Embed:** Sentence-transformers or external service (`pipeline/embed/`).
+- **Index:** Writes to FAISS (S3), OpenSearch, and PostgreSQL (`pipeline/index/`). Can run as a **nightly job** on a worker (EC2 or CPU Vast) or be driven by **Lambdas** (see below).
+
+**DataStores (two kinds):**
+
+| Store | Purpose | Used by |
+|--------|---------|--------|
+| **Admin RAG (PostgreSQL + pgvector)** | Documents and chunks added via the backend admin (RAG sources, uploads, Tainacan). | Chat when the user turns **“Ominis / bases de datos”** on. Queried by the Haystack RAG pipeline in the backend. |
+| **Health Datastore** | Built by the **nightly pipeline**: PubMed + Mexican health URLs → FAISS (S3) + OpenSearch + PostgreSQL. | All models using `/v1/rag/query-stream` when `HEALTH_DATASTORE_ENABLED=true`; retrieval runs in parallel with admin RAG, web, PubMed. |
+
+So: **admin RAG** = curated sources via UI; **health datastore** = bulk health corpus from the pipeline. See [docs/HEALTH_DATASTORE_NIGHTLY.md](docs/HEALTH_DATASTORE_NIGHTLY.md) and [docs/RAG_AGREGAR_DOCUMENTOS.md](docs/RAG_AGREGAR_DOCUMENTOS.md).
+
+## Live Avatar and Lambdas
+
+**Live Avatar** (`liveavatar-demo/`): Real-time voice avatar using **HeyGen Live Avatar** + **Ominis 2.0 Med** (BioMistral).
+
+- **Where:** `liveavatar-demo/` — Pipecat agent that connects HeyGen to the backend proxy `POST /v1/liveavatar/chat/completions` (streaming). Deployed to **Pipecat Cloud**; frontend `/live` (ia.ominis.org) creates a session and opens the avatar.
+- **Modes:** FULL (HeyGen’s LLM) or **CUSTOM** (Pipecat + Ominis Med via api.ominis.org). Backend needs `PIPECAT_AGENT_NAME` + `PIPECAT_API_TOKEN` for CUSTOM, or `HEYGEN_LIVE_AVATAR_API_KEY` for FULL.
+- **Deploy:** `./infrastructure/23a-deploy-liveavatar-production.sh` (after changes in `liveavatar-demo/`). See [docs/LIVEAVATAR.md](docs/LIVEAVATAR.md).
+
+**Lambdas:**
+
+| Location | Purpose |
+|----------|---------|
+| **`lambda/query/`** | **Query Lambda** (optional/legacy): RAG query using Ollama + S3 embeddings; can run in AWS (e.g. mx-central-1) for serverless inference. Handlers: `handler.py` (basic), `handler_authenticated.py` (API key auth), `handler_improved.py` (enhanced prompts). |
+| **`lambda/pipeline/`** | **Pipeline Lambdas** for scalable ingest/embed: `ingest/` (trigger by source list, writes raw docs to S3), `embed_batch/` (batch embeddings for pipeline). Used when running the health pipeline on Lambda instead of a single worker. See [docs/PIPELINE_LAMBDA.md](docs/PIPELINE_LAMBDA.md). |
 
 ## ominis-2.0 Model
 
@@ -266,31 +342,46 @@ python scripts/rag/query_engine.py
 
 ```
 ia.ominis.org/
-├── backend-haystack/            # FastAPI + Haystack (auth, API keys, RAG)
-│   ├── app/                     # API routes, RAG pipeline
+├── backend-haystack/            # FastAPI + Haystack (auth, API keys, RAG, LiveAvatar proxy)
+│   ├── app/                     # API routes, RAG pipeline, health datastore retriever
 │   └── config/                  # Backend configuration
-├── frontend/                    # Next.js frontend
-│   ├── src/app/                 # Pages and API routes
+├── frontend/                    # Next.js frontend (ia.ominis.org / ai.ominis.org)
+│   ├── src/app/                 # Pages, API routes, /live (Live Avatar)
 │   ├── src/components/          # React components
 │   ├── src/hooks/               # Custom hooks (useAuth)
 │   └── src/services/            # API services
-├── infrastructure/              # AWS deployment scripts
-│   ├── 09-deploy-ollama-ec2.sh  # CPU inference (Mexico)
-│   ├── 13-deploy-gpu-ollama-us.sh # GPU inference (US)
-│   ├── 17-deploy-haystack-backend.sh # Haystack backend deployment
-│   └── status_watchdog.py       # Health monitoring
-├── lambda/query/                # Lambda handlers
-│   ├── handler.py               # Basic handler
-│   ├── handler_authenticated.py # With API key auth
-│   └── handler_improved.py      # Enhanced prompts
+├── frontend-librechat/          # LibreChat submodule (chat.ominis.org); same backend, MongoDB for history
+│   ├── client/                  # React/Vite chat UI
+│   └── api/                     # Node API (completions → api.ominis.org)
+├── pipeline/                    # Nightly health pipeline: ingest → chunk → embed → index (FAISS, OpenSearch, PG)
+│   ├── ingest/                  # PubMed, URL, ZIP, crawl connectors
+│   ├── chunk/                  # Semantic chunker
+│   ├── embed/                  # Embedder (sentence-transformers)
+│   ├── index/                  # Indexer (FAISS, OpenSearch, PostgreSQL)
+│   └── nightly_pipeline.py      # Full pipeline entrypoint
+├── lambda/
+│   ├── query/                  # Query Lambda (optional RAG via Ollama + S3)
+│   │   ├── handler.py           # Basic handler
+│   │   ├── handler_authenticated.py  # With API key auth
+│   │   └── handler_improved.py  # Enhanced prompts
+│   └── pipeline/               # Pipeline Lambdas (scalable ingest/embed)
+│       ├── ingest/             # Ingest by source (writes S3)
+│       └── embed_batch/        # Batch embedding Lambda
+├── liveavatar-demo/            # Pipecat agent: HeyGen Live Avatar + Ominis 2.0 Med (BioMistral)
+│   ├── main.py                 # Agent entry; calls api.ominis.org/v1/liveavatar/chat/completions
+│   └── pcc-deploy.toml         # Pipecat Cloud deploy config
+├── infrastructure/             # AWS/Vast deployment scripts, LibreChat build
+│   ├── librechat-chat/         # Docker Compose, .env for chat.ominis.org
+│   ├── librechat-ominis-build/ # CSS/logo overrides and from-source Dockerfile
+│   ├── 20-sync-backend.sh      # Deploy backend-haystack
+│   ├── 23a-deploy-liveavatar-production.sh  # Deploy Live Avatar to Pipecat Cloud
+│   └── ...                     # Ollama, OpenScholar, RDS, pipeline worker, etc.
 ├── scripts/
-│   ├── ingestion/               # Data ingestion
-│   │   ├── ingest_imss_guidelines.py
-│   │   ├── ingest_issste_guidelines.py
-│   │   └── ingest_mexican_health_sources.py
-│   └── rag/                     # RAG pipeline
-├── docs/                        # Documentation
-├── LICENSE                      # Apache 2.0
+│   ├── ingestion/              # Legacy/extra data ingestion (IMSS, ISSSTE, Mexican sources)
+│   └── rag/                    # Legacy RAG scripts (query_engine, etc.)
+├── docs/                       # Documentation
+├── config/                     # Server IPs, env snippets (ollama_gpu_server.txt, etc.)
+├── LICENSE                     # Apache 2.0
 └── README.md
 ```
 
@@ -326,7 +417,7 @@ curl -X POST 'https://api.ominis.org/query' \
 
 ### Admin API (Haystack backend)
 
-See [docs/API_STRAPI.md](docs/API_STRAPI.md) for backend API documentation.
+Backend API (Haystack): [api.ominis.org/docs](https://api.ominis.org/docs) when deployed, or run `backend-haystack` and open `http://localhost:8000/docs`.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -345,7 +436,7 @@ See [docs/API_STRAPI.md](docs/API_STRAPI.md) for backend API documentation.
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and components |
 | [DATA_PRIVACY.md](docs/DATA_PRIVACY.md) | Privacy policy and data handling |
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Development setup and contribution |
-| [API_STRAPI.md](docs/API_STRAPI.md) | Backend API documentation |
+| Backend API | Haystack FastAPI — see `/docs` when backend is running |
 
 ## License
 
