@@ -1,0 +1,19 @@
+{
+  "name": "search_doctor_directory_mexico",
+  "description": "Search the ingested Mexican doctor directory (Top Doctors, Doctoralia, DoctorAnytime). Uses multilingual semantic similarity by default (Oncología ≈ Oncology).",
+  "arguments": {
+    "type": "object",
+    "properties": {
+      "q": { "type": "string", "description": "Name, keywords, specialty, or location words" },
+      "specialty": { "type": "string", "description": "Filter by specialty (contains)" },
+      "city": { "type": "string", "description": "Filter by city or state (contains)" },
+      "match_mode": {
+        "type": "string",
+        "enum": ["and", "or"],
+        "description": "How to combine q, specialty, city when multiple are set"
+      },
+      "semantic": { "type": "boolean", "description": "Rank by semantic similarity (default true)" },
+      "limit": { "type": "integer", "description": "Max results (1–50)" }
+    }
+  }
+}
