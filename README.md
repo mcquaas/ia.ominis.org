@@ -55,15 +55,15 @@ Ominis Health LLM is an AI-powered health information assistant that provides ac
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                              Users                                       │
-│                    (Spanish-speaking health seekers)                     │
+│                              Users                                      │
+│                    (Spanish-speaking health seekers)                    │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         Next.js Frontend                                 │
-│                    (ai.ominis.org / Vercel / EC2)                        │
-│                                                                          │
+│                         Next.js Frontend                                │
+│                    (ia.ominis.org / Vercel / EC2)                       │
+│                                                                         │
 │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐                │
 │  │  Chat UI      │  │  /modelo      │  │  Auth Pages   │                │
 │  │  Multi-search │  │  Model Info   │  │  Login/Reg    │                │
@@ -83,11 +83,11 @@ Ominis Health LLM is an AI-powered health information assistant that provides ac
           │                                       │
           ▼                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                 Data Plane (AWS mx-central-1 - Mexico)                   │
-│                     ALL DATA STORED IN MEXICO                            │
-│                                                                          │
+│                 Data Plane (AWS mx-central-1 - Mexico)                  │
+│                     ALL DATA STORED IN MEXICO                           │
+│                                                                         │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │                     S3 Storage (Querétaro)                        │   │
+│  │                     S3 Storage (Querétaro)                       │   │
 │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐     │   │
 │  │  │  raw-data  │ │ processed  │ │ embeddings │ │   models   │     │   │
 │  │  └────────────┘ └────────────┘ └────────────┘ └────────────┘     │   │

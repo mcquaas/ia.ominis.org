@@ -25,6 +25,7 @@ ENV/
 *credentials*
 *secret*
 config/rds.txt
+config/allcan_strapi.txt
 
 # Build
 dist/
