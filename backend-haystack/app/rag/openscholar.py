@@ -7,9 +7,12 @@ See: arquitectura_ominis_integracion_open_scholar_modo_investigacion.md
 """
 
 import logging
-from typing import Optional
+import os
+from typing import Any, Optional, Union
 
 from haystack.components.generators.chat import OpenAIChatGenerator
+
+from app.vast_serverless.generators import ServerlessOpenAIChatGenerator
 
 # Model context limit; reserve tokens for system prompt and output
 MODEL_CTX_LIMIT = 8192
@@ -33,11 +36,39 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
 from haystack.dataclasses import ChatMessage, Document
 from haystack.utils import Secret
 
-from app.rag.pipeline import _current_datetime_context
+from app.rag.pipeline import (
+    _current_datetime_context,
+    make_openai_generator_for_research,
+    openai_chat_completion_generation_kwargs,
+    openai_model_uses_completion_tokens_only,
+)
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _openai_research_generation_kwargs(model: str, temperature: float, num_predict: int) -> dict[str, Any]:
+    """OpenAI chat kwargs for research backends; omits temperature/top_p when the API only allows defaults."""
+    gk = openai_chat_completion_generation_kwargs(model, temperature=temperature, num_predict=num_predict)
+    if not openai_model_uses_completion_tokens_only(model):
+        gk["top_p"] = 0.9
+    return gk
+
+
+def _vast_api_key() -> str:
+    return (getattr(settings, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+
+
+def _vast_cost(override: int) -> int:
+    if override and override > 0:
+        return int(override)
+    return int(getattr(settings, "vast_serverless_default_cost", 500) or 500)
+
+
+def _vast_client_timeout() -> float:
+    return float(getattr(settings, "vast_serverless_client_timeout", 900) or 900)
+
 
 # ---------------------------------------------------------------------------
 # Academic System Prompt (OpenScholar-specific, NOT generic)
@@ -178,55 +209,188 @@ SECTION_USER_PROMPTS = {
 }
 
 
-def get_openscholar_generator() -> OpenAIChatGenerator:
+def _registry_research_generator(internal_id: str) -> Any:
+    """
+    Build research generator from merged model registry (dashboard: provider, model, encrypted API keys).
+    Used for research-8k / research-128k when configured (OpenAI, Anthropic, etc.).
+    """
+    from app.config import get_model_config, get_model_registry
+    from app.rag.pipeline import (
+        _anthropic_api_key_for_model,
+        _openai_api_key_for_model,
+        _openai_http_timeout_for_model,
+    )
+
+    if internal_id not in get_model_registry():
+        return None
+    cfg = get_model_config(internal_id)
+    if getattr(cfg, "use_anthropic", False) and (cfg.openai_model or "").strip():
+        from app.rag.anthropic_chat import AnthropicChatGenerator
+
+        oto = _openai_http_timeout_for_model(cfg)
+        akey = _anthropic_api_key_for_model(cfg)
+        return AnthropicChatGenerator(
+            model=cfg.openai_model,
+            api_key=akey,
+            timeout=oto,
+            generation_kwargs={
+                "temperature": cfg.temperature,
+                "max_tokens": min(int(cfg.num_predict or 4096), 8192),
+            },
+        )
+    if not (getattr(cfg, "use_openai", False) and (cfg.openai_api_base or "").strip()):
+        return None
+    base = (cfg.openai_api_base or "").strip().rstrip("/")
+    if "placeholder.invalid" in base:
+        return None
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
+    okey = _openai_api_key_for_model(cfg)
+    oto = _openai_http_timeout_for_model(cfg)
+    mt = min(int(cfg.num_predict or 4096), 16384)
+    return make_openai_generator_for_research(
+        openai_model=cfg.openai_model or "",
+        api_base_url=base,
+        api_key=okey,
+        timeout=oto,
+        temperature=float(cfg.temperature),
+        num_predict=mt,
+        log_label=internal_id,
+    )
+
+
+def _direct_openai_from_dashboard_research(slot: str) -> Any:
+    """
+    Dashboard mapping for Investigación (llm_model_config: research-8k / research-128k).
+    OpenAI-compatible URL + model; API key from extra_params.api_key_env or OPENAI_API_KEY / openscholar_api_key.
+    """
+    try:
+        from app.admin.llm_config_db import get_llm_config_overrides
+    except Exception:
+        return None
+    key = "research-8k" if slot == "8k" else "research-128k"
+    o = get_llm_config_overrides().get(key) or {}
+    url = (o.get("backend_url_override") or "").strip()
+    model = (o.get("backend_model") or "").strip()
+    if not url or not model:
+        return None
+    ex = o.get("extra_params") or {}
+    base = url.rstrip("/")
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
+    envn = (ex.get("api_key_env") or "").strip()
+    if envn:
+        token = os.environ.get(envn, "") or ""
+    else:
+        token = os.environ.get("OPENAI_API_KEY", "") or (getattr(settings, "openscholar_api_key", None) or "dummy")
+    t_default = 300.0 if slot == "128k" else 120.0
+    try:
+        timeout = float(ex.get("timeout") or t_default)
+    except (TypeError, ValueError):
+        timeout = t_default
+    max_tok = 8192 if slot == "128k" else 2048
+    logger.info("Research %s: using dashboard backend override -> %s (model=%s)", slot, base, model)
+    temp = float(getattr(settings, "openscholar_temperature", 0.2))
+    return make_openai_generator_for_research(
+        openai_model=model,
+        api_base_url=base,
+        api_key=token,
+        timeout=timeout,
+        temperature=temp,
+        num_predict=max_tok,
+        log_label=f"dashboard {slot}",
+    )
+
+
+def get_openscholar_generator() -> Union[OpenAIChatGenerator, ServerlessOpenAIChatGenerator]:
     """
     Create or return the OpenScholar generator.
     Uses OpenAI-compatible API (vLLM) at the configured URL.
     """
+    reg = _registry_research_generator("research-8k")
+    if reg is not None:
+        return reg
+    direct = _direct_openai_from_dashboard_research("8k")
+    if direct is not None:
+        return direct
+    vk = _vast_api_key()
+    v_ep = (getattr(settings, "vast_serverless_openscholar_endpoint", "") or "").strip()
+    if v_ep and vk:
+        oc = int(getattr(settings, "vast_serverless_openscholar_cost", 0) or 0)
+        vst = _vast_client_timeout()
+        om = settings.openscholar_model or ""
+        return ServerlessOpenAIChatGenerator(
+            endpoint_name=v_ep,
+            model=settings.openscholar_model,
+            api_key=vk,
+            cost=_vast_cost(oc),
+            timeout=vst,
+            worker_timeout=vst,
+            generation_kwargs=_openai_research_generation_kwargs(
+                om, float(settings.openscholar_temperature), 2048
+            ),
+        )
     # vLLM expects base_url to include /v1 (see vLLM OpenAI-compatible server docs)
     base_url = settings.openscholar_api_url.rstrip("/")
     if not base_url.endswith("/v1"):
         base_url = f"{base_url}/v1"
     timeout = getattr(settings, "openscholar_timeout", 120) or 120  # seconds, prevents indefinite hang
 
-    generator = OpenAIChatGenerator(
-        model=settings.openscholar_model,
-        api_key=Secret.from_token(settings.openscholar_api_key or "dummy"),
+    return make_openai_generator_for_research(
+        openai_model=settings.openscholar_model or "",
         api_base_url=base_url,
+        api_key=settings.openscholar_api_key or "dummy",
         timeout=timeout,
-        generation_kwargs={
-            "temperature": settings.openscholar_temperature,
-            "top_p": 0.9,
-            "max_tokens": 2048,  # 8K ctx: safe default; router passes lower when input is large
-        },
+        temperature=float(settings.openscholar_temperature),
+        num_predict=2048,
+        log_label="openscholar env 8k",
     )
-    return generator
 
 
-def get_openscholar_128k_generator() -> OpenAIChatGenerator:
+def get_openscholar_128k_generator() -> Union[OpenAIChatGenerator, ServerlessOpenAIChatGenerator]:
     """
     Create OpenScholar 128K generator (long-context research instance).
     Uses openscholar_128k_api_url; same API shape as 8K.
     """
+    reg = _registry_research_generator("research-128k")
+    if reg is not None:
+        return reg
+    direct = _direct_openai_from_dashboard_research("128k")
+    if direct is not None:
+        return direct
+    vk = _vast_api_key()
+    v_ep = (getattr(settings, "vast_serverless_openscholar_128k_endpoint", "") or "").strip()
+    if v_ep and vk:
+        oc = int(getattr(settings, "vast_serverless_openscholar_128k_cost", 0) or 0)
+        vst = _vast_client_timeout()
+        om = getattr(settings, "openscholar_model", "openscholar") or ""
+        return ServerlessOpenAIChatGenerator(
+            endpoint_name=v_ep,
+            model=getattr(settings, "openscholar_model", "openscholar"),
+            api_key=vk,
+            cost=_vast_cost(oc),
+            timeout=vst,
+            worker_timeout=vst,
+            generation_kwargs=_openai_research_generation_kwargs(
+                om, float(getattr(settings, "openscholar_temperature", 0.2)), 8192
+            ),
+        )
     url = getattr(settings, "openscholar_128k_api_url", "") or ""
     if not url:
-        raise ValueError("openscholar_128k_api_url not configured")
+        raise ValueError("openscholar_128k_api_url not configured (or set vast_serverless_openscholar_128k_endpoint + VAST_API_KEY)")
     base_url = url.rstrip("/")
     if not base_url.endswith("/v1"):
         base_url = f"{base_url}/v1"
     timeout = getattr(settings, "openscholar_128k_timeout", 300) or getattr(settings, "openscholar_timeout", 120) or 300
-    generator = OpenAIChatGenerator(
-        model=getattr(settings, "openscholar_model", "openscholar"),
-        api_key=Secret.from_token(settings.openscholar_api_key or "dummy"),
+    return make_openai_generator_for_research(
+        openai_model=getattr(settings, "openscholar_model", "openscholar") or "",
         api_base_url=base_url,
+        api_key=settings.openscholar_api_key or "dummy",
         timeout=timeout,
-        generation_kwargs={
-            "temperature": getattr(settings, "openscholar_temperature", 0.2),
-            "top_p": 0.9,
-            "max_tokens": 8192,  # Long context allows larger output
-        },
+        temperature=float(getattr(settings, "openscholar_temperature", 0.2)),
+        num_predict=8192,
+        log_label="openscholar env 128k",
     )
-    return generator
 
 
 def build_academic_messages(
@@ -241,11 +405,14 @@ def build_academic_messages(
     excluded_topics: list[str] | None = None,
     evidence_extracts: dict | list | None = None,
     bias_audit: dict | None = None,
+    context_token_budget: int | None = None,
 ) -> list[ChatMessage]:
     """
     Build ChatMessage objects for OpenScholar (academic research mode).
     Truncates history and document content to stay within model context limit (8192 tokens).
     """
+    ctx_budget = int(context_token_budget) if context_token_budget else MODEL_CTX_LIMIT
+    ctx_budget = max(MODEL_CTX_LIMIT, min(ctx_budget, 200_000))
     messages: list[ChatMessage] = []
     academic_system = _current_datetime_context() + "\n\n" + ACADEMIC_RESEARCH_PROMPT
     messages.append(ChatMessage.from_system(academic_system))
@@ -297,8 +464,8 @@ def build_academic_messages(
                 plan_text += f"  - {s}\n"
         user_parts.append(plan_text)
 
-    # Document budget: allocate ~4000 tokens for evidence (scale per doc count)
-    doc_budget_tokens = 4000
+    # Document budget: scale with model context (large windows = more evidence per doc)
+    doc_budget_tokens = max(4000, min((ctx_budget * 55) // 100, 80_000))
     num_docs = len(documents) if documents else 1
     max_content_per_doc = max(600, (doc_budget_tokens * CHARS_PER_TOKEN) // num_docs)
 

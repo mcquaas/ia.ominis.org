@@ -3,18 +3,52 @@ Optional Med42 (A100) for clinical translation step in research.
 OpenAI-compatible API. When MED42_API_URL is set, use for implications/risks/recommendations.
 """
 
-from typing import Optional
+import os
+from typing import Optional, Union
 
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.dataclasses import ChatMessage
 from haystack.utils import Secret
 
 from app.config import get_settings
+from app.vast_serverless.generators import ServerlessOpenAIChatGenerator
 
 
-def get_med42_generator() -> Optional[OpenAIChatGenerator]:
-    """Return Med42 OpenAIChatGenerator when MED42_API_URL is set, else None."""
+def _vast_api_key() -> str:
+    s = get_settings()
+    return (getattr(s, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+
+
+def _vast_cost(override: int) -> int:
+    s = get_settings()
+    if override and override > 0:
+        return int(override)
+    return int(getattr(s, "vast_serverless_default_cost", 500) or 500)
+
+
+def _vast_client_timeout() -> float:
+    s = get_settings()
+    return float(getattr(s, "vast_serverless_client_timeout", 900) or 900)
+
+
+def get_med42_generator() -> Optional[Union[OpenAIChatGenerator, ServerlessOpenAIChatGenerator]]:
+    """Return Med42 OpenAIChatGenerator when MED42_API_URL or Vast Serverless Med42 is set, else None."""
     settings = get_settings()
+    vk = _vast_api_key()
+    v_ep = (getattr(settings, "vast_serverless_med42_endpoint", "") or "").strip()
+    if v_ep and vk:
+        oc = int(getattr(settings, "vast_serverless_med42_cost", 0) or 0)
+        model = getattr(settings, "med42_model", "med42") or "med42"
+        vst = _vast_client_timeout()
+        return ServerlessOpenAIChatGenerator(
+            endpoint_name=v_ep,
+            model=model,
+            api_key=vk,
+            cost=_vast_cost(oc),
+            timeout=vst,
+            worker_timeout=vst,
+            generation_kwargs={"temperature": 0.3, "max_tokens": 1024},
+        )
     url = (getattr(settings, "med42_api_url", None) or "").strip().rstrip("/")
     if not url:
         return None
@@ -31,7 +65,9 @@ def get_med42_generator() -> Optional[OpenAIChatGenerator]:
     )
 
 
-def run_clinical_translator_sync(generator: OpenAIChatGenerator, synthesis: str) -> str:
+def run_clinical_translator_sync(
+    generator: Union[OpenAIChatGenerator, ServerlessOpenAIChatGenerator], synthesis: str
+) -> str:
     """
     Given a research synthesis, produce clinical implications, risks, and prudent recommendations.
     Returns the appended section text (Spanish).

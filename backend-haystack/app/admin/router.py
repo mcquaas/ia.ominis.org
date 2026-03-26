@@ -6,6 +6,7 @@ Paths match the format the frontend expects.
 import asyncio
 import json
 import logging
+import os
 import re
 import tempfile
 import time
@@ -53,8 +54,14 @@ from app.admin.schemas import (
     TainacanImportRequest,
     TainacanImportResponse,
     TainacanPreviewResponse,
+    DatosGobMxImportRequest,
+    DatosGobMxImportResponse,
+    DatosGobMxPreviewResponse,
+    LLMListModelsRequest,
     LLMModelConfigOut,
     LLMModelConfigUpdate,
+    VisionLlmConfigOut,
+    VisionLlmConfigUpdate,
 )
 from app.admin.research_instances import (
     get_research_instance_status,
@@ -70,7 +77,10 @@ from app.admin.llm_instances import (
 from app.admin.server_groups import get_servers_status
 from app.auth.dependencies import require_role
 from app.auth.models import RoleEnum, User
-from app.config import get_settings, get_model_registry, invalidate_model_registry
+from app.admin.llm_crypto import decrypt_credentials_blob, merge_credential_patch
+from app.admin.llm_list_models import list_models_for_provider
+from app.admin.llm_provider_registry import list_provider_ids
+from app.config import get_settings, get_model_registry, invalidate_model_registry, normalize_public_model_id
 from app.database import get_db
 from app.rag.document_store import get_document_store
 
@@ -82,6 +92,46 @@ router = APIRouter(tags=["admin"])
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".html", ".htm", ".csv", ".xlsx", ".xls", ".sav", ".zip"}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 MAX_CRAWL_PAGES = 50
+
+# Dashboard logical IDs for Modo Investigación (OpenScholar) backend mapping — stored in llm_model_config, not chat registry
+RESEARCH_ROUTING_MODEL_IDS = frozenset({"research-8k", "research-128k"})
+
+
+def _provider_keys_present(row: LLMModelConfig | None) -> dict[str, bool]:
+    keys = ["ominis", "openai", "google", "deepseek", "claude"]
+    if not row or not getattr(row, "provider_credentials_enc", None):
+        return {k: False for k in keys}
+    creds = decrypt_credentials_blob(row.provider_credentials_enc)
+    return {k: bool((creds.get(k) or "").strip()) for k in keys}
+
+
+def _effective_llm_provider(row: LLMModelConfig | None, cfg) -> str:
+    if row and getattr(row, "llm_provider", None):
+        return str(row.llm_provider)
+    if getattr(cfg, "use_anthropic", False):
+        return "claude"
+    pid = getattr(cfg, "llm_provider", "") or ""
+    if pid and pid != "ominis":
+        return pid
+    if getattr(cfg, "use_openai", False):
+        return "openai"
+    return "ominis"
+
+
+def _vision_provider_keys_present(row: SiteConfig | None) -> dict[str, bool]:
+    keys = ["ominis", "openai", "google", "deepseek", "claude"]
+    if not row or not getattr(row, "vision_credentials_enc", None):
+        return {k: False for k in keys}
+    creds = decrypt_credentials_blob(row.vision_credentials_enc)
+    return {k: bool((creds.get(k) or "").strip()) for k in keys}
+
+
+def _backend_type_for_cfg(cfg) -> str:
+    if getattr(cfg, "use_anthropic", False):
+        return "anthropic"
+    if getattr(cfg, "use_openai", False):
+        return "openai"
+    return "ollama"
 
 
 # --- Helpers ---
@@ -301,7 +351,7 @@ async def _run_indexing_in_background(source_id: int, method: str, **kwargs):
                 source_id=source_id,
                 title=kwargs.get("title", ""),
                 url=kwargs.get("url", ""),
-                source_type="rag",
+                source_type=kwargs.get("rag_source_type", "rag"),
                 category=kwargs.get("category", ""),
                 language=kwargs.get("language", "es"),
                 taxonomy=taxonomy,
@@ -331,17 +381,6 @@ async def _run_indexing_in_background(source_id: int, method: str, **kwargs):
                 await db.commit()
                 logger.info(f"Source {source_id} indexed: {chunks} chunks")
 
-        # Extract metadata using LLM (non-blocking, best-effort)
-        await _extract_and_save_metadata(source_id, kwargs)
-
-        # Export SAV to Parquet for analytical layer (if configured)
-        if method == "file" and "file_path" in kwargs:
-            fp = Path(kwargs["file_path"])
-            if fp.suffix.lower() == ".sav" and get_settings().analytical_data_dir:
-                from app.rag.analytical import save_sav_as_parquet
-                await asyncio.to_thread(save_sav_as_parquet, str(fp), source_id)
-            fp.unlink(missing_ok=True)
-
     except Exception as e:
         logger.error(f"Indexing failed for source {source_id}: {e}", exc_info=True)
         try:
@@ -358,6 +397,24 @@ async def _run_indexing_in_background(source_id: int, method: str, **kwargs):
         # Clean up temp file on error too
         if method == "file" and "file_path" in kwargs:
             Path(kwargs["file_path"]).unlink(missing_ok=True)
+        return
+
+    # Post-success only: must never set status=error (e.g. SAV parquet or temp cleanup failing).
+    try:
+        await _extract_and_save_metadata(source_id, kwargs)
+    except Exception as e:
+        logger.warning(f"Post-index metadata extraction for source {source_id}: {e}")
+
+    try:
+        if method == "file" and "file_path" in kwargs:
+            fp = Path(kwargs["file_path"])
+            if fp.suffix.lower() == ".sav" and get_settings().analytical_data_dir:
+                from app.rag.analytical import save_sav_as_parquet
+
+                await asyncio.to_thread(save_sav_as_parquet, str(fp), source_id)
+            fp.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Post-index file cleanup / SAV export for source {source_id}: {e}")
 
 
 # ==================== RAG Sources ====================
@@ -611,6 +668,173 @@ async def tainacan_import(
         message=f"Queued {queued} items for indexing from Tainacan ({skipped} skipped as existing)",
         totalQueued=queued,
         skipped=skipped,
+    )
+
+
+# ==================== datos.gob.mx (CKAN) metadata import ====================
+
+
+@router.get("/api/rag-sources/datos-gob-mx-preview", response_model=DatosGobMxPreviewResponse)
+async def datos_gob_mx_preview(
+    group: str = Query(default="salud", max_length=64),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+):
+    """
+    Preview CKAN datasets in a group (default: salud) via datos.gob.mx API.
+    Indexing uses metadata + resource URLs only (not CSV row content).
+    """
+    from app.rag.datos_gob_mx import preview_group
+
+    try:
+        result = await preview_group(group_name=group.strip() or "salud", sample_size=12)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch datos.gob.mx CKAN: {e}") from e
+
+    return DatosGobMxPreviewResponse(
+        totalPackages=result["totalPackages"],
+        groupName=result["groupName"],
+        groupTitle=result["groupTitle"],
+        totalResourcesSample=result["totalResourcesSample"],
+        resourceFormatsSample=result["resourceFormatsSample"],
+        sampleTitles=result["sampleTitles"],
+    )
+
+
+@router.post("/api/rag-sources/datos-gob-mx-import", response_model=DatosGobMxImportResponse)
+async def datos_gob_mx_import(
+    body: DatosGobMxImportRequest,
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Import CKAN dataset metadata from datos.gob.mx into RAG (one RAG source per dataset).
+    Does not download CSV/XLS content — only descriptions and download links for retrieval.
+    """
+    from app.rag.datos_gob_mx import fetch_packages_for_group, portal_dataset_url
+
+    group = (body.group or "salud").strip() or "salud"
+    try:
+        packages = await fetch_packages_for_group(group_name=group, max_items=body.maxItems)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch datos.gob.mx CKAN: {e}") from e
+
+    if not packages:
+        raise HTTPException(status_code=404, detail="No datasets returned for this CKAN group")
+
+    existing_slugs: set[str] = set()
+    if body.skipExisting:
+        result = await db.execute(select(RAGSource).where(RAGSource.source_type == "datos_gob_mx"))
+        for source in result.scalars().all():
+            existing_slugs.add(source.slug)
+
+    queued = 0
+    skipped = 0
+    BATCH_SIZE = 40
+
+    for batch_start in range(0, len(packages), BATCH_SIZE):
+        batch = packages[batch_start : batch_start + BATCH_SIZE]
+        batch_sources: list[tuple[int, dict]] = []
+
+        for pkg in batch:
+            name = (pkg.get("name") or "").strip() or pkg.get("id", "")
+            slug = _slugify(f"dgmx-{group}-{name}")[:255]
+            if not slug or slug == "dgmx":
+                slug = _slugify(f"dgmx-{group}-{pkg.get('id', uuid.uuid4().hex)[:16]}")[:255]
+
+            if body.skipExisting and slug in existing_slugs:
+                skipped += 1
+                continue
+
+            existing = await db.execute(select(RAGSource).where(RAGSource.slug == slug))
+            if existing.scalar_one_or_none():
+                skipped += 1
+                continue
+
+            title = _safe_title(pkg.get("title") or name or "Dataset")
+            notes = (pkg.get("notes") or "").strip()
+            org = pkg.get("organization") or {}
+            portal_url = portal_dataset_url(pkg)
+
+            source = RAGSource(
+                title=title,
+                slug=slug,
+                source_type="datos_gob_mx",
+                source_url=portal_url,
+                content=notes[:5000] if notes else None,
+                status=SourceStatus.indexing,
+                category=body.category,
+                language=body.language,
+                publisher=(org.get("title") or "")[:255] if org.get("title") else None,
+                description=notes[:2000] if notes else None,
+                document_date=(pkg.get("metadata_modified") or "")[:100] or None,
+            )
+            db.add(source)
+            await db.flush()
+            batch_sources.append((source.id, pkg))
+            existing_slugs.add(slug)
+            queued += 1
+
+        await db.commit()
+
+        for source_id, pkg in batch_sources:
+            asyncio.create_task(
+                _run_datos_gob_mx_dataset_index(
+                    source_id,
+                    pkg,
+                    category=body.category,
+                    language=body.language,
+                    ckan_group=group,
+                )
+            )
+
+        logger.info(
+            "datos.gob.mx import: batch %s-%s queued=%s total_queued=%s skipped=%s",
+            batch_start,
+            batch_start + len(batch),
+            len(batch_sources),
+            queued,
+            skipped,
+        )
+
+    return DatosGobMxImportResponse(
+        message=f"Queued {queued} CKAN datasets for metadata indexing ({skipped} skipped)",
+        totalQueued=queued,
+        skipped=skipped,
+    )
+
+
+async def _run_datos_gob_mx_dataset_index(
+    source_id: int,
+    pkg: dict,
+    *,
+    category: str,
+    language: str,
+    ckan_group: str,
+):
+    from app.rag.datos_gob_mx import build_index_text, portal_dataset_url
+
+    org_name = (pkg.get("organization") or {}).get("title")
+    taxonomy: dict = {
+        "portal": ["datos.gob.mx"],
+        "grupo_ckan": [ckan_group],
+        "tipo_documento": ["dataset_abierto_gobmx"],
+    }
+    if org_name:
+        taxonomy["institucion"] = [str(org_name)[:200]]
+    tag_names = [str(t.get("name") or "").strip() for t in (pkg.get("tags") or []) if t.get("name")]
+    if tag_names:
+        taxonomy["etiquetas"] = tag_names[:40]
+
+    await _run_indexing_in_background(
+        source_id,
+        "text",
+        content=build_index_text(pkg),
+        title=_safe_title(pkg.get("title") or pkg.get("name") or "Dataset"),
+        url=portal_dataset_url(pkg),
+        category=category,
+        language=language,
+        taxonomy=taxonomy,
+        rag_source_type="datos_gob_mx",
     )
 
 
@@ -1107,8 +1331,9 @@ async def _run_dataset_resource_index(
         }
 
         indexable = {"csv", "xlsx", "xls", "pdf", "html", "htm", "txt", "docx"}
+        total_chunks = 0
         if ext in indexable:
-            chunks = await asyncio.to_thread(
+            total_chunks += await asyncio.to_thread(
                 index_file_with_meta,
                 file_path=str(tmp_path),
                 source_id=source_id,
@@ -1117,7 +1342,7 @@ async def _run_dataset_resource_index(
         else:
             # For non-indexable formats (JSON, XML, ZIP), index metadata only
             content = f"Título: {title}\n{page_metadata_text}\nURL del recurso: {resource_url}\nFormato: {ext}"
-            chunks = await asyncio.to_thread(
+            total_chunks += await asyncio.to_thread(
                 index_raw_text,
                 content=content,
                 source_id=source_id,
@@ -1130,7 +1355,7 @@ async def _run_dataset_resource_index(
 
         # Also index page metadata as an extra chunk if available
         if page_metadata_text.strip():
-            await asyncio.to_thread(
+            total_chunks += await asyncio.to_thread(
                 index_raw_text,
                 content=f"Metadatos del dataset para: {title}\n{page_metadata_text}",
                 source_id=source_id,
@@ -1146,11 +1371,11 @@ async def _run_dataset_resource_index(
             source = result.scalar_one_or_none()
             if source:
                 source.status = SourceStatus.active
-                source.chunks_count = chunks
+                source.chunks_count = total_chunks
                 source.last_indexed_at = datetime.now(timezone.utc)
                 source.indexing_error = None
                 await db.commit()
-                logger.info(f"Dataset source {source_id} ('{title}'): indexed {chunks} chunks")
+                logger.info(f"Dataset source {source_id} ('{title}'): indexed {total_chunks} chunks")
 
     except Exception as e:
         logger.error(f"Failed to index dataset resource '{title}' (source {source_id}): {e}", exc_info=True)
@@ -1634,27 +1859,129 @@ async def mark_stuck_indexing(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Mark sources stuck in 'indexing' (no update for longer than older_than_minutes) as error.
-    Allows retrying them via reindex. Returns count of sources marked.
+    Resolve sources stuck in 'indexing' (no update for longer than older_than_minutes).
+    If vectors exist in the store, promote to active; otherwise mark as error for reindex.
     """
+    from app.database import async_session
+    from app.rag.indexing import count_source_chunks
+
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
-    stmt = (
-        update(RAGSource)
-        .where(
+    result = await db.execute(
+        select(RAGSource.id).where(
             RAGSource.status == SourceStatus.indexing,
             RAGSource.updated_at < cutoff,
         )
-        .values(
-            status=SourceStatus.error,
-            indexing_error=f"Indexing timed out (marked as stuck after {older_than_minutes} min)",
-        )
     )
-    result = await db.execute(stmt)
-    await db.commit()
-    marked = result.rowcount
-    if marked:
-        logger.info(f"Marked {marked} stuck indexing sources as error (older than {older_than_minutes} min)")
-    return {"marked": marked, "olderThanMinutes": older_than_minutes}
+    stuck_ids = [row[0] for row in result.fetchall()]
+
+    promoted = 0
+    marked_error = 0
+    for sid in stuck_ids:
+        n = await asyncio.to_thread(count_source_chunks, sid)
+        async with async_session() as db2:
+            r = await db2.execute(select(RAGSource).where(RAGSource.id == sid))
+            src = r.scalar_one_or_none()
+            if not src or src.status != SourceStatus.indexing:
+                continue
+            if n > 0:
+                src.status = SourceStatus.active
+                src.chunks_count = n
+                src.indexing_error = None
+                await db2.commit()
+                promoted += 1
+            else:
+                src.status = SourceStatus.error
+                src.indexing_error = (
+                    f"Indexing timed out (marked as stuck after {older_than_minutes} min)"
+                )
+                await db2.commit()
+                marked_error += 1
+
+    if promoted or marked_error:
+        logger.info(
+            "mark-stuck-indexing: promoted %s to active, marked %s error (older than %s min)",
+            promoted,
+            marked_error,
+            older_than_minutes,
+        )
+    return {
+        "promoted": promoted,
+        "markedError": marked_error,
+        "olderThanMinutes": older_than_minutes,
+        "checked": len(stuck_ids),
+    }
+
+
+@router.post("/api/rag-sources/reconcile-status")
+async def reconcile_rag_status(
+    include_indexing: bool = Query(
+        False,
+        description="If true, also check sources stuck in 'indexing' (default: only 'error')",
+    ),
+    include_active: bool = Query(
+        True,
+        description="If true, also sync chunks_count for active sources against pgvector",
+    ),
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Reconcile RAG source status/counts with pgvector reality.
+
+    - For error/indexing sources with vectors: set status=active, clear indexing_error.
+    - For active sources: sync chunks_count to actual vectors to avoid stale 'active but no chunks'.
+    """
+    from app.database import async_session
+    from app.rag.indexing import count_source_chunks
+
+    statuses = [SourceStatus.error]
+    if include_indexing:
+        statuses.append(SourceStatus.indexing)
+    if include_active:
+        statuses.append(SourceStatus.active)
+
+    q = select(RAGSource.id).where(RAGSource.status.in_(statuses))
+    result = await db.execute(q)
+    ids = [row[0] for row in result.fetchall()]
+
+    fixed_status = 0
+    synced_counts = 0
+    for sid in ids:
+        n = int(await asyncio.to_thread(count_source_chunks, sid) or 0)
+        async with async_session() as db2:
+            r = await db2.execute(select(RAGSource).where(RAGSource.id == sid))
+            src = r.scalar_one_or_none()
+            if not src:
+                continue
+
+            changed = False
+            if int(src.chunks_count or 0) != n:
+                src.chunks_count = n
+                synced_counts += 1
+                changed = True
+
+            if n > 0 and src.status in {SourceStatus.error, SourceStatus.indexing}:
+                src.status = SourceStatus.active
+                src.indexing_error = None
+                fixed_status += 1
+                changed = True
+
+            if changed:
+                await db2.commit()
+
+    if fixed_status or synced_counts:
+        logger.info(
+            "reconcile-status: fixed_status=%s synced_counts=%s checked=%s",
+            fixed_status,
+            synced_counts,
+            len(ids),
+        )
+
+    return {
+        "fixed": fixed_status,
+        "syncedCounts": synced_counts,
+        "checked": len(ids),
+    }
 
 
 @router.post("/api/rag-sources/{source_id}/reindex")
@@ -1750,18 +2077,37 @@ async def _run_single_reindex(source: RAGSource):
         logger.error(f"Failed to delete chunks for source {source_id}: {e}")
 
     try:
-        if source.content:
+        # Non-stripped content is truthy in Python but index_raw_text returns 0 chunks → user sees
+        # "reindexed" with 0 vectors. Prefer real text; if that yields 0 chunks, fall back to URL.
+        text_body = (source.content or "").strip()
+        chunks_after = 0
+
+        if text_body:
             await _run_indexing_in_background(
                 source_id=source_id,
                 method="text",
-                content=source.content,
+                content=text_body,
                 title=source.title,
                 url=source.source_url or "",
                 category=source.category or "",
                 language=source.language or "es",
                 taxonomy=taxonomy,
             )
-        elif source.source_url:
+            async with async_session() as db:
+                result = await db.execute(select(RAGSource).where(RAGSource.id == source_id))
+                src = result.scalar_one_or_none()
+                chunks_after = int(src.chunks_count or 0) if src else 0
+
+        if chunks_after == 0 and source.source_url:
+            try:
+                await asyncio.to_thread(delete_source_chunks, source_id)
+            except Exception as e:
+                logger.warning("delete before URL reindex (source %s): %s", source_id, e)
+            if text_body:
+                logger.info(
+                    "Reindex: text path produced 0 chunks for source %s; falling back to URL fetch",
+                    source_id,
+                )
             if source.source_type == "pdf" or (source.source_url or "").lower().endswith(".pdf"):
                 await _run_pdf_download_and_index(
                     source_id=source_id,
@@ -1781,12 +2127,13 @@ async def _run_single_reindex(source: RAGSource):
                     language=source.language or "es",
                     taxonomy=taxonomy,
                 )
-        else:
+        elif not text_body and not source.source_url:
             async with async_session() as db:
                 result = await db.execute(select(RAGSource).where(RAGSource.id == source_id))
                 src = result.scalar_one_or_none()
                 if src:
-                    src.status = SourceStatus.active
+                    src.status = SourceStatus.error
+                    src.chunks_count = 0
                     src.indexing_error = "No content or URL to index"
                     await db.commit()
     except Exception as e:
@@ -2158,6 +2505,12 @@ async def health_check():
     except Exception:
         pass
 
+    vk = (getattr(settings, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+    vsep = (getattr(settings, "vast_serverless_ollama_endpoint", "") or "").strip()
+    # Main chat (ominis-2.0) can use Vast Serverless instead of a reachable Ollama URL
+    if inference_status == "offline" and vsep and vk:
+        inference_status = "serverless"
+
     secondary_status = "offline"
     clinic_url = (getattr(settings, "ollama_clinic_url", None) or "").strip()
     if clinic_url and clinic_url != settings.ollama_url.rstrip("/"):
@@ -2172,7 +2525,7 @@ async def health_check():
     else:
         secondary_status = inference_status  # same server as primary
 
-    if inference_status == "online" or secondary_status == "online":
+    if inference_status in ("online", "serverless") or secondary_status == "online":
         overall = "healthy"
     else:
         overall = "degraded"
@@ -2183,7 +2536,22 @@ async def health_check():
         "model": {"version": "ominis-2.0", "status": inference_status},
         "servers": {"primary": inference_status, "secondary": secondary_status},
         "lastCheck": now.isoformat(),
+        "serverless": {
+            "ollama_endpoint": vsep or None,
+            "api_key_configured": bool(vk),
+        },
     }
+
+
+@router.get("/system-stats/health/vast-serverless")
+async def vast_serverless_health_detail():
+    """List Vast Serverless endpoints and worker counts (requires VAST_API_KEY). Public; no secrets returned."""
+    vk = (getattr(settings, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+    if not vk:
+        return {"ok": False, "error": "VAST_API_KEY not configured on backend"}
+    from app.vast_serverless.status import list_vast_serverless_endpoints_sync
+
+    return {"ok": True, **list_vast_serverless_endpoints_sync()}
 
 
 # ==================== Research GPU Instances (Admin) ====================
@@ -2329,6 +2697,133 @@ async def llm_servers_status(
 # ==================== LLM model config (dashboard: assignments, prompts, version, params) ====================
 
 
+@router.get("/api/llm-models/providers")
+async def get_llm_model_providers(
+    _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
+):
+    """Server-side provider registry (labels + credential key names)."""
+    return {"providers": list_provider_ids()}
+
+
+@router.post("/api/llm-models/list-models")
+async def post_llm_list_models(
+    body: LLMListModelsRequest,
+    _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
+    db: AsyncSession = Depends(get_db),
+):
+    """List remote model IDs for a provider (uses stored API token when token not sent)."""
+    from app.admin.llm_credentials_read import credential_key_for_provider, get_stored_provider_token
+    from app.admin.vision_runtime import get_vision_provider_token
+
+    if body.model_id == "__vision__":
+        result_sc = await db.execute(select(SiteConfig).where(SiteConfig.id == 1))
+        srow = result_sc.scalar_one_or_none()
+        ck = credential_key_for_provider(body.provider_id)
+        token = (body.api_token or "").strip()
+        if not token and ck:
+            token = get_vision_provider_token(ck or "")
+        ollama_base = None
+        if (body.provider_id or "").strip().lower() == "ominis":
+            ollama_base = (
+                (srow.vision_ollama_url if srow and getattr(srow, "vision_ollama_url", None) else None)
+                or settings.ollama_url
+            )
+        models = list_models_for_provider(
+            body.provider_id,
+            api_token=token or None,
+            ollama_base_url=ollama_base,
+        )
+        return {"models": models}
+
+    registry = get_model_registry()
+    if body.model_id not in registry:
+        raise HTTPException(status_code=404, detail="Model not found")
+    cfg = registry[body.model_id]
+
+    ck = credential_key_for_provider(body.provider_id)
+    token = (body.api_token or "").strip()
+    if not token and ck:
+        token = get_stored_provider_token(body.model_id, ck)
+    result_db = await db.execute(select(LLMModelConfig).where(LLMModelConfig.model_id == body.model_id))
+    row = result_db.scalar_one_or_none()
+    ollama_base = None
+    if (body.provider_id or "").strip().lower() == "ominis":
+        ollama_base = (row.backend_url_override if row and row.backend_url_override else None) or cfg.ollama_url or settings.ollama_url
+    models = list_models_for_provider(
+        body.provider_id,
+        api_token=token or None,
+        ollama_base_url=ollama_base,
+    )
+    return {"models": models}
+
+
+@router.get("/api/vision-llm-config", response_model=VisionLlmConfigOut)
+async def get_vision_llm_config(
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dashboard: Vision model (images) — provider, URL, model id, stored key flags."""
+    result = await db.execute(select(SiteConfig).where(SiteConfig.id == 1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = SiteConfig(id=1, banner_message=None)
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return VisionLlmConfigOut(
+        llm_provider=(getattr(row, "vision_llm_provider", None) or "ominis") or "ominis",
+        backend_model=(getattr(row, "vision_backend_model", None) or "") or "",
+        ollama_url=(getattr(row, "vision_ollama_url", None) or "") or "",
+        openai_base_url=(getattr(row, "vision_openai_base_url", None) or "") or "",
+        provider_keys_present=_vision_provider_keys_present(row),
+    )
+
+
+@router.put("/api/vision-llm-config", response_model=VisionLlmConfigOut)
+async def put_vision_llm_config(
+    body: VisionLlmConfigUpdate,
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.superadmin)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update Vision LLM settings (encrypted API keys per provider)."""
+    result = await db.execute(select(SiteConfig).where(SiteConfig.id == 1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = SiteConfig(id=1, banner_message=None)
+        db.add(row)
+        await db.flush()
+    if body.llm_provider is not None:
+        row.vision_llm_provider = body.llm_provider.strip().lower() or None
+    if body.backend_model is not None:
+        row.vision_backend_model = body.backend_model.strip() or None
+    if body.ollama_url is not None:
+        v = body.ollama_url.strip()
+        row.vision_ollama_url = v or None
+    if body.openai_base_url is not None:
+        v = body.openai_base_url.strip()
+        row.vision_openai_base_url = v or None
+    if body.provider_credentials_patch:
+        row.vision_credentials_enc = merge_credential_patch(
+            getattr(row, "vision_credentials_enc", None),
+            body.provider_credentials_patch,
+        )
+    await db.commit()
+    await db.refresh(row)
+    try:
+        from app.rag.pipeline import get_pipeline_manager
+
+        get_pipeline_manager().rebuild_vision_generator()
+    except Exception:
+        pass
+    return VisionLlmConfigOut(
+        llm_provider=(getattr(row, "vision_llm_provider", None) or "ominis") or "ominis",
+        backend_model=(getattr(row, "vision_backend_model", None) or "") or "",
+        ollama_url=(getattr(row, "vision_ollama_url", None) or "") or "",
+        openai_base_url=(getattr(row, "vision_openai_base_url", None) or "") or "",
+        provider_keys_present=_vision_provider_keys_present(row),
+    )
+
+
 @router.get("/api/llm-models/config", response_model=list[LLMModelConfigOut])
 async def get_llm_models_config(
     _: User = Depends(require_role(RoleEnum.researcher, RoleEnum.developer, RoleEnum.admin, RoleEnum.superadmin)),
@@ -2357,14 +2852,24 @@ async def get_llm_models_config(
             if row.extra_params is not None: overridden.append("extra_params")
             if row.is_default is not None: overridden.append("is_default")
             if getattr(row, "available_for_researcher", None) is not None: overridden.append("available_for_researcher")
-        backend_type = "openai" if getattr(cfg, "use_openai", False) else "ollama"
-        backend_model = cfg.openai_model if backend_type == "openai" else cfg.ollama_model
+            if getattr(row, "llm_provider", None) is not None:
+                overridden.append("llm_provider")
+            if getattr(row, "provider_credentials_enc", None):
+                overridden.append("provider_credentials")
+        backend_type = _backend_type_for_cfg(cfg)
+        backend_model = (
+            cfg.openai_model
+            if (getattr(cfg, "use_openai", False) or getattr(cfg, "use_anthropic", False))
+            else cfg.ollama_model
+        )
         result.append(LLMModelConfigOut(
             model_id=model_id,
             display_name=cfg.display_name,
             version_label=getattr(cfg, "version_label", "") or "",
             description=cfg.description or "",
             backend_type=backend_type,
+            llm_provider=_effective_llm_provider(row, cfg),
+            provider_keys_present=_provider_keys_present(row),
             backend_model=backend_model or "",
             backend_url_override=row.backend_url_override if row else None,
             system_prompt=(cfg.system_prompt or None) if getattr(cfg, "system_prompt", "") else None,
@@ -2375,6 +2880,50 @@ async def get_llm_models_config(
             overridden=overridden,
             available_for_researcher=row.available_for_researcher if row and getattr(row, "available_for_researcher", None) is not None else True,
         ))
+    # Synthetic entries only when research slots are not in the main registry (avoids duplicates:
+    # research-8k / research-128k are registered in config when env or dashboard enables them).
+    for rid, disp, def_url, def_model in (
+        ("research-8k", "Ominis Investigación (8K)", settings.openscholar_api_url, settings.openscholar_model),
+        (
+            "research-128k",
+            "Ominis Investigación (128K)",
+            (getattr(settings, "openscholar_128k_api_url", None) or "") or "",
+            getattr(settings, "openscholar_model", "openscholar") or "openscholar",
+        ),
+    ):
+        if rid in registry:
+            continue
+        row = rows.get(rid)
+        overridden = []
+        if row:
+            if row.display_name is not None:
+                overridden.append("display_name")
+            if row.backend_model is not None:
+                overridden.append("backend_model")
+            if row.backend_url_override is not None:
+                overridden.append("backend_url_override")
+            if row.extra_params is not None:
+                overridden.append("extra_params")
+        result.append(
+            LLMModelConfigOut(
+                model_id=rid,
+                display_name=(row.display_name if row and row.display_name else disp),
+                version_label="",
+                description="Motor del modo Investigación (OpenAI-compatible). La UI sigue mostrando Ominis.",
+                backend_type="openai",
+                llm_provider="openai",
+                provider_keys_present=_provider_keys_present(row),
+                backend_model=(row.backend_model if row and row.backend_model else def_model) or "",
+                backend_url_override=row.backend_url_override if row else None,
+                system_prompt=None,
+                temperature=None,
+                num_predict=None,
+                extra_params=dict(row.extra_params) if row and row.extra_params else None,
+                is_default=False,
+                overridden=overridden,
+                available_for_researcher=True,
+            )
+        )
     return result
 
 
@@ -2390,7 +2939,7 @@ async def put_llm_model_config(
     Only provided fields are updated. Invalidates registry and pipeline so changes apply immediately.
     """
     registry = get_model_registry()
-    if model_id not in registry:
+    if model_id not in registry and model_id not in RESEARCH_ROUTING_MODEL_IDS:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
     result = await db.execute(select(LLMModelConfig).where(LLMModelConfig.model_id == model_id))
     row = result.scalar_one_or_none()
@@ -2419,10 +2968,18 @@ async def put_llm_model_config(
         row.is_default = body.is_default
     if body.available_for_researcher is not None:
         row.available_for_researcher = body.available_for_researcher
+    if body.llm_provider is not None:
+        row.llm_provider = body.llm_provider.strip().lower() or None
+    if body.provider_credentials_patch:
+        row.provider_credentials_enc = merge_credential_patch(
+            getattr(row, "provider_credentials_enc", None),
+            body.provider_credentials_patch,
+        )
     await db.commit()
     invalidate_model_registry()
     try:
         from app.rag.pipeline import get_pipeline_manager
+
         get_pipeline_manager().invalidate_generators()
     except RuntimeError:
         pass
@@ -2484,6 +3041,7 @@ async def get_chat_defaults(db: AsyncSession = Depends(get_db)):
             pubmed_search=True,
             openscholar_search=False,
             research_2_1=False,
+            public_access_enabled=False,
         )
         db.add(row)
         await db.commit()
@@ -2495,7 +3053,8 @@ async def get_chat_defaults(db: AsyncSession = Depends(get_db)):
         "pubmed_search": row.pubmed_search,
         "openscholar_search": getattr(row, "openscholar_search", False),
         "research_2_1": getattr(row, "research_2_1", False),
-        "default_model": getattr(row, "default_model", None) or "ominis-2.0",
+        "public_access_enabled": getattr(row, "public_access_enabled", False),
+        "default_model": normalize_public_model_id(getattr(row, "default_model", None) or "ominis-2.0"),
     }
 
 
@@ -2509,7 +3068,16 @@ async def update_chat_defaults(
     result = await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))
     row = result.scalar_one_or_none()
     if row is None:
-        row = ChatDefaults(id=1, research_mode=False, rag_search=True, web_search=True, pubmed_search=True, openscholar_search=False, research_2_1=False)
+        row = ChatDefaults(
+            id=1,
+            research_mode=False,
+            rag_search=True,
+            web_search=True,
+            pubmed_search=True,
+            openscholar_search=False,
+            research_2_1=False,
+            public_access_enabled=False,
+        )
         db.add(row)
         await db.flush()
     if "research_mode" in body:
@@ -2526,6 +3094,8 @@ async def update_chat_defaults(
         row.research_2_1 = bool(body["research_2_1"])
     if "default_model" in body:
         row.default_model = (body["default_model"] or "").strip() or None
+    if "public_access_enabled" in body:
+        row.public_access_enabled = bool(body["public_access_enabled"])
     await db.commit()
     await db.refresh(row)
     return {
@@ -2535,7 +3105,8 @@ async def update_chat_defaults(
         "pubmed_search": row.pubmed_search,
         "openscholar_search": getattr(row, "openscholar_search", False),
         "research_2_1": getattr(row, "research_2_1", False),
-        "default_model": getattr(row, "default_model", None) or "ominis-2.0",
+        "public_access_enabled": getattr(row, "public_access_enabled", False),
+        "default_model": normalize_public_model_id(getattr(row, "default_model", None) or "ominis-2.0"),
     }
 
 

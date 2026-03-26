@@ -272,11 +272,21 @@ async def add_messages(
 
     new_msgs: list[ChatMessage] = []
     for msg_data in body.messages:
+        sources_val = msg_data.sources
+        if (
+            msg_data.role == "assistant"
+            and msg_data.sources_not_used
+            and len(msg_data.sources_not_used) > 0
+        ):
+            sources_val = {
+                "used": msg_data.sources or [],
+                "not_used": msg_data.sources_not_used,
+            }
         msg = ChatMessage(
             conversation_id=conv.id,
             role=msg_data.role,
             content=msg_data.content,
-            sources=msg_data.sources,
+            sources=sources_val,
             has_images=msg_data.has_images,
         )
         db.add(msg)

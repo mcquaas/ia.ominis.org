@@ -8,11 +8,13 @@ See: Arquitectura Ia Ominis – Brief Para Agente.pdf
 
 import json
 import logging
+import re
 from typing import Any
 
 from haystack.dataclasses import ChatMessage
 
 from app.rag.taxonomy import RAG_TAXONOMY, filter_valid_taxonomy_values
+from app.rag.tool_orchestration import sanitize_tool_sources_from_llm
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +48,28 @@ Analiza la pregunta del usuario (y el contexto si aplica) y produce este objeto 
   "needs_pubmed": true | false,
   "needs_recent_info": true | false,
   "clinical_risk": "low" | "medium" | "high",
-  "needs_long_context": true | false
+  "needs_long_context": true | false,
+  "needs_evidence_sources": true | false,
+  "tool_sources": {
+    "ominis_rag": true | false,
+    "web": true | false,
+    "pubmed": true | false,
+    "openscholar": true | false,
+    "clinical_trials": true | false,
+    "doctor_directory_mx": true | false,
+    "allcan_mexico": true | false
+  }
 }
+
+REGLAS (tool_sources — el orquestador activará estas fuentes en el backend):
+- ominis_rag: true si la pregunta conviene responder con documentos indexados en OMINIS (políticas, NOM, normas, guías, programas, taxonomía institucional, secretarías, COFEPRIS, etc.).
+- web: true si hace falta información reciente, noticias, o fuentes web generales; o needs_recent_info.
+- pubmed: true si pide literatura biomédica, artículos, PubMed.
+- openscholar: true si pide evidencia científica académica, revisiones sistemáticas, meta-análisis, estudios observacionales.
+- clinical_trials: true si pregunta por ensayos o estudios clínicos, reclutamiento, NCT, fases, registros de investigación, ClinicalTrials.gov, sedes o estados donde hay ensayos, o volumen geográfico de estudios. También true si dice solo «ensayos» o «busca ensayos sobre [fármaco o tema]» (no hace falta la palabra «clínico»). Si nombra un fármaco biológico (ej. pembrolizumab, nivolumab), activa clinical_trials y suele convenir pubmed y openscholar.
+- doctor_directory_mx: true si busca médicos o especialistas en México por ciudad, estado o especialidad (directorio ingerido).
+- allcan_mexico: true si busca organizaciones de pacientes, fundaciones, apoyo en cáncer, All.Can, redes de acompañamiento, centros de atención a pacientes en México (no médicos individuales).
+- Puedes activar varias fuentes a la vez si la pregunta lo requiere.
 
 REGLAS:
 - retrieval_constraints: listas de valores que DEBEN cumplir los documentos. Valores vacíos = no filtrar esa dimensión.
@@ -62,6 +84,7 @@ REGLAS:
 - clinical_risk: "low" solo si es informativa general sin implicación clínica. "medium" si menciona tratamientos, diagnósticos, riesgos de medicamentos, seguridad de fármacos, agonistas (ej. GLP-1), inhibidores o efectos adversos; "high" si pide recomendación clínica, dosificación o decisión diagnóstica/terapéutica.
 - needs_long_context: true solo si la pregunta implica ≥15 documentos, revisión narrativa, meta-análisis o análisis histórico multi-fuente extenso.
 - needs_recent_info: true si la pregunta pide información de actualidad, cambios recientes, algo ocurrido después de la fecha de corte del modelo (ej. "cambios en enero", "reforma reciente", "qué pasó este año", "últimas modificaciones", "cómo cambió la LGS recientemente"). En esos casos el sistema activará búsqueda web automáticamente para obtener información actualizada.
+- needs_evidence_sources: false SOLO si el mensaje es puramente conversacional y NO requiere buscar en bases de datos, web ni literatura: saludos ("hola", "buenos días"), despedidas, agradecimientos, confirmaciones vacías ("ok", "sí", "vale"), presentación sin pregunta de salud, o small talk sin pedir datos. true en cualquier otro caso (preguntas de salud, México, políticas, ensayos, síntomas, definiciones que requieran fuentes, etc.). Si hay duda, usa true.
 
 Pregunta y contexto:
 """
@@ -103,6 +126,9 @@ def _sanitize_intent(raw: dict) -> dict:
     needs_pubmed = bool(raw.get("needs_pubmed", False))
     needs_long_context = bool(raw.get("needs_long_context", False))
     needs_recent_info = bool(raw.get("needs_recent_info", False))
+    needs_evidence_sources = raw.get("needs_evidence_sources", True)
+    if not isinstance(needs_evidence_sources, bool):
+        needs_evidence_sources = True
 
     priority_tags = raw.get("priority_tags")
     if not isinstance(priority_tags, list):
@@ -110,6 +136,8 @@ def _sanitize_intent(raw: dict) -> dict:
     exclude = raw.get("exclude")
     if not isinstance(exclude, dict):
         exclude = {}
+
+    tool_sources = sanitize_tool_sources_from_llm(raw.get("tool_sources"))
 
     return {
         "retrieval_constraints": sanitized_constraints,
@@ -119,7 +147,9 @@ def _sanitize_intent(raw: dict) -> dict:
         "needs_pubmed": needs_pubmed,
         "needs_long_context": needs_long_context,
         "needs_recent_info": needs_recent_info,
+        "needs_evidence_sources": needs_evidence_sources,
         "clinical_risk": clinical_risk,
+        "tool_sources": tool_sources,
     }
 
 
@@ -188,7 +218,81 @@ async def run_metadata_intent_mapper(
         "needs_recent_info": False,
         "clinical_risk": CLINICAL_RISK_LOW,
         "needs_long_context": False,
+        "needs_evidence_sources": True,
+        "tool_sources": {},
     })
+
+
+# Short messages that must not trigger web/RAG/PubMed (orchestrator safety net).
+_CONV_ONLY_FULLMATCH = re.compile(
+    r"^(?:"
+    r"hola+|hello|hi|hey|buen[oa]s?\s*d[ií]as|buen[oa]s?\s*tardes|buen[oa]s?\s*noches|buen\s*d[ií]a|"
+    r"muy\s*buen[oa]s|qu[eé]\s*tal|"
+    r"gracias|muchas\s*gracias|thanks|thank\s*you|"
+    r"adi[oó]s|hasta\s*luego|chao|bye|"
+    r"ok+|okay|vale|listo|perfecto|entendido|"
+    r"s[ií]|no|"
+    r"buenas\b"
+    r")[\s!?.…]*$",
+    re.IGNORECASE,
+)
+
+
+def heuristic_conversation_only(question: str) -> bool:
+    """
+    True when the user message is almost certainly small talk (no health/evidence need).
+    Used as a safety net when the LLM intent mapper misclassifies.
+    """
+    q = (question or "").strip()
+    if not q:
+        return True
+    if len(q) > 120:
+        return False
+    # Strip common surrounding punctuation
+    q2 = re.sub(r"^[¿¡\s]+|[\s!?.…,:;]+$", "", q).strip()
+    if len(q2) > 100:
+        return False
+    if _CONV_ONLY_FULLMATCH.match(q2):
+        return True
+    # Only emoji / punctuation
+    if len(q2) <= 20 and not re.search(r"[\wáéíóúñüÁÉÍÓÚÑÜ]", q2):
+        return True
+    return False
+
+
+def conversation_only_default_intent() -> dict[str, Any]:
+    """Fixed intent for small-talk turns (skips the intent-mapper LLM)."""
+    return _sanitize_intent({
+        "retrieval_constraints": {},
+        "priority_tags": [],
+        "exclude": {},
+        "depth": DEPTH_SHALLOW,
+        "needs_pubmed": False,
+        "needs_recent_info": False,
+        "clinical_risk": CLINICAL_RISK_LOW,
+        "needs_long_context": False,
+        "needs_evidence_sources": False,
+        "tool_sources": {},
+    })
+
+
+def is_conversation_only_turn(
+    question: str,
+    intent: dict[str, Any] | None,
+    has_image: bool,
+    has_file: bool,
+) -> bool:
+    """
+    When True, skip RAG/web/PubMed/OpenScholar/clinical trials for this turn and use direct chat.
+    Never True if the user attached an image or file (those need processing).
+    """
+    if has_image or has_file:
+        return False
+    if heuristic_conversation_only(question):
+        return True
+    if intent and intent.get("needs_evidence_sources") is False:
+        return True
+    return False
 
 
 def get_rag_top_k_multiplier(intent: dict[str, Any] | None) -> int:

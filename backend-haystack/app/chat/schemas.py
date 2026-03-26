@@ -3,9 +3,9 @@ Pydantic schemas for the chat/conversation endpoints.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------- ChatMessage ----------
@@ -15,16 +15,44 @@ class ChatMessageOut(BaseModel):
     role: str
     content: str
     sources: Optional[list] = None
+    sources_not_used: Optional[list] = None
     has_images: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def unpack_stored_sources(cls, data: Any) -> Any:
+        """DB may store {"used": [...], "not_used": [...]} in the sources JSON column."""
+        if isinstance(data, dict):
+            src = data.get("sources")
+            if isinstance(src, dict) and "used" in src:
+                return {
+                    **data,
+                    "sources": src.get("used"),
+                    "sources_not_used": src.get("not_used"),
+                }
+            return data
+        src = getattr(data, "sources", None)
+        if isinstance(src, dict) and "used" in src:
+            return {
+                "id": data.id,
+                "role": data.role,
+                "content": data.content,
+                "sources": src.get("used"),
+                "sources_not_used": src.get("not_used"),
+                "has_images": data.has_images,
+                "created_at": data.created_at,
+            }
+        return data
 
 
 class ChatMessageCreate(BaseModel):
     role: str = Field(..., pattern="^(user|assistant)$")
     content: str = Field(..., min_length=1)
     sources: Optional[list] = None
+    sources_not_used: Optional[list] = None
     has_images: bool = False
 
 

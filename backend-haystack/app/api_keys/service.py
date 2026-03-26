@@ -65,10 +65,16 @@ async def create_api_key(
     return api_key, full_key
 
 
-async def validate_api_key(db: AsyncSession, plain_key: str) -> Optional[APIKey]:
+async def validate_api_key(
+    db: AsyncSession,
+    plain_key: str,
+    *,
+    record_usage: bool = True,
+) -> Optional[APIKey]:
     """
     Validate an API key by prefix lookup + bcrypt verification.
     Returns the APIKey model if valid, None otherwise.
+    When record_usage is False, do not bump request_count (e.g. dedicated validate HTTP endpoint).
     """
     if not plain_key.startswith("ominis_"):
         return None
@@ -92,10 +98,10 @@ async def validate_api_key(db: AsyncSession, plain_key: str) -> Optional[APIKey]
                 await db.commit()
                 return None
 
-            # Update usage stats
-            candidate.request_count += 1
-            candidate.last_used_at = datetime.now(timezone.utc)
-            await db.commit()
+            if record_usage:
+                candidate.request_count += 1
+                candidate.last_used_at = datetime.now(timezone.utc)
+                await db.commit()
 
             return candidate
 

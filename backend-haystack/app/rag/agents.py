@@ -11,6 +11,15 @@ from haystack.dataclasses import Document
 
 logger = logging.getLogger(__name__)
 
+
+def _reply_text(reply: Any) -> str:
+    """Compat across Haystack ChatMessage APIs (.text preferred, .content fallback)."""
+    txt = getattr(reply, "text", None)
+    if txt is not None:
+        return str(txt)
+    legacy = getattr(reply, "content", "")
+    return str(legacy or "")
+
 EVIDENCE_EXTRACTOR_PROMPT = """You are an evidence extractor for health research. Given document excerpts, output a JSON object with one entry per source.
 For each source [N] extract when present: study_design, N (sample size), OR/RR/HR (with 95% CI), p_values, outcomes, population, country.
 Output ONLY valid JSON, no markdown. Example shape:
@@ -55,7 +64,7 @@ def run_evidence_extractor_sync(generator, documents: list[Document], max_docs: 
     try:
         result = generator.run(messages=messages)
         replies = result.get("replies", [])
-        text = replies[0].content if replies else "{}"
+        text = _reply_text(replies[0]) if replies else "{}"
         # Strip markdown code block if present
         if "```" in text:
             start = text.find("{")
@@ -86,7 +95,7 @@ def run_bias_auditor_sync(generator, evidence_extracts: dict | list | None, docu
     try:
         result = generator.run(messages=messages)
         replies = result.get("replies", [])
-        text = replies[0].content if replies else "{}"
+        text = _reply_text(replies[0]) if replies else "{}"
         if "```" in text:
             start = text.find("{")
             end = text.rfind("}") + 1

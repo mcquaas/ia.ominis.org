@@ -48,6 +48,10 @@ def get_llm_config_overrides() -> dict[str, dict[str, Any]]:
                     overrides["extra_params"] = dict(row.extra_params) if row.extra_params else {}
                 if row.is_default is not None:
                     overrides["is_default"] = row.is_default
+                if getattr(row, "available_for_researcher", None) is not None:
+                    overrides["available_for_researcher"] = row.available_for_researcher
+                if getattr(row, "llm_provider", None) is not None:
+                    overrides["llm_provider"] = row.llm_provider
                 out[row.model_id] = overrides
         return out
     except Exception as e:

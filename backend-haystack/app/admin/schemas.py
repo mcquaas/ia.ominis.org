@@ -261,6 +261,32 @@ class TainacanImportResponse(BaseModel):
     skipped: int = 0
 
 
+# --- datos.gob.mx (CKAN) metadata import ---
+
+
+class DatosGobMxPreviewResponse(BaseModel):
+    totalPackages: int = 0
+    groupName: str = "salud"
+    groupTitle: str = ""
+    totalResourcesSample: int = 0
+    resourceFormatsSample: dict[str, int] = {}
+    sampleTitles: list[str] = []
+
+
+class DatosGobMxImportRequest(BaseModel):
+    category: str = "datos.gob.mx"
+    language: str = "es"
+    maxItems: Optional[int] = None
+    skipExisting: bool = True
+    group: str = "salud"
+
+
+class DatosGobMxImportResponse(BaseModel):
+    message: str
+    totalQueued: int = 0
+    skipped: int = 0
+
+
 class BatchReindexRequest(BaseModel):
     onlyWithTaxonomy: bool = True  # Only reindex sources that have taxonomy (to propagate to chunks)
     maxConcurrent: int = 3
@@ -290,7 +316,9 @@ class LLMModelConfigOut(BaseModel):
     display_name: str
     version_label: str = ""
     description: str = ""
-    backend_type: str  # "ollama" | "openai"
+    backend_type: str  # "ollama" | "openai" | "anthropic"
+    llm_provider: str = "ominis"  # ominis | openai | google | deepseek | claude
+    provider_keys_present: dict[str, bool] = {}
     backend_model: str
     backend_url_override: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -314,3 +342,27 @@ class LLMModelConfigUpdate(BaseModel):
     extra_params: Optional[dict] = None
     is_default: Optional[bool] = None
     available_for_researcher: Optional[bool] = None
+    llm_provider: Optional[str] = None
+    provider_credentials_patch: Optional[dict[str, str]] = None
+
+
+class LLMListModelsRequest(BaseModel):
+    model_id: str
+    provider_id: str
+    api_token: Optional[str] = None
+
+
+class VisionLlmConfigOut(BaseModel):
+    llm_provider: str = "ominis"
+    backend_model: str = ""
+    ollama_url: str = ""
+    openai_base_url: str = ""
+    provider_keys_present: dict[str, bool] = {}
+
+
+class VisionLlmConfigUpdate(BaseModel):
+    llm_provider: Optional[str] = None
+    backend_model: Optional[str] = None
+    ollama_url: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    provider_credentials_patch: Optional[dict[str, str]] = None

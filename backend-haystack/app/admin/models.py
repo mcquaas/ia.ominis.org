@@ -126,6 +126,11 @@ class SiteConfig(Base):
 
     id = Column(Integer, primary_key=True, default=1)
     banner_message = Column(Text, nullable=True)  # Yellow notification at top of app (superadmin only to set)
+    vision_llm_provider = Column(String(32), nullable=True)  # ominis | openai | google | deepseek | claude
+    vision_backend_model = Column(String(255), nullable=True)
+    vision_ollama_url = Column(String(512), nullable=True)  # OMINIS self-hosted (Ollama base, no /v1)
+    vision_openai_base_url = Column(String(512), nullable=True)  # Optional override for OpenAI-compatible vision
+    vision_credentials_enc = Column(Text, nullable=True)  # Encrypted JSON: ominis, openai, google, ...
 
     updated_at = Column(
         DateTime(timezone=True),
@@ -148,6 +153,11 @@ class ChatDefaults(Base):
     openscholar_search = Column(Boolean, default=False, nullable=False)  # Semantic Scholar (default off)
     research_2_1 = Column(Boolean, default=False, nullable=False)  # Research 2.1: deep multi-round + section-by-section (default off)
     default_model = Column(String(80), nullable=True)  # Default chat model id (e.g. ominis-2.0, ominis-2.0-med)
+    public_access_enabled = Column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )  # When false, the frontend/backend require authenticated users
 
     updated_at = Column(
         DateTime(timezone=True),
@@ -176,6 +186,9 @@ class LLMModelConfig(Base):
     extra_params = Column(JSONB, nullable=True)
     is_default = Column(Boolean(), nullable=True)
     available_for_researcher = Column(Boolean(), nullable=True)  # SuperAdmin: allow researchers to use this model (default True)
+    # Dashboard: OpenAI / Google / Claude / DeepSeek / OMINIS (ollama); tokens encrypted JSON per credential_key
+    llm_provider = Column(String(32), nullable=True)
+    provider_credentials_enc = Column(Text(), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),
