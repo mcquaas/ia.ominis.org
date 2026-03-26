@@ -35,7 +35,7 @@ rsync -avz --progress \
     --exclude '.env' \
     --exclude '__pycache__' \
     --exclude '*.pyc' \
-    -e "ssh -o StrictHostKeyChecking=no -i $KEY_FILE" \
+    -e "ssh -o StrictHostKeyChecking=no -i \"$KEY_FILE\"" \
     "$BACKEND_DIR/" \
     "$SSH_USER@$BACKEND_IP:$REMOTE_DIR/"
 
@@ -47,7 +47,7 @@ if [ -d "$PIPELINE_DIR" ]; then
       --exclude '*.pyc' \
       --exclude 'faiss_out' \
       --exclude 'logs' \
-      -e "ssh -o StrictHostKeyChecking=no -i $KEY_FILE" \
+      -e "ssh -o StrictHostKeyChecking=no -i \"$KEY_FILE\"" \
       "$PIPELINE_DIR/" \
       "$SSH_USER@$BACKEND_IP:$REMOTE_DIR/pipeline/"
   echo "  ✓ Pipeline synced"
@@ -58,6 +58,16 @@ echo "  ✓ Code synced"
 echo ""
 echo "Restarting backend service..."
 ssh -o StrictHostKeyChecking=no -i "$KEY_FILE" "$SSH_USER@$BACKEND_IP" << 'REMOTECMD'
+# Align nginx with 15m SSE / Vast cold start (was 600s or default 60s)
+for f in /etc/nginx/sites-available/ominis-backend /etc/nginx/sites-enabled/ominis-backend; do
+  if [ -f "$f" ]; then
+    sudo sed -i 's/proxy_read_timeout 600s/proxy_read_timeout 900s/g' "$f" 2>/dev/null || true
+    sudo sed -i 's/proxy_read_timeout 120s/proxy_read_timeout 900s/g' "$f" 2>/dev/null || true
+    sudo sed -i 's/proxy_send_timeout 600s/proxy_send_timeout 900s/g' "$f" 2>/dev/null || true
+  fi
+done
+sudo nginx -t 2>/dev/null && sudo systemctl reload nginx 2>/dev/null || true
+
 cd /opt/ominis-backend
 source venv/bin/activate
 pip install -r requirements.txt -q 2>/dev/null || true
