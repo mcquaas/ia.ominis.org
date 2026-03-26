@@ -6,6 +6,8 @@ import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { getSiteConfig } from "@/services/auth";
+import DoctorDirectorySearch from "@/components/DoctorDirectorySearch";
+import AllCanDirectorySearch from "@/components/AllCanDirectorySearch";
 
 export default function Header() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -115,8 +117,9 @@ export default function Header() {
             </span>
           </Link>
 
-          {/* Desktop Navigation */}
-          <div className="hidden md:flex items-center gap-6">
+          {/* Nav right: admin links (md+), ensayos México (signed-in), profile (md+), hamburger (mobile) */}
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            <div className="hidden md:flex items-center gap-6">
 
             {/* Main nav links — solo admin/superadmin (no mostrar a investigadores ni developers) */}
             {isAuthenticated && isAdmin && (
@@ -149,8 +152,24 @@ export default function Header() {
                 </Link>
               </>
             )}
+            </div>
 
-            {/* Auth Section */}
+            {isAuthenticated && user && (
+              <div className="flex items-center gap-1.5 sm:gap-2">
+                <Link
+                  href="/tools"
+                  className="hidden lg:inline text-[11px] text-gray-500 hover:text-cyan-300 transition-colors mr-1"
+                  title="Herramientas (directorios y ensayos)"
+                >
+                  Herramientas
+                </Link>
+                <DoctorDirectorySearch />
+                <AllCanDirectorySearch />
+              </div>
+            )}
+
+            {/* Auth Section — desktop */}
+            <div className="hidden md:flex items-center">
             {loading ? (
               <div className="w-8 h-8 rounded-full bg-white/10 animate-pulse" />
             ) : isAuthenticated && user ? (
@@ -311,6 +330,7 @@ export default function Header() {
                 </Link>
               </div>
             )}
+            </div>
           </div>
 
           {/* Mobile menu button */}

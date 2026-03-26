@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import Image from "next/image";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
 import ChatSidebar from "@/components/ChatSidebar";
 import Footer from "@/components/Footer";
@@ -16,14 +16,24 @@ interface Source {
   title: string;
   url: string;
   score?: number;
-  sourceType?: "rag" | "web" | "pubmed" | "openscholar" | "pdf" | "csv" | "xlsx" | "xls" | "sav"; // Type of the source (e.g., pdf, web, pubmed, openscholar)
+  sourceType?: "rag" | "web" | "pubmed" | "openscholar" | "clinicaltrials" | "directorio_mx" | "allcan" | "pdf" | "csv" | "xlsx" | "xls" | "sav";
   authors?: string;
   year?: string;
   journal?: string;
   doi?: string;
   ref_num?: number;
-  meta?: { page_number?: number; file_name?: string; }; // Additional metadata from the backend
-  snippet?: string; // Optional excerpt for preview modal
+  nctId?: string;
+  ctStartDate?: string;
+  ctLocationsSummary?: string;
+  ctFallbackSearchUrl?: string;
+  ctClassicShowUrl?: string;
+  meta?: {
+    page_number?: number;
+    file_name?: string;
+    chunk_id?: string;
+    text_excerpt?: string;
+  };
+  snippet?: string;
 }
 
 interface SourceWithDisplayNum extends Source {
@@ -42,6 +52,8 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
+  /** Retrieved but not cited in the answer (SSE `sources_not_used`). */
+  sourcesNotUsed?: Source[];
   images?: string[];
   charts?: ChartData[];
   isReport?: boolean;
@@ -49,6 +61,10 @@ interface Message {
   model?: string;  // e.g. "ominis-2.0" from done event (shown as Investigación)
   dbMessageId?: number;  // DB id when persisted (for feedback)
   reportTitle?: string;   // from backend for PDF filename (e.g. "Salud Digital y Reforma LGS")
+  /** English keywords sent to ClinicalTrials.gov API (SSE clinical_trials_keywords). */
+  clinicalTrialsKeywords?: string;
+  /** Backend hints: add missing tools or «profundizar» second pass (SSE suggested_add_tools). */
+  suggestedAddTools?: { id: string; label: string; extend?: boolean }[];
 }
 
 interface ModelOption {
@@ -61,6 +77,16 @@ interface ModelOption {
 }
 
 const HISTORY_ENABLED_KEY = "ominis_history_enabled";
+
+/** Max wait for `/api/query-stream` (SSE). Must cover Vast Serverless cold start; align with backend `vast_serverless_client_timeout` (default 900s). */
+const QUERY_STREAM_CLIENT_TIMEOUT_MS = 900_000;
+
+function clinicalTrialCardTitle(source: Source): string {
+  const raw = (source.title || "").trim();
+  const short = raw.replace(/\s*\(NCT\d+\)\s*$/i, "").trim();
+  if (short.length > 140) return `${short.slice(0, 137)}…`;
+  return short || raw || "Ensayo clínico";
+}
 
 /** Decode HTML entities so they display correctly (e.g. &oacute; → ó). Preserves markdown. */
 function decodeHtmlEntities(text: string): string {
@@ -77,6 +103,85 @@ function decodeHtmlEntities(text: string): string {
     if (hex != null) return String.fromCharCode(parseInt(hex, 16));
     return entities[`&${name};`] ?? `&${name};`;
   });
+}
+
+function buildContextSearchText(source: Source): string {
+  const fromMeta = source.meta?.text_excerpt?.trim();
+  if (fromMeta) {
+    const cleaned = decodeHtmlEntities(fromMeta)
+      .replace(/\s+/g, " ")
+      .replace(/[\[\]{}<>]/g, " ")
+      .trim();
+    return cleaned.slice(0, 120);
+  }
+  const raw = decodeHtmlEntities(source.snippet || source.title || "");
+  const cleaned = raw
+    .replace(/\s+/g, " ")
+    .replace(/[\[\]{}<>]/g, " ")
+    .trim();
+  return cleaned.slice(0, 120);
+}
+
+function isCsvLikeUrl(url: string): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return /\.csv(\?[^\s]*)?$/i.test(u.pathname) || u.pathname.toLowerCase().endsWith(".csv");
+  } catch {
+    return false;
+  }
+}
+
+/** PDF file URLs — must not use HTML text fragments (#:~:text=), which break Chrome's PDF viewer. */
+function isPdfUrl(url: string): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url.split("#")[0]);
+    return /\.pdf(\?[^\s#]*)?$/i.test(u.pathname) || u.pathname.toLowerCase().endsWith(".pdf");
+  } catch {
+    return false;
+  }
+}
+
+/** Server-side preview via `/api/csv-preview` (avoids browser CORS). */
+function isCsvPreviewAllowedHost(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+    const h = u.hostname.toLowerCase();
+    if (h === "localhost" || h === "127.0.0.1") return true;
+    if (h.endsWith("ominis.org")) return true;
+    if (h.endsWith(".gob.mx")) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function buildSourceDeepLink(source: Source): string {
+  const url = (source.url || "").trim();
+  if (!url) return "";
+  const base = url.split("#")[0];
+  const searchText = buildContextSearchText(source);
+  const pdf = isPdfUrl(url) || source.sourceType === "pdf";
+
+  // PDF: use page + search in the hash (Chrome/Adobe-style). Never #:~:text= on PDFs — it can crash the viewer.
+  if (pdf) {
+    const page = source.meta?.page_number;
+    if (page != null && page > 0) {
+      const parts = [`page=${page}`];
+      if (searchText) parts.push(`search=${encodeURIComponent(searchText)}`);
+      return `${base}#${parts.join("&")}`;
+    }
+    return base;
+  }
+
+  // HTML/text deep link using text fragments (Chrome/Edge): #:~:text=...
+  if (!url.includes("#") && /^https?:\/\//i.test(url) && searchText) {
+    return `${base}#:~:text=${encodeURIComponent(searchText)}`;
+  }
+
+  return url;
 }
 
 /** Extract numbered questions (lines ending with ?) from plan message content for "Alcance de la investigación". */
@@ -103,23 +208,34 @@ interface MainLayoutProps {
 
 export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const router = useRouter();
-  const { isAuthenticated, user } = useAuth();
+  const pathname = usePathname();
+  const { isAuthenticated, user, loading: authLoading } = useAuth();
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState("");
   const [loadingModel, setLoadingModel] = useState<string | null>(null);
+  /** GPU cold start: backend sends phase gpu_warmup + waitSeconds while waiting for first token */
+  const [gpuWarmupHint, setGpuWarmupHint] = useState(false);
+  const [gpuWaitSeconds, setGpuWaitSeconds] = useState<number | null>(null);
   const [ragSearchEnabled, setRagSearchEnabled] = useState(true);
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const [pubmedSearchEnabled, setPubmedSearchEnabled] = useState(true);
   const [openscholarSearchEnabled, setOpenscholarSearchEnabled] = useState(false);
+  /** ClinicalTrials.gov (México); solo usuarios autenticados (el backend ignora si no hay JWT). */
+  const [clinicalTrialsSearchEnabled, setClinicalTrialsSearchEnabled] = useState(false);
+  const [doctorDirectorySearchEnabled, setDoctorDirectorySearchEnabled] = useState(false);
+  const [allcanSearchEnabled, setAllcanSearchEnabled] = useState(false);
   const [researchModeEnabled, setResearchModeEnabled] = useState(false);
   const [research21Enabled, setResearch21Enabled] = useState(false); // Research 2.1 (deep multi-round + section-by-section) from Dashboard > Opciones
+  const [publicAccessEnabled, setPublicAccessEnabled] = useState(true);
+  const [chatDefaultsLoading, setChatDefaultsLoading] = useState(true);
   const [uploadedImages, setUploadedImages] = useState<Array<{ data: string; name: string }>>([]);
   const [uploadedFiles, setUploadedFiles] = useState<Array<{ name: string; ext: string; text: string; extracting: boolean }>>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
+  const [showModelMenu, setShowModelMenu] = useState(false);
   const [plusMenuOpenDownward, setPlusMenuOpenDownward] = useState(false);
   const [plusMenuPosition, setPlusMenuPosition] = useState<{ left: number; top: number; openUpward?: boolean } | null>(null);
   const menuPortalRef = useRef<HTMLDivElement | null>(null);
@@ -146,6 +262,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
 
   // When + menu opens, choose placement and position for portal (so it's not clipped by overflow-hidden)
   useLayoutEffect(() => {
@@ -173,6 +290,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
 
   // Apply server-configured chat defaults on mount (Investigación, Ominis, PubMed, Web)
   useEffect(() => {
+    setChatDefaultsLoading(true);
     getChatDefaults()
       .then((d) => {
         setResearchModeEnabled(d.research_mode ?? false);
@@ -181,9 +299,33 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
         setPubmedSearchEnabled(d.pubmed_search);
         setOpenscholarSearchEnabled(d.openscholar_search ?? false);
         setResearch21Enabled(d.research_2_1 ?? false);
+        setPublicAccessEnabled(d.public_access_enabled ?? true);
       })
-      .catch(() => { /* keep current defaults on error */ });
+      .catch(() => {
+        // Keep current defaults on error.
+        setPublicAccessEnabled(true);
+      })
+      .finally(() => setChatDefaultsLoading(false));
   }, []);
+
+  // When chat requires login, send anonymous users straight to login (preserve return URL).
+  useEffect(() => {
+    if (authLoading || chatDefaultsLoading) return;
+    if (publicAccessEnabled || isAuthenticated) return;
+    if (typeof window === "undefined") return;
+    const q = window.location.search.replace(/^\?/, "");
+    const base = pathname || "/c";
+    const returnTo = q ? `${base}?${q}` : base;
+    router.replace(`/login?next=${encodeURIComponent(returnTo)}`);
+  }, [
+    authLoading,
+    chatDefaultsLoading,
+    publicAccessEnabled,
+    isAuthenticated,
+    pathname,
+    router,
+  ]);
+
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
   const [historyEnabled, setHistoryEnabled] = useState(true);
@@ -198,10 +340,72 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   }, []);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const [activeStreamAssistantId, setActiveStreamAssistantId] = useState<string | null>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
-  /** When true, user scrolled up during streaming; don't auto-scroll until they scroll back to bottom */
+  /** When true, user left the bottom; don't auto-scroll until they scroll back to the bottom */
   const [userHasScrolledUp, setUserHasScrolledUp] = useState(false);
+  /** Same as userHasScrolledUp, updated synchronously in scroll — avoids auto-scroll winning a frame before React re-renders */
+  const userHasScrolledUpRef = useRef(false);
   const [sourcePreviewSource, setSourcePreviewSource] = useState<Source | null>(null);
+  const [csvPreview, setCsvPreview] = useState<{
+    url: string;
+    title?: string;
+    rows: string[][];
+    truncated: boolean;
+    rawText: string;
+  } | null>(null);
+  const [csvPreviewLoading, setCsvPreviewLoading] = useState(false);
+  const [csvPreviewError, setCsvPreviewError] = useState<string | null>(null);
+  const [expandedClinicalTrialByUrl, setExpandedClinicalTrialByUrl] = useState<Record<string, boolean>>({});
+
+  const openCsvPreview = useCallback(async (url: string, title?: string) => {
+    setCsvPreviewError(null);
+    setCsvPreviewLoading(true);
+    setCsvPreview(null);
+    try {
+      const res = await fetch(`/api/csv-preview?url=${encodeURIComponent(url)}`);
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        rows?: string[][];
+        truncated?: boolean;
+        rawText?: string;
+      };
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setCsvPreview({
+        url,
+        title,
+        rows: data.rows || [],
+        truncated: !!data.truncated,
+        rawText: data.rawText || "",
+      });
+    } catch (e) {
+      setCsvPreviewError(e instanceof Error ? e.message : "Error al cargar CSV");
+    } finally {
+      setCsvPreviewLoading(false);
+    }
+  }, []);
+
+  function SourceAnchor(props: { source: Source; className?: string; children: React.ReactNode }) {
+    const { source, className, children } = props;
+    const href = buildSourceDeepLink(source);
+    const csvOk = isCsvLikeUrl(source.url) && isCsvPreviewAllowedHost(source.url);
+    if (csvOk) {
+      return (
+        <button
+          type="button"
+          onClick={() => void openCsvPreview(source.url, source.title)}
+          className={className}
+        >
+          {children}
+        </button>
+      );
+    }
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
+        {children}
+      </a>
+    );
+  }
 
   // ─── Chat history helpers ───────────────────────────────────────
 
@@ -235,11 +439,28 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
         activeConversationIdRef.current = detail.id;
         const loaded: Message[] = [];
         for (const m of detail.messages) {
+          const row = m as {
+            sources?: unknown;
+            sources_not_used?: Source[];
+          };
+          let sources: Source[] | undefined;
+          let sourcesNotUsed: Source[] | undefined = row.sources_not_used;
+          const raw = row.sources;
+          if (Array.isArray(raw)) {
+            sources = raw as Source[];
+          } else if (raw && typeof raw === "object" && raw !== null && "used" in raw) {
+            const o = raw as { used?: Source[]; not_used?: Source[] };
+            sources = o.used;
+            if (!sourcesNotUsed?.length && o.not_used?.length) sourcesNotUsed = o.not_used;
+          } else {
+            sources = raw as Source[] | undefined;
+          }
           loaded.push({
             id: String(m.id),
             role: m.role as "user" | "assistant",
             content: m.content,
-            sources: m.sources as Source[] | undefined,
+            sources,
+            sourcesNotUsed,
             images: m.has_images ? [] : undefined,
             dbMessageId: m.role === "assistant" ? m.id : undefined,
           });
@@ -364,6 +585,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       sources?: Source[],
       hasImages: boolean = false,
       assistantMessageId?: string,
+      sourcesNotUsed?: Source[],
     ) => {
       if (!isAuthenticated || !historyEnabled) return;
 
@@ -385,7 +607,11 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
           {
             role: "assistant",
             content: assistantContent,
-            sources: sources as Array<Record<string, unknown>> | undefined,
+            sources: sources as unknown as Array<Record<string, unknown>> | undefined,
+            sources_not_used:
+              sourcesNotUsed && sourcesNotUsed.length > 0
+                ? (sourcesNotUsed as unknown as Array<Record<string, unknown>>)
+                : undefined,
           },
         ]);
 
@@ -413,37 +639,47 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     [isAuthenticated, historyEnabled, loadConversations, router],
   );
 
-  const scrollToBottom = () => {
-    if (messagesContainerRef.current) {
-      messagesContainerRef.current.scrollTo({
-        top: messagesContainerRef.current.scrollHeight,
-        behavior: "smooth",
-      });
-    }
+  const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior });
   };
 
   const SCROLL_AT_BOTTOM_THRESHOLD = 100;
 
   useEffect(() => {
+    if (activeStreamAssistantId) return;
     if (!userHasScrolledUp) scrollToBottom();
     inputRef.current?.focus();
-  }, [messages, userHasScrolledUp]);
+  }, [messages, userHasScrolledUp, activeStreamAssistantId]);
 
-  // When loading (streaming), only auto-scroll if user hasn't scrolled up
+  // When loading (streaming), only auto-scroll if user hasn't scrolled up — unless we follow the answer anchor
   useEffect(() => {
+    if (activeStreamAssistantId) return;
     if (isLoading && !userHasScrolledUp) scrollToBottom();
-  }, [isLoading, loadingStatus, userHasScrolledUp]);
+  }, [isLoading, loadingStatus, userHasScrolledUp, activeStreamAssistantId]);
 
-  // Scroll-to-top button visibility; track if user is at bottom (so we don't auto-scroll when they scrolled up)
+  // While streaming, follow new content by pinning the thread to the bottom — never scrollIntoView on the
+  // answer top (that yanks the user away from sources below). userHasScrolledUpRef is sync-updated on scroll.
+  useLayoutEffect(() => {
+    if (!activeStreamAssistantId || userHasScrolledUpRef.current) return;
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+  }, [messages, activeStreamAssistantId]);
+
+  // Scroll-to-top visibility + pin state (ref updated in the same tick as scroll for reliable stream follow)
   useEffect(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
     const onScroll = () => {
       setShowScrollTop(el.scrollTop > 200);
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_AT_BOTTOM_THRESHOLD;
-      setUserHasScrolledUp(!atBottom);
+      const pinned = !atBottom;
+      userHasScrolledUpRef.current = pinned;
+      setUserHasScrolledUp(pinned);
     };
-    el.addEventListener("scroll", onScroll);
+    el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
     return () => el.removeEventListener("scroll", onScroll);
   }, [messages.length]);
@@ -506,6 +742,9 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   const getEffectiveSources = (content: string, existingSources?: Source[]): Source[] | undefined => {
     // No backend sources → don't trust any URLs in the LLM text
     if (!existingSources || existingSources.length === 0) return undefined;
+    // When backend already provides stable reference numbers, preserve them exactly.
+    // Merging extracted URL sources here can shift indices and break [N] mapping.
+    if (existingSources.some((s) => typeof s.ref_num === "number")) return existingSources;
 
     const extracted = extractSourcesFromContent(content);
     if (extracted.length === 0) return existingSources;
@@ -525,6 +764,11 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   // Format content with citation references [1], [2], etc.
   const formatContentWithCitations = (content: string, sources?: Source[]) => {
     if (!sources || sources.length === 0) return content;
+    // Keep backend citation numbers stable when ref_num is present.
+    // Avoid client-side URL/author remapping that can desync source cards.
+    if (sources.some((s) => typeof s.ref_num === "number")) {
+      return content.trim();
+    }
 
     let formattedContent = content;
 
@@ -663,14 +907,32 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       source = sources[num - 1];
     }
     if (source && source.url) {
-      let citationHref = source.url;
+      const citationHref = buildSourceDeepLink(source);
       let citationTitle = decodeHtmlEntities(source.title || "");
 
       if (source.sourceType === "pdf" && source.meta?.page_number) {
-        citationHref = `${source.url}#page=${source.meta.page_number}`;
         citationTitle = source.title
           ? `${citationTitle} (página ${source.meta.page_number})`
           : `Página ${source.meta.page_number}`;
+      }
+
+      const csvOk = isCsvLikeUrl(source.url) && isCsvPreviewAllowedHost(source.url);
+      const citeCls =
+        "inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-medium bg-blue-500 hover:bg-blue-400 text-white rounded-full align-super mx-0.5 transition-colors" +
+        (csvOk ? " cursor-pointer" : "");
+
+      if (csvOk) {
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => void openCsvPreview(source.url, source.title)}
+            className={citeCls}
+            title={citationTitle}
+          >
+            {sourceNum}
+          </button>
+        );
       }
 
       return (
@@ -679,7 +941,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
           href={citationHref}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-medium bg-blue-500 hover:bg-blue-400 text-white rounded-full align-super mx-0.5 transition-colors"
+          className={citeCls}
           title={citationTitle}
         >
           {sourceNum}
@@ -1254,19 +1516,30 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
           ? (research128KModel?.displayName || "Ominis 2.0 Research 128K")
           : (availableModels.find((m) => m.id === "ominis-2.0-research")?.displayName || "Ominis 2.0 Research 8K");
 
-  // Close menu when clicking outside (consider both trigger and portaled menu)
+  // Close menus when clicking outside (consider both trigger and portaled + menu)
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Node;
       if (plusMenuRef.current?.contains(target)) return;
       if (menuPortalRef.current?.contains(target)) return;
+      if (modelMenuRef.current?.contains(target)) return;
       setShowPlusMenu(false);
+      setShowModelMenu(false);
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  type RunStreamOpts = { messageContent: string; hadImages: boolean; currentImages: string[]; currentFileContext: string };
+  type RunStreamOpts = {
+    messageContent: string;
+    hadImages: boolean;
+    currentImages: string[];
+    currentFileContext: string;
+    /** When false, request uses manual toggles (e.g. after «Agregar»). Default: automated orchestration. */
+    tool_automation?: boolean;
+    /** Bump retrieval breadth (e.g. «profundizar» follow-up). */
+    num_sources?: number;
+  };
 
   const runStream = async (
     question: string,
@@ -1276,8 +1549,12 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
   ) => {
     setMessages((prev) => [...prev, userMessage]);
     setIsLoading(true);
+    userHasScrolledUpRef.current = false;
+    setUserHasScrolledUp(false);
     setLoadingStatus("Analizando...");
     setLoadingModel(selectedModel);
+    setGpuWarmupHint(false);
+    setGpuWaitSeconds(null);
     if (researchModeEnabled) {
       setResearchSteps([]);
       setResearchProgress(null);
@@ -1286,7 +1563,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
     }
     try {
       const controller = new AbortController();
-      const timeoutMs = researchModeEnabled ? 300000 : 120000;
+      const timeoutMs = QUERY_STREAM_CLIENT_TIMEOUT_MS;
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       const history = historyForRequest.slice(-20).map((m) => ({ role: m.role, content: m.content }));
       const headers: HeadersInit = { "Content-Type": "application/json" };
@@ -1303,10 +1580,18 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
         web_search: researchModeEnabled ? true : webSearchEnabled,
         pubmed_search: researchModeEnabled ? true : pubmedSearchEnabled,
         openscholar_search: researchModeEnabled ? true : openscholarSearchEnabled,
+        clinical_trials_search: isAuthenticated && clinicalTrialsSearchEnabled,
+        doctor_directory_search: isAuthenticated && doctorDirectorySearchEnabled,
+        allcan_search: isAuthenticated && allcanSearchEnabled,
+        /** Haystack orchestrator selects sources from question + intent (LLM + heuristics). Set false for manual toggles only. */
+        tool_automation: opts.tool_automation !== false,
         file_context: opts.currentFileContext || undefined,
         excluded_sources: researchModeEnabled ? Array.from(excludedSources) : undefined,
         research_2_1: researchModeEnabled ? research21Enabled : undefined,
       };
+      if (typeof opts.num_sources === "number" && opts.num_sources > 0) {
+        body.num_sources = Math.min(48, Math.floor(opts.num_sources));
+      }
       const response = await fetch("/api/query-stream", { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
       if (!response.ok) {
         clearTimeout(timeoutId);
@@ -1322,7 +1607,9 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
       let receivedData = false;
       let streamedContent = "";
       let streamedSources: Source[] = [];
+      let streamedCtKw = "";
       const assistantId = generateId();
+      setActiveStreamAssistantId(assistantId);
       let messageAdded = false;
       try {
         while (true) {
@@ -1344,6 +1631,8 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
               if (eventData.type === "status") {
                 setLoadingStatus(eventData.message);
                 setLoadingModel(eventData.model ?? null);
+                if (eventData.phase === "gpu_warmup") setGpuWarmupHint(true);
+                if (typeof eventData.waitSeconds === "number") setGpuWaitSeconds(eventData.waitSeconds);
               } else if (eventData.type === "research_step") {
                 if (eventData.step) {
                   setResearchSteps((prev) => {
@@ -1359,21 +1648,45 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
                   setIsLoading(false);
                   setLoadingStatus("");
                   setLoadingModel(null);
-                  setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent, model: undefined }]);
+                  setGpuWarmupHint(false);
+                  setGpuWaitSeconds(null);
+                  setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent, model: undefined, clinicalTrialsKeywords: streamedCtKw || undefined }]);
                 } else {
                   setIsLoading(false);
                   setLoadingStatus("");
                   setLoadingModel(null);
+                  setGpuWarmupHint(false);
+                  setGpuWaitSeconds(null);
                   setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: streamedContent } : m)));
                 }
               } else if (eventData.type === "sources") {
                 if (eventData.sources?.length > 0) {
                   streamedSources = eventData.sources;
+                  const kw =
+                    typeof eventData.clinical_trials_keywords === "string"
+                      ? eventData.clinical_trials_keywords.trim()
+                      : "";
+                  if (kw) streamedCtKw = kw;
                   if (!messageAdded) {
                     messageAdded = true;
-                    setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "", sources: streamedSources }]);
+                    setMessages((prev) => [
+                      ...prev,
+                      {
+                        id: assistantId,
+                        role: "assistant",
+                        content: "",
+                        sources: streamedSources,
+                        clinicalTrialsKeywords: kw || undefined,
+                      },
+                    ]);
                   } else {
-                    setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, sources: streamedSources } : m)));
+                    setMessages((prev) =>
+                      prev.map((m) =>
+                        m.id === assistantId
+                          ? { ...m, sources: streamedSources, clinicalTrialsKeywords: kw || m.clinicalTrialsKeywords }
+                          : m,
+                      ),
+                    );
                   }
                 }
               } else if (eventData.type === "charts") {
@@ -1382,30 +1695,61 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
                 }
               } else if (eventData.type === "done") {
                 const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
-                const finalSources = Array.isArray(eventData.sources) ? eventData.sources : [];
+                const finalSources: Source[] = Array.isArray(eventData.sources) ? eventData.sources : streamedSources;
+                const notUsedRaw = eventData.sources_not_used;
+                const sourcesNotUsed: Source[] | undefined =
+                  Array.isArray(notUsedRaw) && notUsedRaw.length > 0 ? (notUsedRaw as Source[]) : undefined;
                 const finalCharts = eventData.charts || undefined;
                 const isReport = !!eventData.is_report;
                 const modelUsed = eventData.model || undefined;
                 const degradation = eventData.degradation || undefined;
                 const reportTitle = eventData.report_title || undefined;
+                const doneKw =
+                  typeof eventData.clinical_trials_keywords === "string"
+                    ? eventData.clinical_trials_keywords.trim()
+                    : "";
+                const ctKwFinal = doneKw || streamedCtKw || undefined;
+                const suggestedRaw = eventData.suggested_add_tools;
+                const suggestedAddTools =
+                  Array.isArray(suggestedRaw) && suggestedRaw.length > 0
+                    ? (suggestedRaw as { id: string; label: string; extend?: boolean }[])
+                        .filter((x) => x && typeof x.id === "string" && typeof x.label === "string")
+                        .map((x) => ({
+                          id: x.id,
+                          label: x.label,
+                          ...(x.extend === true ? { extend: true as const } : {}),
+                        }))
+                    : undefined;
                 if (!messageAdded) {
                   setMessages((prev) => [...prev, {
                     id: assistantId, role: "assistant", content: finalContent,
                     sources: finalSources.length > 0 ? finalSources : undefined,
+                    sourcesNotUsed,
                     charts: finalCharts, isReport, model: modelUsed, degradation, reportTitle,
+                    clinicalTrialsKeywords: ctKwFinal,
+                    suggestedAddTools,
                   }]);
                 } else {
                   setMessages((prev) => prev.map((m) =>
-                    m.id === assistantId ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : undefined, charts: finalCharts || m.charts, isReport: isReport || m.isReport, model: modelUsed || m.model, degradation, reportTitle: reportTitle ?? m.reportTitle } : m
+                    m.id === assistantId ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : undefined, sourcesNotUsed: sourcesNotUsed ?? m.sourcesNotUsed, charts: finalCharts || m.charts, isReport: isReport || m.isReport, model: modelUsed || m.model, degradation, reportTitle: reportTitle ?? m.reportTitle, clinicalTrialsKeywords: ctKwFinal || m.clinicalTrialsKeywords, suggestedAddTools } : m
                   ));
                 }
                 setResearchSteps([]);
                 setResearchProgress(null);
                 setExpandedResearchStepIndex(null);
-                persistMessages(opts.messageContent, finalContent, finalSources.length > 0 ? finalSources : undefined, opts.hadImages, assistantId);
+                persistMessages(
+                  opts.messageContent,
+                  finalContent,
+                  finalSources.length > 0 ? finalSources : undefined,
+                  opts.hadImages,
+                  assistantId,
+                  sourcesNotUsed,
+                );
                 setIsLoading(false);
                 setLoadingStatus("");
                 setLoadingModel(null);
+                setGpuWarmupHint(false);
+                setGpuWaitSeconds(null);
                 if (researchModeEnabled && isReport) setResearchModeEnabled(false);
                 inputRef.current?.focus();
                 clearTimeout(timeoutId);
@@ -1419,7 +1763,7 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
           }
         }
         if (streamedContent && !messageAdded) {
-          setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent, sources: streamedSources.length > 0 ? streamedSources : undefined }]);
+          setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent, sources: streamedSources.length > 0 ? streamedSources : undefined, clinicalTrialsKeywords: streamedCtKw || undefined }]);
         }
         if (streamedContent) {
           persistMessages(opts.messageContent, streamedContent, streamedSources.length > 0 ? streamedSources : undefined, opts.hadImages, assistantId);
@@ -1433,13 +1777,71 @@ export default function MainLayout({ initialUuid }: MainLayoutProps = {}) {
         : error instanceof Error ? error.message : "Error desconocido";
       setMessages((prev) => [...prev, { id: generateId(), role: "assistant", content: `Lo siento, hubo un error: ${errorText}. Por favor intenta de nuevo.` }]);
     } finally {
+      setActiveStreamAssistantId(null);
       setLoadingStatus("");
       setLoadingModel(null);
+      setGpuWarmupHint(false);
+      setGpuWaitSeconds(null);
       setIsLoading(false);
       inputRef.current?.focus();
     }
   };
   runStreamRef.current = runStream;
+
+  const activateSuggestedToolId = (toolId: string) => {
+    switch (toolId) {
+      case "ominis_rag":
+        setRagSearchEnabled(true);
+        break;
+      case "web":
+        setWebSearchEnabled(true);
+        break;
+      case "pubmed":
+        setPubmedSearchEnabled(true);
+        break;
+      case "openscholar":
+        setOpenscholarSearchEnabled(true);
+        break;
+      case "clinical_trials":
+        setClinicalTrialsSearchEnabled(true);
+        break;
+      case "doctor_directory_mx":
+        setDoctorDirectorySearchEnabled(true);
+        break;
+      case "allcan_mexico":
+        setAllcanSearchEnabled(true);
+        break;
+      default:
+        break;
+    }
+  };
+
+  const handleSuggestedAddTool = (toolId: string, toolLabel: string, extend?: boolean) => {
+    if (isLoading) return;
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser?.content?.trim()) return;
+    activateSuggestedToolId(toolId);
+    const shortName = toolLabel.replace(/\s*·\s*profundizar\s*$/i, "").trim();
+    const followUpContent =
+      extend === true
+        ? `[Segunda búsqueda más profunda (${shortName}). Prioriza cifras, presupuestos, tablas, informes oficiales, CIEP, transparencia y PDFs institucionales. Cita cada dato con [N].]\n\n${lastUser.content}`
+        : `[Ampliar fuentes: ${toolLabel}]\n\n${lastUser.content}`;
+    const userMsg: Message = {
+      id: generateId(),
+      role: "user",
+      content: followUpContent,
+      images: lastUser.images,
+    };
+    const opts: RunStreamOpts = {
+      messageContent: userMsg.content,
+      hadImages: !!lastUser.images?.length,
+      currentImages: lastUser.images ?? [],
+      currentFileContext: uploadedFiles.filter((f) => f.text && !f.extracting).map((f) => `--- ${f.name} ---\n${f.text}`).join("\n\n"),
+      tool_automation: false,
+      num_sources: extend === true ? 14 : undefined,
+    };
+    void runStream(userMsg.content, messages, userMsg, opts);
+  };
 
   const sendMessage = async () => {
     const question = input.trim();
@@ -1660,12 +2062,16 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
 
     setMessages([...newMessages, userMessage]);
     setIsLoading(true);
+    userHasScrolledUpRef.current = false;
+    setUserHasScrolledUp(false);
     setLoadingStatus("Analizando...");
     setLoadingModel(selectedModel);
+    setGpuWarmupHint(false);
+    setGpuWaitSeconds(null);
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      const timeoutId = setTimeout(() => controller.abort(), QUERY_STREAM_CLIENT_TIMEOUT_MS);
 
       const history = newMessages
         .slice(-20)
@@ -1689,6 +2095,10 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
           web_search: researchModeEnabled ? true : webSearchEnabled,
           pubmed_search: researchModeEnabled ? true : pubmedSearchEnabled,
           openscholar_search: researchModeEnabled ? true : openscholarSearchEnabled,
+          clinical_trials_search: isAuthenticated && clinicalTrialsSearchEnabled,
+          doctor_directory_search: isAuthenticated && doctorDirectorySearchEnabled,
+          allcan_search: isAuthenticated && allcanSearchEnabled,
+          tool_automation: true,
           iterations: undefined,
           max_total_sources: undefined,
           max_follow_links: undefined,
@@ -1715,7 +2125,9 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
       let receivedData = false;
       let streamedContent = "";
       let streamedSources: Source[] = [];
+      let streamedCtKw = "";
       const assistantId = generateId();
+      setActiveStreamAssistantId(assistantId);
       let messageAdded = false;
 
       try {
@@ -1743,6 +2155,8 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                 if (eventData.type === "status") {
                   setLoadingStatus(eventData.message);
                   setLoadingModel(eventData.model ?? null);
+                  if (eventData.phase === "gpu_warmup") setGpuWarmupHint(true);
+                  if (typeof eventData.waitSeconds === "number") setGpuWaitSeconds(eventData.waitSeconds);
 
                 } else if (eventData.type === "chunk") {
                   streamedContent += eventData.text || "";
@@ -1751,7 +2165,9 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                     setIsLoading(false);
                     setLoadingStatus("");
                     setLoadingModel(null);
-                    setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent }]);
+                    setGpuWarmupHint(false);
+                    setGpuWaitSeconds(null);
+                    setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: streamedContent, clinicalTrialsKeywords: streamedCtKw || undefined }]);
                   } else {
                     setMessages((prev) =>
                       prev.map((m) => m.id === assistantId ? { ...m, content: streamedContent } : m)
@@ -1761,29 +2177,74 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                 } else if (eventData.type === "sources") {
                   if (eventData.sources?.length > 0) {
                     streamedSources = eventData.sources;
-                    setMessages((prev) =>
-                      prev.map((m) => m.id === assistantId ? { ...m, sources: streamedSources } : m)
-                    );
+                    const kw =
+                      typeof eventData.clinical_trials_keywords === "string"
+                        ? eventData.clinical_trials_keywords.trim()
+                        : "";
+                    if (kw) streamedCtKw = kw;
+                    setMessages((prev) => {
+                      const exists = prev.some((m) => m.id === assistantId);
+                      if (!exists) {
+                        return [
+                          ...prev,
+                          {
+                            id: assistantId,
+                            role: "assistant",
+                            content: "",
+                            sources: streamedSources,
+                            clinicalTrialsKeywords: kw || undefined,
+                          },
+                        ];
+                      }
+                      return prev.map((m) =>
+                        m.id === assistantId
+                          ? { ...m, sources: streamedSources, clinicalTrialsKeywords: kw || m.clinicalTrialsKeywords }
+                          : m,
+                      );
+                    });
+                    messageAdded = true;
                   }
 
                 } else if (eventData.type === "done") {
                   const finalContent = eventData.answer || streamedContent || "No pude generar una respuesta.";
-                  const finalSources = eventData.sources?.length > 0 ? eventData.sources : streamedSources;
+                  const finalSources: Source[] = Array.isArray(eventData.sources) ? eventData.sources : streamedSources;
+                  const notUsedRaw = eventData.sources_not_used;
+                  const sourcesNotUsed: Source[] | undefined =
+                    Array.isArray(notUsedRaw) && notUsedRaw.length > 0 ? (notUsedRaw as Source[]) : undefined;
                   const degradation = eventData.degradation || undefined;
                   const isReport = !!eventData.is_report;
+                  const doneKw =
+                    typeof eventData.clinical_trials_keywords === "string"
+                      ? eventData.clinical_trials_keywords.trim()
+                      : "";
+                  const ctKwFinal = doneKw || streamedCtKw || undefined;
+                  const suggestedRaw2 = eventData.suggested_add_tools;
+                  const suggestedAddTools2 =
+                    Array.isArray(suggestedRaw2) && suggestedRaw2.length > 0
+                      ? (suggestedRaw2 as { id: string; label: string; extend?: boolean }[])
+                          .filter((x) => x && typeof x.id === "string" && typeof x.label === "string")
+                          .map((x) => ({
+                            id: x.id,
+                            label: x.label,
+                            ...(x.extend === true ? { extend: true as const } : {}),
+                          }))
+                      : undefined;
 
                   if (!messageAdded) {
                     setMessages((prev) => [...prev, {
                       id: assistantId, role: "assistant",
                       content: finalContent,
                       sources: finalSources.length > 0 ? finalSources : undefined,
+                      sourcesNotUsed,
                       degradation,
                       isReport,
+                      clinicalTrialsKeywords: ctKwFinal,
+                      suggestedAddTools: suggestedAddTools2,
                     }]);
                   } else {
                     setMessages((prev) =>
                       prev.map((m) => m.id === assistantId
-                        ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : m.sources, degradation, isReport }
+                        ? { ...m, content: finalContent, sources: finalSources.length > 0 ? finalSources : m.sources, sourcesNotUsed: sourcesNotUsed ?? m.sourcesNotUsed, degradation, isReport, clinicalTrialsKeywords: ctKwFinal || m.clinicalTrialsKeywords, suggestedAddTools: suggestedAddTools2 ?? m.suggestedAddTools }
                         : m)
                     );
                   }
@@ -1794,11 +2255,15 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                     finalContent,
                     finalSources.length > 0 ? finalSources : undefined,
                     hadImages,
+                    undefined,
+                    sourcesNotUsed,
                   );
 
                   setIsLoading(false);
                   setLoadingStatus("");
                   setLoadingModel(null);
+                  setGpuWarmupHint(false);
+                  setGpuWaitSeconds(null);
                   inputRef.current?.focus();
                   return;
 
@@ -1842,8 +2307,11 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
+      setActiveStreamAssistantId(null);
       setLoadingStatus("");
       setLoadingModel(null);
+      setGpuWarmupHint(false);
+      setGpuWaitSeconds(null);
       setIsLoading(false);
       inputRef.current?.focus();
     }
@@ -1872,6 +2340,114 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
   const hasMessages = messages.length > 0;
   const [footerExpanded, setFooterExpanded] = useState(false);
 
+  // Guard against showing the chat UI to anonymous users when public access is disabled.
+  if (authLoading || chatDefaultsLoading) {
+    return (
+      <section className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-cyan-400" />
+      </section>
+    );
+  }
+
+  if (!publicAccessEnabled && !isAuthenticated) {
+    return (
+      <section className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-cyan-400" />
+      </section>
+    );
+  }
+
+  const renderModelPicker = () => {
+    const current = availableModels.find((m) => m.id === selectedModel);
+    const currentLabel = current?.displayName ?? selectedModel;
+    return (
+      <div className="relative min-w-0 flex-1 lg:flex-initial lg:max-w-[min(100%,20rem)]" ref={modelMenuRef}>
+        <button
+          type="button"
+          onClick={() => {
+            setShowModelMenu((v) => !v);
+            setShowPlusMenu(false);
+          }}
+          className={`flex items-center gap-1.5 w-full lg:w-auto max-w-full rounded-lg px-2 py-1.5 text-left text-sm font-medium transition-colors ${showModelMenu ? "bg-white/10 text-white" : "text-white/90 hover:bg-white/10 hover:text-white"}`}
+          aria-expanded={showModelMenu}
+          aria-haspopup="listbox"
+          title="Modelo"
+        >
+          <span className="truncate min-w-0">{currentLabel}</span>
+          <svg className={`w-4 h-4 flex-shrink-0 text-gray-400 transition-transform ${showModelMenu ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+        {showModelMenu && (
+          <div
+            className="absolute left-0 top-full z-[210] mt-1 w-[min(calc(100vw-2rem),20rem)] max-h-[min(60vh,420px)] overflow-y-auto rounded-xl border border-white/10 bg-[#1a2744] py-1 shadow-xl"
+            role="listbox"
+            aria-label="Elegir modelo"
+          >
+            {availableModels.map((m) => {
+              const locked = m.allowed === false;
+              const title = locked
+                ? (m.reason === "login_required"
+                  ? "Inicia sesión para usar este modelo"
+                  : m.reason === "admin_only"
+                    ? "Solo administradores pueden usar este modelo (GPT / gpt-oss)"
+                    : "Solicita acceso al SuperAdmin para usar este modelo")
+                : undefined;
+              const lockMessage = locked
+                ? (m.reason === "login_required"
+                  ? "Inicia sesión para usar este modelo."
+                  : m.reason === "admin_only"
+                    ? "Solo administradores pueden usar GPT (gpt-oss)."
+                    : "Solicita acceso al SuperAdmin para usar este modelo.")
+                : "";
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  role="option"
+                  aria-selected={selectedModel === m.id}
+                  title={title}
+                  onClick={() => {
+                    if (locked) {
+                      setModelAccessMessage(lockMessage);
+                      setTimeout(() => setModelAccessMessage(null), 4000);
+                      return;
+                    }
+                    setSelectedModel(m.id);
+                    setShowModelMenu(false);
+                  }}
+                  className={`flex w-full items-start justify-between gap-3 px-3 py-2.5 text-left text-sm transition-colors ${selectedModel === m.id ? "bg-white/10 text-white" : "text-gray-200 hover:bg-white/10 hover:text-white"} ${locked ? "opacity-80" : ""}`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium truncate">{m.displayName}</span>
+                      {locked && (
+                        <svg className="w-3.5 h-3.5 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                        </svg>
+                      )}
+                    </div>
+                    {m.description ? (
+                      <p className="mt-0.5 text-xs leading-snug text-gray-500 line-clamp-2">{m.description}</p>
+                    ) : null}
+                  </div>
+                  {selectedModel === m.id && !locked ? (
+                    <svg className="w-4 h-4 flex-shrink-0 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  ) : null}
+                </button>
+              );
+            })}
+            {modelAccessMessage ? (
+              <p className="mx-2 mt-1 rounded-lg bg-amber-900/30 px-3 py-2 text-xs text-amber-300">{modelAccessMessage}</p>
+            ) : null}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderPlusMenu = () => {
     if (!showPlusMenu) return null;
     const menuContent = (
@@ -1880,50 +2456,6 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
           Adjuntar archivos
         </button>
-        <div className="border-t border-white/10 my-1" />
-        <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modelo</div>
-        {availableModels.map((m) => {
-          const locked = m.allowed === false;
-          const title = locked
-            ? (m.reason === "login_required"
-              ? "Inicia sesión para usar este modelo"
-              : m.reason === "admin_only"
-                ? "Solo administradores pueden usar este modelo (GPT / gpt-oss)"
-                : "Solicita acceso al SuperAdmin para usar este modelo")
-            : undefined;
-          const lockMessage = locked
-            ? (m.reason === "login_required"
-              ? "Inicia sesión para usar este modelo."
-              : m.reason === "admin_only"
-                ? "Solo administradores pueden usar GPT (gpt-oss)."
-                : "Solicita acceso al SuperAdmin para usar este modelo.")
-            : "";
-          return (
-            <button
-              key={m.id}
-              title={title}
-              onClick={() => {
-                if (locked) {
-                  setModelAccessMessage(lockMessage);
-                  setTimeout(() => setModelAccessMessage(null), 4000);
-                  return;
-                }
-                setSelectedModel(m.id);
-              }}
-              className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-sm transition-colors ${selectedModel === m.id ? "text-white bg-white/10" : "text-gray-300 hover:bg-white/10 hover:text-white"} ${locked ? "opacity-80" : ""}`}
-            >
-              <div className="flex items-center gap-3 min-w-0">
-                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
-                <span className="truncate">{m.displayName}</span>
-                {locked && <svg className="w-3.5 h-3.5 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>}
-              </div>
-              {selectedModel === m.id && !locked && <svg className="w-4 h-4 text-cyan-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
-            </button>
-          );
-        })}
-        {modelAccessMessage && (
-          <p className="px-4 py-2 text-xs text-amber-300 bg-amber-900/30 rounded mt-1 mx-2">{modelAccessMessage}</p>
-        )}
         <div className="border-t border-white/10 my-1" />
         <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Buscar en fuentes</div>
         <button onClick={() => setRagSearchEnabled(!ragSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Búsqueda en fuentes curadas por Ominis (bases de salud)">
@@ -1942,6 +2474,33 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
           <div className="flex items-center gap-3"><svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg><span className="min-w-0 truncate">OpenScholar</span></div>
           <div className={`w-8 h-5 flex-shrink-0 rounded-full transition-colors ${openscholarSearchEnabled ? "bg-amber-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${openscholarSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
         </button>
+        {isAuthenticated && (
+          <button onClick={() => setClinicalTrialsSearchEnabled(!clinicalTrialsSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Ensayos clínicos en México (ClinicalTrials.gov)">
+            <div className="flex items-center gap-3 min-w-0">
+              <svg className="w-4 h-4 flex-shrink-0 text-teal-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+              <span className="min-w-0 truncate">Ensayos (México)</span>
+            </div>
+            <div className={`w-8 h-5 flex-shrink-0 rounded-full transition-colors ${clinicalTrialsSearchEnabled ? "bg-teal-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${clinicalTrialsSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+          </button>
+        )}
+        {isAuthenticated && (
+          <button onClick={() => setDoctorDirectorySearchEnabled(!doctorDirectorySearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Directorio de médicos (México)">
+            <div className="flex items-center gap-3 min-w-0">
+              <svg className="w-4 h-4 flex-shrink-0 text-emerald-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+              <span className="min-w-0 truncate">Directorio MX</span>
+            </div>
+            <div className={`w-8 h-5 flex-shrink-0 rounded-full transition-colors ${doctorDirectorySearchEnabled ? "bg-emerald-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${doctorDirectorySearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+          </button>
+        )}
+        {isAuthenticated && (
+          <button onClick={() => setAllcanSearchEnabled(!allcanSearchEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm" title="Organizaciones All.Can México">
+            <div className="flex items-center gap-3 min-w-0">
+              <svg className="w-4 h-4 flex-shrink-0 text-sky-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
+              <span className="min-w-0 truncate">All.Can México</span>
+            </div>
+            <div className={`w-8 h-5 flex-shrink-0 rounded-full transition-colors ${allcanSearchEnabled ? "bg-sky-500" : "bg-gray-600"} relative`}><div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${allcanSearchEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} /></div>
+          </button>
+        )}
         <div className="border-t border-white/10 my-1" />
         <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Modo</div>
         <button onClick={() => setResearchModeEnabled(!researchModeEnabled)} className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-sm">
@@ -2030,10 +2589,11 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
       <div className={`relative z-10 flex-1 flex flex-col min-h-0 min-w-0 transition-all duration-300 overflow-x-hidden w-full max-w-full ${sidebarOpen ? "lg:pl-72" : "lg:pl-10"}`}>
         <div className="flex-1 flex flex-col w-full min-w-0 mx-auto px-4 sm:px-6 min-h-0 max-w-full lg:max-w-3xl">
               {/* Mobile toolbar - hamburger (history) and + (new job) at top left */}
-              <div className="lg:hidden flex items-center gap-2 py-2 flex-shrink-0 -mx-4 sm:-mx-6 px-4 sm:px-6 border-b border-white/10 mb-1">
+              <div className="relative z-30 flex items-center gap-2 py-2 flex-shrink-0 -mx-4 sm:-mx-6 px-4 sm:px-6 border-b border-white/10 mb-1">
                 <button
+                  type="button"
                   onClick={() => setSidebarOpen(true)}
-                  className="text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-lg transition-colors"
+                  className="lg:hidden flex-shrink-0 text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-lg transition-colors"
                   title="Historial de trabajos"
                   aria-label="Abrir historial"
                 >
@@ -2041,10 +2601,12 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
                   </svg>
                 </button>
+                {renderModelPicker()}
                 {isAuthenticated && (
                   <button
+                    type="button"
                     onClick={handleNewChat}
-                    className="text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-lg transition-colors"
+                    className="lg:hidden flex-shrink-0 ml-auto text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-lg transition-colors"
                     title="Nuevo trabajo"
                     aria-label="Nuevo trabajo"
                   >
@@ -2067,14 +2629,8 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   {/* Centered input for empty state */}
                   <div className="w-full max-w-full lg:max-w-2xl">
                     {/* Capsules (research, model, attachments — Ominis/Web/PubMed inside input) */}
-                    {(researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
+                    {(researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0) && (
                       <div className="flex items-center justify-center gap-1.5 mb-3 text-xs flex-wrap">
-                        {selectedModel !== "ominis-2.0" && (
-                          <span className="flex items-center gap-1 text-amber-400 bg-amber-500/15 backdrop-blur-sm border border-amber-400/20 px-2 py-1 rounded-full">
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
-                            {availableModels.find(m => m.id === selectedModel)?.displayName || selectedModel}
-                          </span>
-                        )}
                         {researchModeEnabled && (
                           <span className="flex items-center gap-1 text-emerald-400 bg-emerald-500/15 backdrop-blur-sm border border-emerald-400/20 pl-2 pr-1 py-1 rounded-full">
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m-6 4h6m-6 4h4M5 7h.01M5 11h.01M5 15h.01M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /></svg>
@@ -2145,7 +2701,10 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         <div className="flex items-center gap-2 flex-shrink-0">
                           <div className="relative" ref={plusMenuRef}>
                             <button
-                              onClick={() => setShowPlusMenu(!showPlusMenu)}
+                              onClick={() => {
+                                setShowPlusMenu(!showPlusMenu);
+                                setShowModelMenu(false);
+                              }}
                               className={`text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-full transition-colors ${showPlusMenu ? "bg-white/10 text-white" : ""}`}
                               title="Opciones" disabled={isLoading}
                             >
@@ -2182,6 +2741,14 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                               <span className="inline-flex items-center gap-0.5 text-amber-400 bg-amber-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
                                 OpenScholar
                                 <button onClick={() => setOpenscholarSearchEnabled(false)} className="hover:text-amber-200 transition-colors p-0.5" title="Desactivar">
+                                  <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
+                              </span>
+                            )}
+                            {isAuthenticated && clinicalTrialsSearchEnabled && (
+                              <span className="inline-flex items-center gap-0.5 text-teal-300 bg-teal-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                                CT.gov
+                                <button onClick={() => setClinicalTrialsSearchEnabled(false)} className="hover:text-teal-100 transition-colors p-0.5" title="Desactivar">
                                   <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                                 </button>
                               </span>
@@ -2282,12 +2849,19 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         </div>
                       ) : (
                         <>
-                          <div className="text-sm leading-relaxed">
-                            {message.role === "assistant" 
-                              ? renderContentWithCitations(message.content, effectiveSources)
-                              : <p className="whitespace-pre-wrap">{decodeHtmlEntities(message.content)}</p>
-                            }
-                          </div>
+                          {message.role === "assistant" ? (
+                            <div className="text-sm leading-relaxed scroll-mt-28 min-h-[1.5rem]">
+                              {message.content?.trim()
+                                ? renderContentWithCitations(message.content, effectiveSources)
+                                : isLoading && activeStreamAssistantId === message.id && (effectiveSources?.length ?? 0) > 0 ? (
+                                    <p className="text-gray-400 italic text-sm">Generando respuesta…</p>
+                                  ) : null}
+                            </div>
+                          ) : (
+                            <div className="text-sm leading-relaxed">
+                              <p className="whitespace-pre-wrap">{decodeHtmlEntities(message.content)}</p>
+                            </div>
+                          )}
 
                           {/* Action buttons for assistant messages */}
                           {message.role === "assistant" && (
@@ -2348,6 +2922,32 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                   <path d="M17 14V2" />
                                 </svg>
                               </button>
+                            </div>
+                          )}
+
+                          {message.role === "assistant" &&
+                            message.suggestedAddTools &&
+                            message.suggestedAddTools.length > 0 &&
+                            !message.isReport && (
+                            <div className="mt-2 pt-2 border-t border-white/5">
+                              <p className="text-[10px] text-gray-500 mb-1.5 leading-snug">
+                                {message.suggestedAddTools.some((t) => t.extend)
+                                  ? "Amplía la respuesta (nueva pasada de búsqueda o más fuentes):"
+                                  : "Agregar:"}
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {message.suggestedAddTools.map((t) => (
+                                  <button
+                                    key={`${t.id}-${t.extend ? "ex" : "add"}`}
+                                    type="button"
+                                    onClick={() => handleSuggestedAddTool(t.id, t.label, t.extend === true)}
+                                    disabled={isLoading}
+                                    className="text-[10px] px-2 py-1 rounded-md bg-white/5 border border-white/15 text-gray-200 hover:bg-cyan-500/15 hover:border-cyan-400/30 hover:text-white transition-colors disabled:opacity-40"
+                                  >
+                                    {t.label}
+                                  </button>
+                                ))}
+                              </div>
                             </div>
                           )}
 
@@ -2427,32 +3027,194 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           )}
 
                           {/* Sources list: en modo investigación solo después del reporte final (solo fuentes citadas) */}
-                          {effectiveSources && effectiveSources.length > 0 && (!researchModeEnabled || message.isReport === true) && (() => {
-                            const withNum = effectiveSources
+                          {(!researchModeEnabled || message.isReport === true) &&
+                            ((effectiveSources?.length ?? 0) > 0) &&
+                            (() => {
+                            const withNum = (effectiveSources ?? [])
                               .filter((s: Source) => s.url && s.url.length > 0)
                               .map((source: Source, i: number) => ({ ...source, displayNum: source.ref_num ?? (i + 1) }));
-                            const displaySources = [...withNum].sort((a, b) => (a.displayNum as number) - (b.displayNum as number));
-                            if (displaySources.length === 0) return null;
+                            const allDisplaySources = [...withNum].sort((a, b) => (a.displayNum as number) - (b.displayNum as number));
+                            const citedRefNums = new Set<number>();
+                            for (const m of (message.content || "").matchAll(/\[(\d+)\]/g)) {
+                              const n = parseInt(m[1], 10);
+                              if (Number.isFinite(n) && n > 0) citedRefNums.add(n);
+                            }
+                            const answerLower = (message.content || "").toLowerCase();
+                            const isMentionedInAnswer = (source: SourceWithDisplayNum): boolean => {
+                              if (!source.url) return false;
+                              const title = (source.title || "").trim().toLowerCase();
+                              if (title && title.length >= 16 && answerLower.includes(title.slice(0, 40))) {
+                                return true;
+                              }
+                              try {
+                                const host = new URL(buildSourceDeepLink(source)).hostname.replace(/^www\./, "").toLowerCase();
+                                return host.length > 0 && answerLower.includes(host);
+                              } catch {
+                                return false;
+                              }
+                            };
+                            const hasExplicitCitations = citedRefNums.size > 0;
+                            const displaySources = allDisplaySources.filter((s) =>
+                              hasExplicitCitations ? citedRefNums.has(Number(s.displayNum)) : isMentionedInAnswer(s)
+                            );
 
                             // Show checkboxes for plan-phase sources: research mode, no References section, not loading, and plan-like content
                             const isPlanMessage = message.content.includes("?") || /plan|fuentes|proceder/i.test(message.content || "");
                             const showCheckboxes = researchModeEnabled && isPlanMessage && !message.content.includes("## Referencias") && !isLoading;
 
-                            return (
-                              <div className="mt-3 pt-3 border-t border-white/10">
-                                {showCheckboxes && (
-                                  <p className="text-[10px] text-gray-500 mb-1.5">Por favor desmarca fuentes que no te parezcan relevantes.</p>
-                                )}
-                                <ul className="space-y-1.5">
-                                  {displaySources.map((source: SourceWithDisplayNum, idx: number) => {
+                            const splitSources = false;
+                            const displayUnused: SourceWithDisplayNum[] = [];
+
+                            if (displaySources.length === 0 && displayUnused.length === 0) return null;
+
+                            const showClinicalTrialsResultsHeader =
+                              Boolean(message.clinicalTrialsKeywords?.trim()) ||
+                              displaySources.some((s) => s.sourceType === "clinicaltrials") ||
+                              displayUnused.some((s) => s.sourceType === "clinicaltrials");
+                            const ctKwLabel = message.clinicalTrialsKeywords?.trim() || "—";
+
+                            const renderSourceItem = (source: SourceWithDisplayNum, idx: number) => {
                                     const isExcluded = excludedSources.has(source.url);
-                                    const originLabel = source.sourceType === "pubmed" ? "PubMed" : source.sourceType === "rag" ? "Ominis" : source.sourceType === "openscholar" ? "OpenScholar" : "Web";
+                                    if (source.sourceType === "clinicaltrials") {
+                                      const expanded = expandedClinicalTrialByUrl[source.url] === true;
+                                      const cardTitle = clinicalTrialCardTitle(source);
+                                      const nct =
+                                        source.nctId ||
+                                        (source.url.match(/study\/(NCT\d+)/i)?.[1] ?? source.url.match(/NCT\d+/i)?.[0]) ||
+                                        "";
+                                      return (
+                                        <li key={source.url || `src-${idx}`} className={`text-xs ${isExcluded ? "opacity-40" : ""}`}>
+                                          <div className="flex items-start gap-1.5">
+                                            {showCheckboxes && (
+                                              <input
+                                                type="checkbox"
+                                                checked={!isExcluded}
+                                                onChange={() => {
+                                                  setExcludedSources((prev) => {
+                                                    const next = new Set(prev);
+                                                    if (next.has(source.url)) next.delete(source.url);
+                                                    else next.add(source.url);
+                                                    return next;
+                                                  });
+                                                }}
+                                                className="mt-2 rounded border-gray-500 bg-white/10 text-cyan-500 focus:ring-cyan-500/30 flex-shrink-0"
+                                              />
+                                            )}
+                                            <div className="min-w-0 flex-1 rounded-lg border border-teal-500/25 bg-teal-500/5 overflow-hidden">
+                                              <button
+                                                type="button"
+                                                className="w-full text-left px-2.5 py-2 hover:bg-white/5 transition-colors"
+                                                onClick={() =>
+                                                  setExpandedClinicalTrialByUrl((p) => ({
+                                                    ...p,
+                                                    [source.url]: !p[source.url],
+                                                  }))
+                                                }
+                                              >
+                                                <div className="flex items-start justify-between gap-2">
+                                                  <div className="min-w-0">
+                                                    <span className="text-teal-300 font-medium text-[11px]">[{source.displayNum}]</span>{" "}
+                                                    <span className="text-white text-[12px] font-medium leading-snug">{cardTitle}</span>
+                                                    {nct && (
+                                                      <span className="block text-[10px] text-gray-500 font-mono mt-0.5">{nct}</span>
+                                                    )}
+                                                    <div className="text-[10px] text-gray-400 mt-1 space-x-1">
+                                                      <span>
+                                                        Inicio: {source.ctStartDate?.trim() ? source.ctStartDate : "—"}
+                                                      </span>
+                                                      <span>·</span>
+                                                      <span className="line-clamp-2">
+                                                        {source.ctLocationsSummary?.trim()
+                                                          ? source.ctLocationsSummary
+                                                          : "Ubicación: ver registro"}
+                                                      </span>
+                                                    </div>
+                                                  </div>
+                                                  <span className="text-gray-500 text-lg leading-none flex-shrink-0" aria-hidden>
+                                                    {expanded ? "▾" : "▸"}
+                                                  </span>
+                                                </div>
+                                              </button>
+                                              {expanded && (
+                                                <div className="px-2.5 pb-2.5 pt-0 border-t border-white/10 space-y-2">
+                                                  {source.snippet ? (
+                                                    <p className="text-[11px] text-gray-400 whitespace-pre-wrap leading-relaxed">
+                                                      {decodeHtmlEntities(source.snippet)}
+                                                    </p>
+                                                  ) : null}
+                                                  <div className="flex flex-col gap-1.5">
+                                                    <a
+                                                      href={buildSourceDeepLink(source)}
+                                                      target="_blank"
+                                                      rel="noopener noreferrer"
+                                                      className="inline-flex items-center gap-1 text-[11px] text-teal-300 hover:text-teal-200 font-medium"
+                                                    >
+                                                      Ficha del estudio (clinicaltrials.gov)
+                                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                                      </svg>
+                                                    </a>
+                                                    {source.ctClassicShowUrl ? (
+                                                      <a
+                                                        href={source.ctClassicShowUrl}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="inline-flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-300"
+                                                      >
+                                                        Vista clásica (ct2/show) — si la ficha principal falla
+                                                      </a>
+                                                    ) : null}
+                                                    {source.ctFallbackSearchUrl ? (
+                                                      <a
+                                                        href={source.ctFallbackSearchUrl}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="inline-flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-300"
+                                                      >
+                                                        Búsqueda por NCT en ClinicalTrials.gov
+                                                      </a>
+                                                    ) : null}
+                                                  </div>
+                                                </div>
+                                              )}
+                                            </div>
+                                            <button
+                                              type="button"
+                                              onClick={() => setSourcePreviewSource(source)}
+                                              className="flex-shrink-0 p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded transition-colors mt-0.5"
+                                              title="Vista previa"
+                                              aria-label="Vista previa de la fuente"
+                                            >
+                                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                              </svg>
+                                            </button>
+                                          </div>
+                                        </li>
+                                      );
+                                    }
+                                    const originLabel =
+                                      source.sourceType === "pubmed"
+                                        ? "PubMed"
+                                        : source.sourceType === "rag"
+                                          ? "Ominis"
+                                          : source.sourceType === "openscholar"
+                                            ? "OpenScholar"
+                                            : source.sourceType === "directorio_mx"
+                                              ? "Directorio MX"
+                                              : source.sourceType === "allcan"
+                                                ? "All.Can"
+                                                : "Web";
                                     const originIcon = source.sourceType === "pubmed" ? (
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
                                     ) : source.sourceType === "rag" ? (
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>
                                     ) : source.sourceType === "openscholar" ? (
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
+                                    ) : source.sourceType === "directorio_mx" ? (
+                                      <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5 text-emerald-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+                                    ) : source.sourceType === "allcan" ? (
+                                      <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5 text-sky-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
                                     ) : (
                                       <svg className="w-3.5 h-3.5 inline-block align-text-bottom mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>
                                     );
@@ -2481,10 +3243,12 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                           <div className="min-w-0 flex-1">
                                             <div className="font-medium text-white">
                                               [{source.displayNum}]{" "}
-                                              <a href={source.url} target="_blank" rel="noopener noreferrer"
-                                                className="text-blue-400 hover:text-blue-300 transition-colors hover:underline">
+                                              <SourceAnchor
+                                                source={source}
+                                                className="text-blue-400 hover:text-blue-300 transition-colors hover:underline text-left"
+                                              >
                                                 {displayTitle}
-                                              </a>
+                                              </SourceAnchor>
                                             </div>
                                             {hasMeta ? (
                                               <div className="text-[10px] text-gray-400 mt-0.5">
@@ -2497,10 +3261,12 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                             ) : (
                                               <div className="text-[10px] text-gray-500 mt-0.5 inline-flex items-center">{originIcon}{originLabel}</div>
                                             )}
-                                            <a href={source.url} target="_blank" rel="noopener noreferrer"
-                                              className="text-[9px] text-gray-500 hover:text-gray-400 truncate block mt-0.5 break-all">
-                                              {source.url}
-                                            </a>
+                                            <SourceAnchor
+                                              source={source}
+                                              className="text-[9px] text-gray-500 hover:text-gray-400 truncate block mt-0.5 break-all text-left w-full"
+                                            >
+                                              {buildSourceDeepLink(source)}
+                                            </SourceAnchor>
                                           </div>
                                           <button
                                             type="button"
@@ -2514,8 +3280,45 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                                         </div>
                                       </li>
                                     );
-                                  })}
-                                </ul>
+                            };
+
+                            return (
+                              <div className="mt-3 pt-3 border-t border-white/10">
+                                {showClinicalTrialsResultsHeader && (
+                                  <p className="text-[11px] text-teal-200/95 mb-2 leading-snug">
+                                    Resultados de clinicaltrials.gov con palabras clave:{" "}
+                                    <span className="font-medium text-white">&ldquo;{ctKwLabel}&rdquo;</span>
+                                  </p>
+                                )}
+                                {showCheckboxes && (
+                                  <p className="text-[10px] text-gray-500 mb-1.5">Por favor desmarca fuentes que no te parezcan relevantes.</p>
+                                )}
+                                {displaySources.length > 0 && (
+                                  <>
+                                    {splitSources && (
+                                      <p className="text-[11px] text-cyan-200/90 font-medium mb-1.5">Fuentes citadas en la respuesta</p>
+                                    )}
+                                    <ul
+                                      className={`space-y-1.5 ${
+                                        splitSources
+                                          ? "rounded-lg border border-cyan-500/25 bg-cyan-950/25 p-2"
+                                          : ""
+                                      }`}
+                                    >
+                                      {displaySources.map((s, i) => renderSourceItem(s, i))}
+                                    </ul>
+                                  </>
+                                )}
+                                {splitSources && displayUnused.length > 0 && (
+                                  <>
+                                    <p className="text-[11px] text-gray-400 mt-3 mb-1.5 leading-snug">
+                                      También se consideraron estas fuentes (menos relevantes):
+                                    </p>
+                                    <ul className="space-y-1.5 rounded-lg border border-white/10 bg-white/[0.04] p-2">
+                                      {displayUnused.map((s, i) => renderSourceItem(s, i))}
+                                    </ul>
+                                  </>
+                                )}
                                 {showCheckboxes && (() => {
                                   const questions = parsePlanQuestions(message.content);
                                   const ensureAnswers = (): string[] => {
@@ -2579,6 +3382,34 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                           )}
                         </div>
                       </div>
+                      {(gpuWarmupHint || gpuWaitSeconds !== null) && !(researchProgress && researchSteps.length > 0) && (
+                        <div className="mt-3 space-y-1.5">
+                          <div className="flex justify-between text-[10px] text-gray-400">
+                            <span>Esperando respuesta del modelo</span>
+                            <span>{gpuWaitSeconds != null ? `${gpuWaitSeconds}s` : "…"}</span>
+                          </div>
+                          <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-gradient-to-r from-cyan-600/30 via-cyan-400/80 to-cyan-600/30 animate-pulse"
+                              style={{ width: gpuWaitSeconds != null ? `${Math.min(92, 8 + gpuWaitSeconds * 0.35)}%` : "35%" }}
+                            />
+                          </div>
+                          {gpuWarmupHint ? (
+                            <p className="text-[10px] text-gray-500 leading-snug">
+                              Si la GPU está en la nube y fría, la primera respuesta puede tardar varios minutos; las siguientes suelen ser más rápidas.{" "}
+                              <span className="text-gray-400">
+                                Tu mensaje ya está en proceso en cuanto ves este panel; sabrás que el modelo escribe cuando aparezcan las primeras palabras abajo.
+                              </span>
+                            </p>
+                          ) : (
+                            gpuWaitSeconds !== null && (
+                              <p className="text-[10px] text-gray-500">
+                                El temporizador indica que seguimos a la espera del modelo. Verás la respuesta en cuanto empiece el texto debajo.
+                              </p>
+                            )
+                          )}
+                        </div>
+                      )}
                       {/* Research progress bar */}
                       {researchProgress && researchSteps.length > 0 && (
                         <div className="mt-3">
@@ -2701,15 +3532,157 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                       )}
                       <div>
                         <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">URL</p>
-                        <a href={sourcePreviewSource.url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 break-all text-xs">
-                          {sourcePreviewSource.url}
-                        </a>
+                        {isCsvLikeUrl(sourcePreviewSource.url) && isCsvPreviewAllowedHost(sourcePreviewSource.url) ? (
+                          <div className="space-y-2">
+                            <button
+                              type="button"
+                              onClick={() => void openCsvPreview(sourcePreviewSource.url, sourcePreviewSource.title)}
+                              className="text-xs font-medium text-teal-400 hover:text-teal-300 underline"
+                            >
+                              Ver muestra del CSV (tabla)
+                            </button>
+                            <a
+                              href={buildSourceDeepLink(sourcePreviewSource)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-400 hover:text-blue-300 break-all text-xs block"
+                            >
+                              {buildSourceDeepLink(sourcePreviewSource)}
+                            </a>
+                          </div>
+                        ) : (
+                          <a href={buildSourceDeepLink(sourcePreviewSource)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 break-all text-xs">
+                            {buildSourceDeepLink(sourcePreviewSource)}
+                          </a>
+                        )}
                       </div>
+                      {sourcePreviewSource.sourceType === "clinicaltrials" && (
+                        <div className="space-y-1 text-xs">
+                          {sourcePreviewSource.ctClassicShowUrl && (
+                            <div>
+                              <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Si ves error 502</p>
+                              <a
+                                href={sourcePreviewSource.ctClassicShowUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-teal-400 hover:text-teal-300 break-all"
+                              >
+                                Abrir vista clásica (ct2/show)
+                              </a>
+                            </div>
+                          )}
+                          {sourcePreviewSource.ctFallbackSearchUrl && (
+                            <div>
+                              <a
+                                href={sourcePreviewSource.ctFallbackSearchUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-gray-400 hover:text-gray-300 break-all"
+                              >
+                                Búsqueda por NCT en el sitio NLM
+                              </a>
+                            </div>
+                          )}
+                        </div>
+                      )}
                       {sourcePreviewSource.snippet && (
                         <div>
                           <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Fragmento</p>
                           <p className="text-gray-400 text-xs leading-relaxed whitespace-pre-wrap">{sourcePreviewSource.snippet}</p>
                         </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* CSV preview modal (allowed hosts only; fetches via /api/csv-preview) */}
+              {(csvPreview || csvPreviewLoading || csvPreviewError) && (
+                <div
+                  className="fixed inset-0 z-[10001] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+                  onClick={() => {
+                    if (!csvPreviewLoading) {
+                      setCsvPreview(null);
+                      setCsvPreviewError(null);
+                    }
+                  }}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="csv-preview-title"
+                >
+                  <div
+                    className="bg-[#0f1d32] border border-white/20 rounded-xl shadow-2xl max-w-4xl w-full max-h-[85vh] overflow-hidden flex flex-col"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+                      <h3 id="csv-preview-title" className="text-sm font-semibold text-white truncate pr-2">
+                        {csvPreview?.title || "Vista previa CSV"}
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCsvPreview(null);
+                          setCsvPreviewError(null);
+                        }}
+                        className="p-1.5 text-gray-400 hover:text-white transition-colors rounded flex-shrink-0"
+                        aria-label="Cerrar"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                      </button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3 text-sm">
+                      {csvPreviewLoading && (
+                        <p className="text-gray-400 text-sm">Cargando…</p>
+                      )}
+                      {csvPreviewError && (
+                        <p className="text-red-400 text-sm">{csvPreviewError}</p>
+                      )}
+                      {csvPreview && !csvPreviewLoading && (
+                        <>
+                          <p className="text-[10px] text-gray-500 break-all">{csvPreview.url}</p>
+                          {csvPreview.truncated && (
+                            <p className="text-[11px] text-amber-200/90">
+                              Muestra truncada (archivo grande). Copiar y descargar usan el fragmento cargado en el servidor.
+                            </p>
+                          )}
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium"
+                              onClick={async () => {
+                                try {
+                                  await navigator.clipboard.writeText(csvPreview.rawText);
+                                } catch {
+                                  /* ignore */
+                                }
+                              }}
+                              disabled={!csvPreview.rawText}
+                            >
+                              Copiar texto
+                            </button>
+                            <a
+                              href={`/api/csv-preview?url=${encodeURIComponent(csvPreview.url)}&download=1`}
+                              className="inline-flex items-center px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white text-xs font-medium"
+                            >
+                              Descargar
+                            </a>
+                          </div>
+                          <div className="overflow-x-auto rounded-lg border border-white/10">
+                            <table className="min-w-full text-left text-[11px] text-gray-200 border-collapse">
+                              <tbody>
+                                {csvPreview.rows.map((row, ri) => (
+                                  <tr key={ri} className="border-b border-white/5">
+                                    {row.map((cell, ci) => (
+                                      <td key={ci} className="px-2 py-1 align-top whitespace-nowrap max-w-[14rem] truncate" title={cell}>
+                                        {cell}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
                       )}
                     </div>
                   </div>
@@ -2785,16 +3758,8 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                 )}
 
                 {/* Active features indicator (research, model, attachments — Ominis/Web/PubMed inside input) */}
-                {(researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0 || selectedModel !== "ominis-2.0") && (
+                {(researchModeEnabled || uploadedImages.length > 0 || uploadedFiles.length > 0) && (
                   <div className="flex items-center gap-1.5 mb-2 text-xs flex-wrap">
-                    {selectedModel !== "ominis-2.0-fast" && (
-                      <span className="flex items-center gap-1 text-amber-400 bg-amber-500/10 px-2 py-1 rounded-full">
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                        </svg>
-                        {availableModels.find(m => m.id === selectedModel)?.displayName || selectedModel}
-                      </span>
-                    )}
                     {researchModeEnabled && (
                       <span className="flex items-center gap-1 text-emerald-400 bg-emerald-500/10 pl-2 pr-1 py-1 rounded-full">
                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2837,7 +3802,10 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <div className="relative" ref={plusMenuRef}>
                       <button
-                        onClick={() => setShowPlusMenu(!showPlusMenu)}
+                        onClick={() => {
+                          setShowPlusMenu(!showPlusMenu);
+                          setShowModelMenu(false);
+                        }}
                         className={`text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-full transition-colors ${showPlusMenu ? "bg-white/10 text-white" : ""}`}
                         title="Opciones"
                         disabled={isLoading}
@@ -2877,6 +3845,14 @@ ${html}<div class="footer">con apoyo de ia.ominis.org</div></body></html>`);
                         <span className="inline-flex items-center gap-0.5 text-amber-400 bg-amber-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
                           OpenScholar
                           <button onClick={() => setOpenscholarSearchEnabled(false)} className="hover:text-amber-200 transition-colors p-0.5" title="Desactivar">
+                            <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </span>
+                      )}
+                      {isAuthenticated && clinicalTrialsSearchEnabled && (
+                        <span className="inline-flex items-center gap-0.5 text-teal-300 bg-teal-500/20 text-[10px] pl-1.5 pr-1 py-0.5 rounded-full">
+                          CT.gov
+                          <button onClick={() => setClinicalTrialsSearchEnabled(false)} className="hover:text-teal-100 transition-colors p-0.5" title="Desactivar">
                             <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                           </button>
                         </span>

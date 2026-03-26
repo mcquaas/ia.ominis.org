@@ -9,6 +9,7 @@ import type {
   LoginCredentials,
   RegisterData,
   ApiKey,
+  ApiKeyRecentRequest,
   CreateApiKeyData,
   CreateApiKeyResponse,
   RagSource,
@@ -126,6 +127,40 @@ async function fetchApi<T>(
     throw new Error(msg);
   }
   
+  return response.json();
+}
+
+/**
+ * Same-origin proxy to Haystack (server uses BACKEND_URL). Use for API keys so create/list
+ * always hit the same database as login and query-stream — not whatever NEXT_PUBLIC_API_URL
+ * was at build time.
+ */
+async function fetchApiKeysProxy<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {}),
+  };
+  if (token) {
+    (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
+  }
+  const response = await fetch(`/api/api-keys${path}`, {
+    ...options,
+    headers,
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: null, message: null }));
+    let msg = 'Request failed';
+    if (error) {
+      if (typeof error.detail === 'string') msg = error.detail;
+      else if (Array.isArray(error.detail) && error.detail[0]?.msg)
+        msg = error.detail.map((d: { msg?: string }) => d.msg).join('; ');
+      else if (error.error?.message || error.message) msg = error.error?.message || error.message;
+    }
+    throw new Error(msg);
+  }
+
   return response.json();
 }
 
@@ -295,7 +330,7 @@ export async function resetPassword(
  * Get user's API keys
  */
 export async function getApiKeys(): Promise<ApiKey[]> {
-  const response = await fetchApi<{ data: ApiKey[] }>('/api/api-keys?populate=owner');
+  const response = await fetchApiKeysProxy<{ data: ApiKey[] }>('?populate=owner');
   return response.data;
 }
 
@@ -303,7 +338,7 @@ export async function getApiKeys(): Promise<ApiKey[]> {
  * Create a new API key
  */
 export async function createApiKey(data: CreateApiKeyData): Promise<CreateApiKeyResponse> {
-  return fetchApi<CreateApiKeyResponse>('/api/api-keys', {
+  return fetchApiKeysProxy<CreateApiKeyResponse>('', {
     method: 'POST',
     body: JSON.stringify({ data }),
   });
@@ -313,8 +348,9 @@ export async function createApiKey(data: CreateApiKeyData): Promise<CreateApiKey
  * Revoke an API key
  */
 export async function revokeApiKey(id: number): Promise<void> {
-  await fetchApi<void>(`/api/api-keys/${id}/revoke`, {
+  await fetchApiKeysProxy<void>(`/${id}/revoke`, {
     method: 'POST',
+    body: '{}',
   });
 }
 
@@ -330,7 +366,17 @@ export async function getApiKeyUsage(id: number): Promise<{
   rateLimitWindow: string;
   status: string;
 }> {
-  return fetchApi(`/api/api-keys/${id}/usage`);
+  return fetchApiKeysProxy(`/${id}/usage`);
+}
+
+/**
+ * Last 5 request/response bodies logged for this API key (non-streaming captures full JSON; streams get a note).
+ */
+export async function getApiKeyRecentRequests(id: number): Promise<ApiKeyRecentRequest[]> {
+  const response = await fetchApiKeysProxy<{ data: ApiKeyRecentRequest[] }>(`/${id}/recent-requests`, {
+    method: 'GET',
+  });
+  return Array.isArray(response.data) ? response.data : [];
 }
 
 // ==================== RAG Sources (Admin+) ====================
@@ -452,9 +498,27 @@ export async function deleteRagSource(id: number): Promise<void> {
  */
 export async function markStuckIndexingAsFailed(
   olderThanMinutes: number = 30,
-): Promise<{ marked: number; olderThanMinutes: number }> {
+): Promise<{
+  promoted: number;
+  markedError: number;
+  olderThanMinutes: number;
+  checked: number;
+}> {
   return fetchApi(
     `/api/rag-sources/mark-stuck-indexing?older_than_minutes=${encodeURIComponent(olderThanMinutes)}`,
+    { method: 'POST' },
+  );
+}
+
+/**
+ * Set status to active when pgvector already has chunks (fixes false "error" rows).
+ */
+export async function reconcileRagSourceStatus(
+  includeIndexing: boolean = false,
+  includeActive: boolean = true,
+): Promise<{ fixed: number; syncedCounts: number; checked: number }> {
+  return fetchApi(
+    `/api/rag-sources/reconcile-status?include_indexing=${includeIndexing ? 'true' : 'false'}&include_active=${includeActive ? 'true' : 'false'}`,
     { method: 'POST' },
   );
 }
@@ -572,6 +636,48 @@ export async function getHealthDatastoreRecentActivity(limit = 20): Promise<{
   note?: string;
 }> {
   return fetchApi(`/health-datastore/recent-activity?limit=${limit}`);
+}
+
+/** Admin/developer: ingested doctor directory stats (Mexico listings). */
+export async function getDoctorDirectoryStats(): Promise<{
+  total_profiles: number;
+  by_source: Record<string, number>;
+  last_scraped_at: string | null;
+}> {
+  return fetchApi('/api/doctor-directory/stats');
+}
+
+export type DoctorDirectoryScrapeRun = {
+  id: number;
+  source_site: string;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  max_profiles: number;
+  profiles_attempted: number;
+  profiles_upserted: number;
+  profiles_failed: number;
+  error_message: string | null;
+  created_at: string;
+};
+
+export async function getDoctorDirectoryRuns(limit = 25): Promise<DoctorDirectoryScrapeRun[]> {
+  return fetchApi(`/api/doctor-directory/runs?limit=${limit}`);
+}
+
+export async function startDoctorDirectoryScrape(body: {
+  source?: 'topdoctors_mx' | 'doctoralia_mx' | 'doctoranytime_mx' | string;
+  max_profiles?: number;
+  delay_seconds?: number;
+}): Promise<{ run_id: number; message: string }> {
+  return fetchApi('/api/doctor-directory/scrape', {
+    method: 'POST',
+    body: JSON.stringify({
+      source: body.source ?? 'topdoctors_mx',
+      max_profiles: body.max_profiles ?? 50,
+      delay_seconds: body.delay_seconds ?? 0.6,
+    }),
+  });
 }
 
 /**
@@ -713,6 +819,43 @@ export async function tainacanImport(options?: {
       language: options?.language || 'es',
       maxItems: options?.maxItems || null,
       skipExisting: options?.skipExisting !== false,
+    }),
+  });
+}
+
+// ==================== datos.gob.mx CKAN (metadata) ====================
+
+export async function datosGobMxPreview(group?: string): Promise<{
+  totalPackages: number;
+  groupName: string;
+  groupTitle: string;
+  totalResourcesSample: number;
+  resourceFormatsSample: Record<string, number>;
+  sampleTitles: string[];
+}> {
+  const q = group && group.trim() ? `?group=${encodeURIComponent(group.trim())}` : '';
+  return fetchApi(`/api/rag-sources/datos-gob-mx-preview${q}`);
+}
+
+export async function datosGobMxImport(options?: {
+  category?: string;
+  language?: string;
+  maxItems?: number | null;
+  skipExisting?: boolean;
+  group?: string;
+}): Promise<{
+  message: string;
+  totalQueued: number;
+  skipped: number;
+}> {
+  return fetchApi('/api/rag-sources/datos-gob-mx-import', {
+    method: 'POST',
+    body: JSON.stringify({
+      category: options?.category || 'datos.gob.mx',
+      language: options?.language || 'es',
+      maxItems: options?.maxItems ?? null,
+      skipExisting: options?.skipExisting !== false,
+      group: options?.group || 'salud',
     }),
   });
 }
@@ -860,7 +1003,9 @@ export type LLMModelConfigItem = {
   display_name: string;
   version_label: string;
   description: string;
-  backend_type: 'ollama' | 'openai';
+  backend_type: 'ollama' | 'openai' | 'anthropic';
+  llm_provider: string;
+  provider_keys_present: Record<string, boolean>;
   backend_model: string;
   backend_url_override: string | null;
   system_prompt: string | null;
@@ -871,6 +1016,44 @@ export type LLMModelConfigItem = {
   overridden: string[];
   available_for_researcher?: boolean;
 };
+
+export type LlmProviderOption = { id: string; label: string; credential_key: string };
+
+export async function getLLMModelProviders(): Promise<{ providers: LlmProviderOption[] }> {
+  return fetchApi('/api/llm-models/providers');
+}
+
+export async function postLLMListModels(body: {
+  model_id: string;
+  provider_id: string;
+  api_token?: string;
+}): Promise<{ models: string[] }> {
+  return fetchApi('/api/llm-models/list-models', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export type VisionLlmConfig = {
+  llm_provider: string;
+  backend_model: string;
+  ollama_url: string;
+  openai_base_url: string;
+  provider_keys_present: Record<string, boolean>;
+};
+
+export async function getVisionLlmConfig(): Promise<VisionLlmConfig> {
+  return fetchApi('/api/vision-llm-config');
+}
+
+export async function putVisionLlmConfig(
+  body: Partial<{
+    llm_provider: string;
+    backend_model: string;
+    ollama_url: string;
+    openai_base_url: string;
+    provider_credentials_patch: Record<string, string>;
+  }>
+): Promise<VisionLlmConfig> {
+  return fetchApi('/api/vision-llm-config', { method: 'PUT', body: JSON.stringify(body) });
+}
 
 export async function getLLMModelsConfig(): Promise<LLMModelConfigItem[]> {
   return fetchApi('/api/llm-models/config');
@@ -890,6 +1073,8 @@ export async function updateLLMModelConfig(
     extra_params: Record<string, unknown>;
     is_default: boolean;
     available_for_researcher: boolean;
+    llm_provider: string;
+    provider_credentials_patch: Record<string, string>;
   }>
 ): Promise<{ status: string; model_id: string }> {
   return fetchApi(`/api/llm-models/config/${encodeURIComponent(modelId)}`, { method: 'PUT', body: JSON.stringify(body) });
@@ -905,6 +1090,7 @@ export async function getChatDefaults(): Promise<{
   pubmed_search: boolean;
   openscholar_search: boolean;
   research_2_1: boolean;
+  public_access_enabled: boolean;
   default_model?: string;
 }> {
   return fetchApi('/api/chat-defaults');
@@ -920,6 +1106,7 @@ export async function updateChatDefaults(defaults: {
   pubmed_search?: boolean;
   openscholar_search?: boolean;
   research_2_1?: boolean;
+  public_access_enabled?: boolean;
   default_model?: string;
 }): Promise<{
   research_mode: boolean;
@@ -928,6 +1115,7 @@ export async function updateChatDefaults(defaults: {
   pubmed_search: boolean;
   openscholar_search: boolean;
   research_2_1: boolean;
+  public_access_enabled: boolean;
   default_model?: string;
 }> {
   return fetchApi('/api/chat-defaults', {
@@ -980,8 +1168,9 @@ export async function getHealth(): Promise<{
   status: string;
   timestamp: string;
   model: { version: string; status: string };
-  servers: { cpu: string; gpu: string };
+  servers: { primary?: string; secondary?: string; cpu?: string; gpu?: string };
   lastCheck?: string;
+  serverless?: { ollama_endpoint: string | null; api_key_configured: boolean };
 }> {
   const response = await fetch(`${API_URL}${API_PREFIX}/system-stats/health`);
   return response.json();

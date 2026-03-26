@@ -78,6 +78,20 @@ export interface CreateApiKeyResponse {
   message: string;
 }
 
+/** Last logged HTTP exchange for an API key (dashboard modal). */
+export interface ApiKeyRecentRequest {
+  id: number;
+  createdAt: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  request: string;
+  response: string;
+  requestTruncated: boolean;
+  responseTruncated: boolean;
+  streamResponse: boolean;
+}
+
 /** Taxonomy dimension values (e.g. institucion: ["SSA"], tipo_documento: ["guia_clinica"]) */
 export type TaxonomyDict = Record<string, string[]>;
 

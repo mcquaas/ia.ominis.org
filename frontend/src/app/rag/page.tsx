@@ -17,11 +17,14 @@ import {
   classifySource,
   batchReindex,
   markStuckIndexingAsFailed,
+  reconcileRagSourceStatus,
   getTaxonomySchema,
   scrapePreview,
   scrapeAndIndex,
   tainacanPreview,
   tainacanImport,
+  datosGobMxPreview,
+  datosGobMxImport,
   datasetPreview,
   datasetIndex,
 } from '@/services/auth';
@@ -140,7 +143,9 @@ export default function RagPage() {
   const [uploadUrl, setUploadUrl] = useState('');
   const [uploadFollowLinks, setUploadFollowLinks] = useState(false);
   const [uploadText, setUploadText] = useState('');
-  const [uploadMode, setUploadMode] = useState<'file' | 'text' | 'url' | 'scrape' | 'dataset' | 'tainacan'>('file');
+  const [uploadMode, setUploadMode] = useState<
+    'file' | 'text' | 'url' | 'scrape' | 'dataset' | 'tainacan' | 'datosgob'
+  >('file');
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -181,10 +186,24 @@ export default function RagPage() {
   const [tainacanImporting, setTainacanImporting] = useState(false);
   const [tainacanResult, setTainacanResult] = useState('');
 
+  const [datosGobLoading, setDatosGobLoading] = useState(false);
+  const [datosGobPreviewData, setDatosGobPreviewData] = useState<{
+    totalPackages: number;
+    groupName: string;
+    groupTitle: string;
+    totalResourcesSample: number;
+    resourceFormatsSample: Record<string, number>;
+    sampleTitles: string[];
+  } | null>(null);
+  const [datosGobImporting, setDatosGobImporting] = useState(false);
+  const [datosGobResult, setDatosGobResult] = useState('');
+
   // Chunk viewer
   const [viewingChunks, setViewingChunks] = useState<number | null>(null);
   const [chunks, setChunks] = useState<Array<{ id: string; contentPreview: string; title?: string; url?: string }>>([]);
   const [chunksLoading, setChunksLoading] = useState(false);
+  /** Invalidates in-flight chunk fetches when switching sources or closing the viewer. */
+  const chunkFetchSeq = useRef(0);
 
   const showMsg = (msg: string) => {
     setActionMsg(msg);
@@ -288,8 +307,17 @@ export default function RagPage() {
     setMarkingStuck(true);
     try {
       const res = await markStuckIndexingAsFailed(30);
-      if (res.marked > 0) {
-        showMsg(`${res.marked} fuente(s) marcadas como fallidas (indexación atascada). Puedes re-indexar.`);
+      if (res.promoted > 0 || res.markedError > 0) {
+        const parts: string[] = [];
+        if (res.promoted > 0) {
+          parts.push(
+            `${res.promoted} fuente(s) pasaron a activas (ya había vectores; la indexación había quedado mal registrada)`,
+          );
+        }
+        if (res.markedError > 0) {
+          parts.push(`${res.markedError} fuente(s) marcadas como fallidas (sin vectores; puedes re-indexar)`);
+        }
+        showMsg(parts.join('. ') + '.');
         loadSources();
       } else {
         showMsg('No hay fuentes atascadas en indexación (más de 30 min).');
@@ -301,20 +329,55 @@ export default function RagPage() {
     }
   };
 
+  const [reconciling, setReconciling] = useState(false);
+  const handleReconcileStatus = async () => {
+    setReconciling(true);
+    try {
+      const res = await reconcileRagSourceStatus(false, true);
+      if (res.fixed > 0 || res.syncedCounts > 0) {
+        const parts: string[] = [];
+        if (res.fixed > 0) {
+          parts.push(`${res.fixed} fuente(s) pasaron de error/indexing a activas`);
+        }
+        if (res.syncedCounts > 0) {
+          parts.push(`${res.syncedCounts} fuente(s) sincronizaron su conteo real de chunks`);
+        }
+        showMsg(`${parts.join('. ')}. Revisadas: ${res.checked}.`);
+        loadSources();
+      } else {
+        showMsg(
+          res.checked > 0
+            ? `No hubo cambios al reconciliar ${res.checked} fuente(s).`
+            : 'No hay fuentes para reconciliar.',
+        );
+      }
+    } catch {
+      showMsg('Error al reconciliar estados');
+    } finally {
+      setReconciling(false);
+    }
+  };
+
   const handleViewChunks = async (sourceId: number) => {
     if (viewingChunks === sourceId) {
+      chunkFetchSeq.current += 1;
       setViewingChunks(null);
+      setChunks([]);
       return;
     }
+    const seq = ++chunkFetchSeq.current;
     setViewingChunks(sourceId);
+    setChunks([]);
     setChunksLoading(true);
     try {
       const res = await getSourceChunks(sourceId);
+      if (seq !== chunkFetchSeq.current) return;
       setChunks(res.data || []);
     } catch {
+      if (seq !== chunkFetchSeq.current) return;
       setChunks([]);
     } finally {
-      setChunksLoading(false);
+      if (seq === chunkFetchSeq.current) setChunksLoading(false);
     }
   };
 
@@ -459,6 +522,41 @@ export default function RagPage() {
       showMsg(e instanceof Error ? e.message : 'Error al importar desde Tainacan');
     } finally {
       setTainacanImporting(false);
+    }
+  };
+
+  const handleDatosGobPreview = async () => {
+    setDatosGobLoading(true);
+    setDatosGobResult('');
+    try {
+      const result = await datosGobMxPreview('salud');
+      setDatosGobPreviewData(result);
+    } catch (e) {
+      showMsg(e instanceof Error ? e.message : 'Error al consultar datos.gob.mx (CKAN)');
+    } finally {
+      setDatosGobLoading(false);
+    }
+  };
+
+  const handleDatosGobImport = async () => {
+    setDatosGobImporting(true);
+    setDatosGobResult('');
+    try {
+      const result = await datosGobMxImport({
+        category: uploadCategory || 'datos.gob.mx',
+        skipExisting: true,
+        group: 'salud',
+      });
+      setDatosGobResult(
+        `${result.totalQueued} conjuntos encolados para indexación de metadatos (${result.skipped} omitidos por ya existir)`,
+      );
+      showMsg(result.message);
+      loadSources();
+    } catch (e) {
+      setDatosGobResult(e instanceof Error ? e.message : 'Error al importar');
+      showMsg(e instanceof Error ? e.message : 'Error al importar desde datos.gob.mx');
+    } finally {
+      setDatosGobImporting(false);
     }
   };
 
@@ -609,7 +707,7 @@ export default function RagPage() {
         <div className="mb-6">
           <Section title="Agregar fuente">
             <div className="flex gap-2 mb-4">
-              {(['file', 'text', 'url', 'scrape', 'dataset', 'tainacan'] as const).map((m) => (
+              {(['file', 'text', 'url', 'scrape', 'dataset', 'tainacan', 'datosgob'] as const).map((m) => (
                 <button
                   key={m}
                   onClick={() => {
@@ -622,11 +720,27 @@ export default function RagPage() {
                       setTainacanPreviewData(null);
                       setTainacanResult('');
                     }
+                    if (m === 'datosgob') {
+                      setDatosGobPreviewData(null);
+                      setDatosGobResult('');
+                    }
                     if (m === 'dataset') setDatasetPreviewData(null);
                   }}
                   className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${uploadMode === m ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' : 'text-gray-400 border-white/10 hover:text-white'}`}
                 >
-                  {m === 'file' ? 'Archivo' : m === 'text' ? 'Texto' : m === 'url' ? 'URL' : m === 'scrape' ? 'Scrape archivos' : m === 'dataset' ? 'Datasets' : 'Tainacan'}
+                  {m === 'file'
+                    ? 'Archivo'
+                    : m === 'text'
+                      ? 'Texto'
+                      : m === 'url'
+                        ? 'URL'
+                        : m === 'scrape'
+                          ? 'Scrape archivos'
+                          : m === 'dataset'
+                            ? 'Datasets'
+                            : m === 'tainacan'
+                              ? 'Tainacan'
+                              : 'datos.gob.mx'}
                 </button>
               ))}
             </div>
@@ -795,6 +909,100 @@ export default function RagPage() {
                 {tainacanResult && (
                   <div className="bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-4 py-3 text-cyan-300 text-sm">
                     {tainacanResult}
+                  </div>
+                )}
+              </div>
+            ) : uploadMode === 'datosgob' ? (
+              <div className="space-y-4">
+                <div className="flex gap-3 items-end flex-wrap">
+                  <div className="flex-1 min-w-[min(100%,20rem)]">
+                    <p className="text-gray-400 text-sm mb-2">
+                      Importar metadatos de conjuntos del grupo CKAN «Salud» en{' '}
+                      <a
+                        href="https://www.datos.gob.mx/dataset/?groups=salud"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-cyan-400 hover:underline"
+                      >
+                        datos.gob.mx
+                      </a>{' '}
+                      vía API oficial (sin descargar el CSV completo: se indexan descripción, institución, etiquetas y
+                      enlaces de descarga).
+                    </p>
+                    <p className="text-gray-500 text-xs">
+                      El conteo del catálogo CKAN puede diferir del número mostrado en la web; la importación usa el API{' '}
+                      <code className="text-gray-400">package_search</code> con grupo <code className="text-gray-400">salud</code>.
+                    </p>
+                  </div>
+                  <input
+                    type="text"
+                    value={uploadCategory}
+                    onChange={(e) => setUploadCategory(e.target.value)}
+                    placeholder="Categoría"
+                    className="w-40 bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500/50"
+                  />
+                  <button
+                    onClick={() => void handleDatosGobPreview()}
+                    disabled={datosGobLoading}
+                    className="bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 flex items-center gap-2 whitespace-nowrap"
+                  >
+                    {datosGobLoading ? (
+                      <>
+                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        Consultando CKAN…
+                      </>
+                    ) : (
+                      'Vista previa'
+                    )}
+                  </button>
+                </div>
+                {datosGobPreviewData && (
+                  <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden space-y-3">
+                    <div className="px-4 py-3 border-b border-white/10 bg-white/5">
+                      <p className="text-white text-sm font-medium">
+                        {datosGobPreviewData.totalPackages} conjuntos en grupo «{datosGobPreviewData.groupTitle || datosGobPreviewData.groupName}»
+                      </p>
+                      <p className="text-gray-500 text-xs mt-1">
+                        Muestra recursos en la primera página: {datosGobPreviewData.totalResourcesSample} recursos; formatos:{' '}
+                        {Object.entries(datosGobPreviewData.resourceFormatsSample || {})
+                          .map(([k, v]) => `${k}: ${v}`)
+                          .join(' · ') || '—'}
+                      </p>
+                    </div>
+                    {datosGobPreviewData.sampleTitles.length > 0 && (
+                      <ul className="px-4 text-xs text-gray-400 list-disc list-inside space-y-0.5 pb-2">
+                        {datosGobPreviewData.sampleTitles.slice(0, 6).map((t) => (
+                          <li key={t}>{t}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="px-4 py-3 border-t border-white/10 bg-white/5">
+                      <button
+                        onClick={() => void handleDatosGobImport()}
+                        disabled={datosGobImporting}
+                        className="w-full bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/30 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
+                      >
+                        {datosGobImporting ? (
+                          <>
+                            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                            </svg>
+                            Importando metadatos…
+                          </>
+                        ) : (
+                          <>Importar {datosGobPreviewData.totalPackages} conjuntos (metadatos)</>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {datosGobResult && (
+                  <div className="bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-4 py-3 text-cyan-300 text-sm">
+                    {datosGobResult}
                   </div>
                 )}
               </div>
@@ -1043,39 +1251,71 @@ export default function RagPage() {
             </div>
 
             {taxonomySchema && Object.keys(taxonomySchema).length > 0 && (
-              <div className="flex flex-wrap gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2">
                 {Object.entries(taxonomySchema).map(([dim, values]) => {
                   const selected = taxonomyFilters[dim] || [];
+                  const selectedPreview = selected.slice(0, 2).join(', ');
+                  const hasMoreSelected = selected.length > 2;
                   return (
-                    <div key={dim} className="min-w-[180px] max-w-[220px]">
-                      <p className="text-gray-400 text-xs mb-1.5 font-medium">{DIM_LABELS[dim] || dim}</p>
-                      <div className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 max-h-28 overflow-y-auto custom-scrollbar space-y-1">
-                        {values.map((v) => (
-                          <label key={v} className="flex items-center gap-2 cursor-pointer hover:bg-white/5 rounded px-1 -mx-1">
-                            <input
-                              type="checkbox"
-                              checked={selected.includes(v)}
-                              onChange={(e) => {
-                                const next = e.target.checked
-                                  ? [...selected, v]
-                                  : selected.filter((x) => x !== v);
-                                setTaxonomyFilter(dim, next);
-                              }}
-                              className="rounded border-gray-500 bg-white/10 text-cyan-500 focus:ring-cyan-500/30"
-                            />
-                            <span className="text-white text-xs truncate">{v}</span>
-                          </label>
-                        ))}
+                    <details
+                      key={dim}
+                      className="group bg-white/5 border border-white/10 rounded-lg"
+                    >
+                      <summary className="list-none cursor-pointer px-3 py-2 flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-gray-300 text-[11px] font-medium truncate">{DIM_LABELS[dim] || dim}</p>
+                          <p className="text-gray-500 text-[10px] truncate">
+                            {selected.length > 0
+                              ? `${selectedPreview}${hasMoreSelected ? ', ...' : ''}`
+                              : 'Sin selección'}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          {selected.length > 0 && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                              {selected.length}
+                            </span>
+                          )}
+                          <svg
+                            className="w-3.5 h-3.5 text-gray-400 transition-transform group-open:rotate-180"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </div>
+                      </summary>
+
+                      <div className="px-3 pb-2 border-t border-white/10">
+                        <div className="pt-2 max-h-36 overflow-y-auto custom-scrollbar space-y-1">
+                          {values.map((v) => (
+                            <label key={v} className="flex items-center gap-2 cursor-pointer hover:bg-white/5 rounded px-1 -mx-1">
+                              <input
+                                type="checkbox"
+                                checked={selected.includes(v)}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? [...selected, v]
+                                    : selected.filter((x) => x !== v);
+                                  setTaxonomyFilter(dim, next);
+                                }}
+                                className="rounded border-gray-500 bg-white/10 text-cyan-500 focus:ring-cyan-500/30"
+                              />
+                              <span className="text-white text-xs truncate">{v}</span>
+                            </label>
+                          ))}
+                        </div>
+                        {selected.length > 0 && (
+                          <button
+                            onClick={() => setTaxonomyFilter(dim, [])}
+                            className="text-[10px] text-gray-500 hover:text-white mt-1"
+                          >
+                            Limpiar
+                          </button>
+                        )}
                       </div>
-                      {selected.length > 0 && (
-                        <button
-                          onClick={() => setTaxonomyFilter(dim, [])}
-                          className="text-[10px] text-gray-500 hover:text-white mt-1"
-                        >
-                          Limpiar
-                        </button>
-                      )}
-                    </div>
+                    </details>
                   );
                 })}
               </div>
@@ -1087,15 +1327,26 @@ export default function RagPage() {
         <Section
           title={`Fuentes DataStore (${totalSources})`}
           action={
-            <button
-              type="button"
-              onClick={handleMarkStuckAsFailed}
-              disabled={markingStuck}
-              className="text-xs px-2 py-1 rounded bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500/30 disabled:opacity-50"
-              title="Marcar fuentes en 'indexando' desde hace más de 30 min como fallidas (luego puedes re-indexar)"
-            >
-              {markingStuck ? '…' : 'Marcar atascadas como fallidas'}
-            </button>
+            <div className="flex flex-wrap gap-1 justify-end">
+              <button
+                type="button"
+                onClick={handleReconcileStatus}
+                disabled={reconciling}
+                className="text-xs px-2 py-1 rounded bg-emerald-500/15 text-emerald-200 border border-emerald-500/30 hover:bg-emerald-500/25 disabled:opacity-50"
+                title="Para fuentes en error: si ya hay vectores en el almacén, pasa el estado a activo y sincroniza el conteo"
+              >
+                {reconciling ? '…' : 'Corregir errores con vectores'}
+              </button>
+              <button
+                type="button"
+                onClick={handleMarkStuckAsFailed}
+                disabled={markingStuck}
+                className="text-xs px-2 py-1 rounded bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500/30 disabled:opacity-50"
+                title="Fuentes en 'indexando' sin actualizar &gt;30 min: si hay vectores → activas; si no → error (reindex)"
+              >
+                {markingStuck ? '…' : 'Marcar atascadas como fallidas'}
+              </button>
+            </div>
           }
         >
           {sourcesLoading ? (
@@ -1111,7 +1362,17 @@ export default function RagPage() {
                         <p className="text-gray-500 text-xs">
                           {s.sourceType} · {s.chunksCount} chunks
                           {s.publisher && <> · {s.publisher}</>}
-                          {s.documentDate && <> · {s.documentDate}</>}
+                          {s.documentDate && <> · Publicación: {s.documentDate}</>}
+                          {s.lastIndexedAt && (
+                            <>
+                              {' '}
+                              · Ingesta:{' '}
+                              {new Date(s.lastIndexedAt).toLocaleString('es-MX', {
+                                dateStyle: 'short',
+                                timeStyle: 'short',
+                              })}
+                            </>
+                          )}
                         </p>
                         {s.description && <p className="text-gray-500 text-[10px] truncate mt-0.5">{s.description}</p>}
                         {s.taxonomy && Object.keys(s.taxonomy).length > 0 && (
@@ -1127,6 +1388,11 @@ export default function RagPage() {
                               ))
                             )}
                           </div>
+                        )}
+                        {s.indexingError && (
+                          <p className="text-red-300/90 text-[10px] mt-1 break-words leading-snug">
+                            {s.indexingError}
+                          </p>
                         )}
                       </div>
                       <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -1184,7 +1450,13 @@ export default function RagPage() {
                             ))}
                           </div>
                         ) : (
-                          <p className="text-gray-500 text-xs">No hay chunks para esta fuente.</p>
+                          <p className="text-gray-500 text-xs">
+                            {s.indexingError
+                              ? s.indexingError
+                              : s.chunksCount > 0
+                                ? 'No se encontraron vectores en el almacén para esta fuente (p. ej. metadatos desincronizados). Prueba re-indexar o informa al equipo.'
+                                : 'No hay chunks para esta fuente.'}
+                          </p>
                         )}
                       </div>
                     )}

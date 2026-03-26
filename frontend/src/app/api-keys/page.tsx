@@ -8,8 +8,9 @@ import {
   getApiKeys,
   createApiKey,
   revokeApiKey,
+  getApiKeyRecentRequests,
 } from '@/services/auth';
-import type { ApiKey } from '@/types/auth';
+import type { ApiKey, ApiKeyRecentRequest } from '@/types/auth';
 
 /* ── status badge ── */
 function StatusBadge({ status }: { status: string }) {
@@ -27,6 +28,14 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 /* ── copy button ── */
+function MagnifyIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+    </svg>
+  );
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
@@ -60,6 +69,33 @@ export default function ApiKeysPage() {
   const [newDesc, setNewDesc] = useState('');
   const [creating, setCreating] = useState(false);
   const [newKeySecret, setNewKeySecret] = useState(''); // shown once
+
+  /* recent requests modal */
+  const [recentModalKey, setRecentModalKey] = useState<ApiKey | null>(null);
+  const [recentRows, setRecentRows] = useState<ApiKeyRecentRequest[]>([]);
+  const [recentLoading, setRecentLoading] = useState(false);
+  const [recentErr, setRecentErr] = useState('');
+
+  const openRecentModal = async (k: ApiKey) => {
+    setRecentModalKey(k);
+    setRecentLoading(true);
+    setRecentErr('');
+    setRecentRows([]);
+    try {
+      const data = await getApiKeyRecentRequests(k.id);
+      setRecentRows(data);
+    } catch (e) {
+      setRecentErr(e instanceof Error ? e.message : 'No se pudieron cargar las solicitudes');
+    } finally {
+      setRecentLoading(false);
+    }
+  };
+
+  const closeRecentModal = () => {
+    setRecentModalKey(null);
+    setRecentRows([]);
+    setRecentErr('');
+  };
 
   /* ── load keys ── */
   const loadKeys = useCallback(async () => {
@@ -135,6 +171,115 @@ export default function ApiKeysPage() {
   return (
     <div className="min-h-screen bg-[#0a1628]">
       <Header />
+
+      {/* ── últimas solicitudes modal ── */}
+      {recentModalKey && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="recent-requests-title"
+          onClick={(e) => e.target === e.currentTarget && closeRecentModal()}
+        >
+          <div className="w-full max-w-4xl max-h-[90vh] flex flex-col rounded-xl border border-white/15 bg-[#0c1a30] shadow-2xl shadow-black/50">
+            <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-white/10 shrink-0">
+              <div>
+                <h2 id="recent-requests-title" className="text-white font-semibold text-sm">
+                  Últimas solicitudes
+                </h2>
+                <p className="text-gray-500 text-xs mt-0.5">
+                  {recentModalKey.name} · hasta 5 registros (petición y respuesta)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeRecentModal}
+                className="shrink-0 p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                aria-label="Cerrar"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 px-5 py-4 space-y-4">
+              {recentLoading && (
+                <div className="flex justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-cyan-400" />
+                </div>
+              )}
+              {recentErr && !recentLoading && (
+                <div className="p-3 rounded-lg bg-red-500/15 border border-red-500/25 text-red-300 text-sm">{recentErr}</div>
+              )}
+              {!recentLoading && !recentErr && recentRows.length === 0 && (
+                <p className="text-gray-500 text-sm text-center py-10">
+                  Aún no hay solicitudes registradas con esta clave. Las peticiones a{' '}
+                  <code className="text-cyan-400/90">/v1/query</code> y rutas relacionadas aparecerán aquí.
+                </p>
+              )}
+              {!recentLoading &&
+                recentRows.map((row) => (
+                  <div
+                    key={row.id}
+                    className="rounded-lg border border-white/10 bg-black/20 overflow-hidden"
+                  >
+                    <div className="px-3 py-2 bg-white/5 flex flex-wrap items-center gap-2 text-xs">
+                      <span className="text-gray-300 font-mono">
+                        {new Date(row.createdAt).toLocaleString('es-MX', {
+                          dateStyle: 'short',
+                          timeStyle: 'medium',
+                        })}
+                      </span>
+                      <span className="text-cyan-400/90">{row.method}</span>
+                      <span className="text-gray-500 truncate max-w-[200px] sm:max-w-md" title={row.path}>
+                        {row.path}
+                      </span>
+                      <span
+                        className={
+                          row.statusCode >= 400
+                            ? 'text-red-400'
+                            : row.statusCode >= 300
+                              ? 'text-amber-400'
+                              : 'text-green-400'
+                        }
+                      >
+                        {row.statusCode}
+                      </span>
+                      {row.streamResponse && (
+                        <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/20">
+                          streaming
+                        </span>
+                      )}
+                      {row.requestTruncated && (
+                        <span className="px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-200 border border-orange-500/20">
+                          petición truncada
+                        </span>
+                      )}
+                      {row.responseTruncated && (
+                        <span className="px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-200 border border-orange-500/20">
+                          respuesta truncada
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid md:grid-cols-2 gap-0 divide-y md:divide-y-0 md:divide-x divide-white/10">
+                      <div className="p-3 min-h-[120px]">
+                        <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-1.5">Petición</p>
+                        <pre className="text-[11px] leading-relaxed text-green-300/95 font-mono whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
+                          {row.request || '—'}
+                        </pre>
+                      </div>
+                      <div className="p-3 min-h-[120px]">
+                        <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-1.5">Respuesta</p>
+                        <pre className="text-[11px] leading-relaxed text-sky-300/95 font-mono whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
+                          {row.response || '—'}
+                        </pre>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-20 pb-12">
         {/* header */}
@@ -246,7 +391,18 @@ export default function ApiKeysPage() {
                         <span className="font-mono text-gray-400">{k.keyPrefix}...</span>
                         <span>Creada: {new Date(k.createdAt).toLocaleDateString('es-MX')}</span>
                         {k.lastUsedAt && <span>Último uso: {new Date(k.lastUsedAt).toLocaleDateString('es-MX')}</span>}
-                        <span>Solicitudes: {k.requestsCount}</span>
+                        <span className="inline-flex items-center gap-1">
+                          Solicitudes: {k.requestsCount}
+                          <button
+                            type="button"
+                            onClick={() => void openRecentModal(k)}
+                            className="inline-flex p-0.5 rounded text-gray-500 hover:text-cyan-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/50 transition-colors"
+                            title="Ver últimas solicitudes (petición y respuesta)"
+                            aria-label={`Ver últimas solicitudes para ${k.name}`}
+                          >
+                            <MagnifyIcon className="w-3.5 h-3.5" />
+                          </button>
+                        </span>
                         {k.expiresAt && <span>Expira: {new Date(k.expiresAt).toLocaleDateString('es-MX')}</span>}
                       </div>
                       {/* permissions */}

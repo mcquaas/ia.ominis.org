@@ -22,6 +22,7 @@ export interface ChatMessageData {
     type?: 'rag' | 'web' | 'pubmed';
     ref_num?: number;
   }> | null;
+  sources_not_used?: Array<Record<string, unknown>> | null;
   charts?: Array<{
     id: string;
     type: 'bar' | 'line' | 'pie' | string;
@@ -157,6 +158,7 @@ export async function addMessages(
     role: 'user' | 'assistant';
     content: string;
     sources?: Array<Record<string, unknown>> | null;
+    sources_not_used?: Array<Record<string, unknown>> | null;
     charts?: Array<Record<string, unknown>> | null;
     has_images?: boolean;
   }>,

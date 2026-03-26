@@ -8,6 +8,9 @@ export const maxDuration = 900; // 15 min — Research 2.1 deep multi-round can 
 // Ominis Agent backend - Streaming endpoint
 const GPU_API = (process.env.BACKEND_URL || 'http://localhost:8000') + '/v1/query-stream';
 
+/** Must cover Vast Serverless cold start; align with `maxDuration` and browser `QUERY_STREAM_CLIENT_TIMEOUT_MS`. */
+const BACKEND_FETCH_TIMEOUT_MS = 900_000;
+
 export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
   
@@ -31,8 +34,15 @@ export async function POST(request: NextRequest) {
         web_search: body.web_search !== false,
         pubmed_search: body.pubmed_search !== false,
         openscholar_search: body.openscholar_search === true,
+        clinical_trials_search: body.clinical_trials_search === true,
+        doctor_directory_search: body.doctor_directory_search === true,
+        allcan_search: body.allcan_search === true,
+        tool_automation: body.tool_automation !== false,
         file_context: body.file_context || undefined,
       };
+      if (typeof body.num_sources === 'number' && body.num_sources > 0 && body.num_sources <= 48) {
+        apiBody.num_sources = Math.floor(body.num_sources);
+      }
       if (body.research_mode) {
         apiBody.research_2_1 = body.research_2_1 === true;
         if (Array.isArray(body.excluded_sources)) apiBody.excluded_sources = body.excluded_sources;
@@ -41,7 +51,7 @@ export async function POST(request: NextRequest) {
       console.log('[query-stream] Request:', typeof apiBody.question === 'string' ? apiBody.question.slice(0, 50) : '', 'model:', apiBody.model || 'default');
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 130_000); // 130s, slightly above backend 120s
+      const timeoutId = setTimeout(() => controller.abort(), BACKEND_FETCH_TIMEOUT_MS);
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       const auth = request.headers.get('Authorization');
