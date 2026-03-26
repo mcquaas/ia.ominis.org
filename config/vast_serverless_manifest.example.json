@@ -1,0 +1,56 @@
+{
+  "_comment": "Copy to config/vast_serverless_manifest.json. Fill template_id OR template_hash per workload (from: python3 infrastructure/vast_serverless_search_templates.py --name-contains vLLM). Then run: python3 infrastructure/vast_serverless_provision_manifest.py --manifest config/vast_serverless_manifest.json",
+  "defaults": {
+    "min_load": 0,
+    "target_util": 0.9,
+    "cold_mult": 2.0,
+    "cold_workers": 0,
+    "max_workers": 12,
+    "gpu_ram": 24,
+    "search_params": "verified=true rentable=true"
+  },
+  "workloads": [
+    {
+      "endpoint_name": "ominis-ollama-chat",
+      "template_id": null,
+      "template_hash": null,
+      "backend_env_key": "vast_serverless_ollama_endpoint",
+      "models": "Ollama /api/chat — set OLLAMA_MODEL (e.g. qwen3:14b) and VISION_MODEL on backend; pull models on workers"
+    },
+    {
+      "endpoint_name": "ominis-vllm-power",
+      "template_id": null,
+      "template_hash": null,
+      "backend_env_key": "vast_serverless_power_endpoint",
+      "models": "vLLM OpenAI — POWER_MODEL e.g. openai/gpt-oss-20b"
+    },
+    {
+      "endpoint_name": "ominis-openscholar-8k",
+      "template_id": null,
+      "template_hash": null,
+      "backend_env_key": "vast_serverless_openscholar_endpoint",
+      "models": "vLLM — OPENSCHOLAR_MODEL (e.g. openscholar)"
+    },
+    {
+      "endpoint_name": "ominis-openscholar-128k",
+      "template_id": null,
+      "template_hash": null,
+      "backend_env_key": "vast_serverless_openscholar_128k_endpoint",
+      "models": "vLLM long-context — same served-model-name as EC2 128k setup"
+    },
+    {
+      "endpoint_name": "ominis-med42",
+      "template_id": null,
+      "template_hash": null,
+      "backend_env_key": "vast_serverless_med42_endpoint",
+      "models": "OpenAI-compatible — MED42_MODEL"
+    },
+    {
+      "endpoint_name": "ominis-qwen-vl",
+      "template_id": null,
+      "template_hash": null,
+      "backend_env_key": "vast_serverless_qwen_vl_endpoint",
+      "models": "vLLM multimodal — QWEN_VL_MODEL e.g. Qwen/Qwen2.5-VL-7B-Instruct"
+    }
+  ]
+}
