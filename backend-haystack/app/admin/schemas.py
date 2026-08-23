@@ -172,11 +172,24 @@ class SystemStatsOut(BaseModel):
     modelStatus: str = "active"
     cpuServerStatus: str = "unknown"
     gpuServerStatus: str = "unknown"
+    totalQueries1h: int = 0
     totalQueries24h: int = 0
     totalQueriesWeek: int = 0
     totalQueriesMonth: int = 0
     errorRate24h: float = 0.0
     lastHealthCheck: Optional[str] = None
+
+
+class QuerySeriesPoint(BaseModel):
+    bucketStart: str
+    count: int
+
+
+class QuerySeriesOut(BaseModel):
+    last7Days: list[QuerySeriesPoint]
+    last30Days: list[QuerySeriesPoint]
+    last12Weeks: list[QuerySeriesPoint]
+    last12Months: list[QuerySeriesPoint]
 
 
 # --- Query Stats schemas ---

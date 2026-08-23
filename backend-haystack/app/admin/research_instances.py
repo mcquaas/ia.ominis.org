@@ -12,6 +12,15 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+
+def _name_tag_from_instance(inst: dict) -> str | None:
+    for t in inst.get("Tags") or []:
+        if t.get("Key") == "Name":
+            v = (t.get("Value") or "").strip()
+            return v or None
+    return None
+
+
 ResearchInstanceKey = Literal["openscholar", "openscholar_128k"]
 
 # Instance type -> GPU VRAM (GB) and system RAM (GB) for dashboard display
@@ -97,6 +106,7 @@ def get_research_instance_status() -> dict[str, Any]:
                     "instanceType": itype,
                     "publicIp": (inst.get("PublicIpAddress") or "").strip() or None,
                     "privateIp": (inst.get("PrivateIpAddress") or "").strip() or None,
+                    "nameTag": _name_tag_from_instance(inst),
                     "vramGb": specs.get("vram_gb"),
                     "ramGb": specs.get("ram_gb"),
                 }
@@ -111,6 +121,7 @@ def get_research_instance_status() -> dict[str, Any]:
                 "state": state,
                 "vramGb": info.get("vramGb"),
                 "ramGb": info.get("ramGb"),
+                "nameTag": info.get("nameTag"),
             })
     except Exception as e:
         logger.warning("Failed to get research instance status: %s", e)

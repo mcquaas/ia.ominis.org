@@ -6,6 +6,7 @@ import Header from '@/components/Header';
 import Link from 'next/link';
 import {
   getSystemStats,
+  getQuerySeries,
   getUsers,
   getHealth,
   toggleUserBlock,
@@ -37,6 +38,8 @@ import {
   getDoctorDirectoryStats,
   getDoctorDirectoryRuns,
   startDoctorDirectoryScrape,
+  downloadDoctorDirectoryCsv,
+  getDashboardOverview,
 } from '@/services/auth';
 import type { DoctorDirectoryScrapeRun } from '@/services/auth';
 import type {
@@ -79,7 +82,67 @@ function formatFeedbackDate(createdAt: string | undefined): string {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('es-MX');
 }
 
-import type { SystemStats, User } from '@/types/auth';
+import type { DashboardLevel, DashboardOverview, HealthSnapshot, QuerySeries, SystemStats, User } from '@/types/auth';
+import { QuerySeriesChart } from '@/components/dashboard/QuerySeriesChart';
+
+function StatusGlyph({ level, compact }: { level: DashboardLevel; compact?: boolean }) {
+  const w = compact ? 'w-3 text-[11px] leading-none' : 'w-4';
+  if (level === 'ok') {
+    return <span className={`text-green-400 shrink-0 ${w} text-center font-semibold`} aria-hidden>✓</span>;
+  }
+  if (level === 'warning') {
+    return (
+      <span className={`text-amber-400 shrink-0 ${w} text-center`} aria-hidden title="Advertencia">
+        ⚠
+      </span>
+    );
+  }
+  return (
+    <span className={`text-red-400 shrink-0 ${w} text-center font-semibold`} aria-hidden title="No disponible">
+      ✗
+    </span>
+  );
+}
+
+function formatSourceCount(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return '';
+  return n.toLocaleString('es-MX');
+}
+
+function formatIngestionDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function formatServerCostLine(sv: {
+  estimated_daily_usd?: number | null;
+  estimated_monthly_usd?: number | null;
+}): string | null {
+  const parts: string[] = [];
+  if (sv.estimated_daily_usd != null && !Number.isNaN(sv.estimated_daily_usd)) {
+    parts.push(`~US$${sv.estimated_daily_usd.toFixed(2)}/día`);
+  }
+  if (sv.estimated_monthly_usd != null && !Number.isNaN(sv.estimated_monthly_usd)) {
+    parts.push(`~US$${sv.estimated_monthly_usd.toLocaleString('es-MX')}/mes`);
+  }
+  if (parts.length === 0) return null;
+  return `${parts.join(' · ')} (on-demand aprox.)`;
+}
+
+/** Human-readable Ollama / Vast default route status (not "model name" — use for LLM routing). */
+function inferenceStatusLabel(s: string | undefined): string {
+  switch ((s || '').toLowerCase()) {
+    case 'online':
+      return 'En línea';
+    case 'serverless':
+      return 'Vast (serverless)';
+    case 'offline':
+      return 'Sin Ollama';
+    default:
+      return s || '—';
+  }
+}
 
 // ---------- tiny stat card ----------
 function StatCard({ label, value, sub, color = 'cyan' }: { label: string; value: string | number; sub?: string; color?: string }) {
@@ -692,7 +755,10 @@ export default function DashboardPage() {
   const { user, loading: authLoading, isAdmin, isSuperAdmin } = useAuth();
 
   const [stats, setStats] = useState<SystemStats | null>(null);
-  const [health, setHealth] = useState<{ status: string; model: { version: string; status: string }; servers: Record<string, string> } | null>(null);
+  const [dashboardOverview, setDashboardOverview] = useState<DashboardOverview | null>(null);
+  const [querySeries, setQuerySeries] = useState<QuerySeries | null>(null);
+  const [querySeriesError, setQuerySeriesError] = useState<string>('');
+  const [health, setHealth] = useState<HealthSnapshot | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [storeStats, setStoreStats] = useState<{ totalDocuments: number; embeddingModel: string; storageType: string } | null>(null);
   const [healthDatastoreStatus, setHealthDatastoreStatus] = useState<{
@@ -772,6 +838,7 @@ export default function DashboardPage() {
   const [doctorScrapeMax, setDoctorScrapeMax] = useState(40);
   const [doctorScrapeDelay, setDoctorScrapeDelay] = useState(0.6);
   const [doctorScrapeBusy, setDoctorScrapeBusy] = useState(false);
+  const [doctorCsvExporting, setDoctorCsvExporting] = useState(false);
   const [doctorScrapeSource, setDoctorScrapeSource] = useState<
     'topdoctors_mx' | 'doctoralia_mx' | 'doctoranytime_mx'
   >('topdoctors_mx');
@@ -791,7 +858,7 @@ export default function DashboardPage() {
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const [feedbackModalItem, setFeedbackModalItem] = useState<FeedbackOut | null>(null);
   const [feedbackModalInfra, setFeedbackModalInfra] = useState<{
-    health: typeof health;
+        health: HealthSnapshot | null;
     gpuPerf: typeof gpuPerf;
     serverPerf: typeof serverPerf;
   } | null>(null);
@@ -801,9 +868,10 @@ export default function DashboardPage() {
     setLoadingData(true);
     setError('');
     try {
-      const [healthRes, statsRes, storeRes, storeHealthRes, storeActivityRes, perfRes, gpuRes] = await Promise.allSettled([
+      const [healthRes, statsRes, qsRes, storeRes, storeHealthRes, storeActivityRes, perfRes, gpuRes] = await Promise.allSettled([
         getHealth(),
         getSystemStats(),
+        getQuerySeries(),
         getStoreStats(),
         getHealthDatastoreStatus(),
         getHealthDatastoreRecentActivity(30),
@@ -811,8 +879,16 @@ export default function DashboardPage() {
         getGpuServerPerformance(),
       ]);
 
-      if (healthRes.status === 'fulfilled') setHealth(healthRes.value as typeof health);
+      if (healthRes.status === 'fulfilled') setHealth(healthRes.value as HealthSnapshot);
       if (statsRes.status === 'fulfilled') setStats((statsRes.value as { data: SystemStats }).data);
+      if (qsRes.status === 'fulfilled') {
+        setQuerySeries((qsRes.value as { data: QuerySeries }).data);
+        setQuerySeriesError('');
+      } else {
+        setQuerySeries(null);
+        const r = qsRes.reason;
+        setQuerySeriesError(r instanceof Error ? r.message : 'No se pudieron cargar las series de consultas.');
+      }
       if (storeRes.status === 'fulfilled') setStoreStats(storeRes.value as typeof storeStats);
       if (storeHealthRes.status === 'fulfilled') setHealthDatastoreStatus(storeHealthRes.value as typeof healthDatastoreStatus);
       if (storeActivityRes.status === 'fulfilled') {
@@ -823,13 +899,14 @@ export default function DashboardPage() {
       if (gpuRes.status === 'fulfilled') setGpuPerf(gpuRes.value as typeof gpuPerf);
 
       if (isAdmin) {
-        const [riRes, liRes, cdRes, lssRes, serversRes, llmConfigRes] = await Promise.allSettled([
+        const [riRes, liRes, cdRes, lssRes, serversRes, llmConfigRes, dashRes] = await Promise.allSettled([
           getResearchInstanceStatus(),
           getLlmInstanceStatus(),
           getChatDefaults(),
           getLlmServersStatus(),
           getServersStatus(),
           getLLMModelsConfig(),
+          getDashboardOverview(),
         ]);
 
         if (riRes.status === 'fulfilled') {
@@ -862,6 +939,13 @@ export default function DashboardPage() {
           setLlmModelsConfig(Array.isArray(v) ? v : []);
         } else {
           setLlmModelsConfig([]);
+        }
+        if (dashRes.status === 'fulfilled') {
+          setDashboardOverview((dashRes.value as { data: DashboardOverview }).data);
+          const h = (dashRes.value as { data: DashboardOverview }).data?.health;
+          if (h) setHealth(h);
+        } else {
+          setDashboardOverview(null);
         }
       }
 
@@ -901,7 +985,7 @@ export default function DashboardPage() {
         getServerPerformance(),
       ]);
       setFeedbackModalInfra({
-        health: hRes.status === 'fulfilled' ? (hRes.value as typeof health) : null,
+        health: hRes.status === 'fulfilled' ? (hRes.value as HealthSnapshot) : null,
         gpuPerf: gRes.status === 'fulfilled' ? (gRes.value as typeof gpuPerf) : null,
         serverPerf: sRes.status === 'fulfilled' ? (sRes.value as typeof serverPerf) : null,
       });
@@ -1156,17 +1240,178 @@ export default function DashboardPage() {
           ))}
         </nav>
 
-        {/* ===== Visión general ===== */}
+        {/* ===== Visión general — 2×3 grid (1/3 col each on xl) ===== */}
         {activeTab === 'overview' && (
         <section className="mb-6">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            <StatCard label="Estado" value={health?.status || '—'} color={health?.status === 'healthy' ? 'green' : 'red'} />
-            <StatCard label="Modelo" value={health?.model?.version || '—'} sub={health?.model?.status} color={health?.model?.status === 'online' ? 'cyan' : 'red'} />
-            <StatCard label="Servidor Primario" value={health?.servers?.primary || '—'} color={health?.servers?.primary === 'online' ? 'green' : 'red'} />
-            <StatCard label="Consultas 24h" value={stats?.totalQueries24h ?? '—'} color="blue" />
-            <StatCard label="Docs en pgvector" value={storeStats?.totalDocuments ?? '—'} sub={storeStats?.storageType} color="purple" />
-            <StatCard label="Consultas Mes" value={stats?.totalQueriesMonth ?? '—'} color="amber" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2 xl:min-h-[min(336px,calc(100vh-14rem))] xl:grid-rows-2 xl:[grid-template-rows:repeat(2,minmax(0,1fr))]">
+            {/* 1. Estado general */}
+            <div className="bg-gradient-to-br from-green-500/15 to-green-600/5 border border-green-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Estado general</p>
+              <p className="text-xl font-bold mt-0.5 text-white shrink-0 leading-tight">
+                {dashboardOverview?.overall?.status === 'healthy' ? 'Operativo' : dashboardOverview ? 'Limitado' : '—'}
+              </p>
+              <ul className="mt-1 space-y-0.5 text-xs text-gray-300 flex-1 min-h-0 overflow-y-auto pr-0.5 leading-snug">
+                {(dashboardOverview?.health_checks ?? []).map((c) => (
+                  <li key={c.key} className="flex items-start gap-2">
+                    <StatusGlyph level={c.level} />
+                    <span>
+                      <span className="text-gray-200">{c.label}</span>
+                      {c.detail != null && String(c.detail).length > 0 && (
+                        <span className="text-gray-500"> · {c.detail}</span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* 2. Servidores activos */}
+            <div className="bg-gradient-to-br from-cyan-500/15 to-cyan-600/5 border border-cyan-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Servidores activos</p>
+              <p className="text-[11px] text-gray-500 mt-0.5 mb-1 shrink-0 leading-tight">EC2 · investigación · Vast Serverless</p>
+              <div className="space-y-1.5 flex-1 min-h-0 overflow-y-auto pr-1 text-xs leading-snug">
+                {(dashboardOverview?.servers ?? []).map((sv) => {
+                  const costLine = formatServerCostLine(sv);
+                  const idLine = [sv.instance_id, sv.instance_type].filter(Boolean).join(' · ');
+                  return (
+                    <div key={sv.id} className="flex items-start gap-2 text-gray-300">
+                      <StatusGlyph level={sv.level} />
+                      <span className="flex-1 min-w-0">
+                        <span className="text-gray-100 font-medium break-words block">{sv.label}</span>
+                        {idLine.length > 0 && (
+                          <span className="text-[10px] text-gray-400 font-mono block mt-0.5 break-all">{idLine}</span>
+                        )}
+                        {sv.detail != null && String(sv.detail).length > 0 && (
+                          <span className="text-[10px] text-gray-500 block mt-0.5">{sv.detail}</span>
+                        )}
+                        {costLine && (
+                          <span className="text-[10px] text-gray-500 block mt-0.5">{costLine}</span>
+                        )}
+                        <span className="text-[10px] text-gray-500 block mt-0.5">{sv.state}</span>
+                      </span>
+                    </div>
+                  );
+                })}
+                {(!dashboardOverview?.servers || dashboardOverview.servers.length === 0) && (
+                  <span className="text-gray-500">—</span>
+                )}
+              </div>
+            </div>
+
+            {/* 3. Consultas — un renglón por métrica */}
+            <div className="bg-gradient-to-br from-blue-500/15 to-blue-600/5 border border-blue-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Consultas</p>
+              <div className="mt-1.5 flex flex-col gap-1 flex-1 justify-center">
+                {(
+                  [
+                    ['Últ. 1h', dashboardOverview?.queries?.last1h ?? stats?.totalQueries1h],
+                    ['Últ. 24h', dashboardOverview?.queries?.last24h ?? stats?.totalQueries24h],
+                    ['Últ. semana', dashboardOverview?.queries?.last7d ?? stats?.totalQueriesWeek],
+                    ['Últ. mes', dashboardOverview?.queries?.last30d ?? stats?.totalQueriesMonth],
+                  ] as const
+                ).map(([label, val]) => (
+                  <div key={label} className="flex items-baseline justify-between gap-2">
+                    <span className="text-xs text-gray-500 shrink-0">{label}</span>
+                    <span className="text-2xl font-bold text-blue-200 tabular-nums leading-none">{val ?? '—'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 4. Fuentes — detalle largo solo en tooltip (title) */}
+            <div className="bg-gradient-to-br from-purple-500/15 to-purple-600/5 border border-purple-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Fuentes</p>
+              <ul className="mt-1 space-y-0.5 flex-1 min-h-0 overflow-y-auto pr-0.5 text-xs text-gray-300 leading-snug">
+                {(Array.isArray(dashboardOverview?.sources) ? dashboardOverview.sources : []).map((row) => {
+                  const detailStr =
+                    row.detail != null && String(row.detail).length > 0 ? String(row.detail) : undefined;
+                  return (
+                    <li
+                      key={row.key}
+                      className={`flex items-start gap-2 ${detailStr ? 'cursor-help' : ''}`}
+                      title={detailStr}
+                    >
+                      <StatusGlyph level={row.level} />
+                      <span className="flex-1 min-w-0">
+                        <span className="text-gray-200 break-words">{row.label}</span>
+                        {row.count != null && (
+                          <span className="text-purple-200 font-medium tabular-nums ml-1">
+                            · {formatSourceCount(row.count)}
+                          </span>
+                        )}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+
+            {/* 5. Usuarios — un renglón por tipo */}
+            <div className="bg-gradient-to-br from-amber-500/15 to-amber-600/5 border border-amber-500/25 rounded-lg p-2.5 flex flex-col justify-between min-h-[108px] xl:min-h-0 xl:h-full">
+              <div className="flex-1 flex flex-col justify-center">
+                <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Usuarios registrados</p>
+                <div className="mt-1.5 flex flex-col gap-1">
+                  {(
+                    [
+                      ['Total', dashboardOverview?.users?.total],
+                      ['Admins', dashboardOverview?.users?.admins],
+                      ['Investigadores', dashboardOverview?.users?.researchers],
+                    ] as const
+                  ).map(([label, val]) => (
+                    <div key={label} className="flex items-baseline justify-between gap-2">
+                      <span className="text-xs text-gray-500 shrink-0">{label}</span>
+                      <span className="text-2xl font-bold text-amber-100 tabular-nums leading-none">{val ?? '—'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {dashboardOverview != null && dashboardOverview.users.developers > 0 && (
+                <p className="text-xs text-gray-500 mt-1.5 text-center shrink-0 leading-tight">
+                  Desarrolladores (rol): {dashboardOverview.users.developers}
+                </p>
+              )}
+            </div>
+
+            {/* 6. Ingesta */}
+            <div className="bg-gradient-to-br from-emerald-500/15 to-emerald-600/5 border border-emerald-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Ingesta</p>
+              <p className="text-[11px] text-gray-500 mt-0.5 mb-1 shrink-0 leading-tight">Trabajos activos (scrapers, embedders)</p>
+              <div className="flex-1 min-h-0 overflow-y-auto pr-0.5 space-y-1">
+                {(dashboardOverview?.ingestion?.jobs ?? []).length === 0 ? (
+                  <p className="text-xs text-gray-500">Ningún trabajo de ingesta en curso.</p>
+                ) : (
+                  (dashboardOverview?.ingestion?.jobs ?? []).map((job) => (
+                    <div key={job.id} className="text-xs text-gray-300 leading-snug">
+                      <div>
+                        <span className="text-emerald-400/90 font-medium">{job.kind}</span>
+                        <span className="text-gray-500"> · </span>
+                        <span className="text-gray-400 break-words">{job.detail}</span>
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-0.5 pl-0.5">
+                        Últ. ingesta:{' '}
+                        <span className="text-gray-400 tabular-nums">{formatIngestionDateTime(job.last_ingestion_at)}</span>
+                        {' · '}
+                        Resultados:{' '}
+                        <span className="text-gray-400 font-medium tabular-nums">
+                          {job.results_count != null ? job.results_count.toLocaleString('es-MX') : '—'}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
+          {querySeriesError && (
+            <div className="mt-6 p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-200/90 text-sm">
+              <span className="font-medium">Gráfica de consultas:</span> {querySeriesError}
+            </div>
+          )}
+          {querySeries && (
+            <div className="mt-6">
+              <QuerySeriesChart data={querySeries} />
+            </div>
+          )}
         </section>
         )}
 
@@ -1595,13 +1840,44 @@ export default function DashboardPage() {
           <Section
             title="Directorio médico México (scraping)"
             action={
-              <button
-                type="button"
-                onClick={() => void loadDoctorDirectory()}
-                className="text-xs text-emerald-300 hover:text-emerald-200 border border-emerald-500/40 rounded-lg px-2.5 py-1.5 transition-colors"
-              >
-                Actualizar estado
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void loadDoctorDirectory()}
+                  className="text-xs text-emerald-300 hover:text-emerald-200 border border-emerald-500/40 rounded-lg px-2.5 py-1.5 transition-colors"
+                >
+                  Actualizar estado
+                </button>
+                <button
+                  type="button"
+                  title="Descargar CSV (todos los perfiles en base)"
+                  disabled={doctorCsvExporting}
+                  onClick={async () => {
+                    setDoctorCsvExporting(true);
+                    try {
+                      await downloadDoctorDirectoryCsv();
+                      showMsg('CSV descargado.');
+                    } catch (e) {
+                      showError(e instanceof Error ? e.message : 'No se pudo exportar el CSV');
+                    } finally {
+                      setDoctorCsvExporting(false);
+                    }
+                  }}
+                  className="inline-flex items-center justify-center rounded-lg border border-emerald-500/40 p-1.5 text-emerald-300 hover:text-emerald-200 hover:bg-emerald-500/10 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                  aria-label="Descargar base de médicos en CSV"
+                >
+                  {doctorCsvExporting ? (
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden>
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                  )}
+                </button>
+              </div>
             }
           >
             <p className="text-gray-400 text-sm mb-3">
@@ -2157,7 +2433,12 @@ export default function DashboardPage() {
                       <div className="bg-white/5 rounded-lg p-3">
                         <p className="text-gray-500 text-xs mb-1">Estado del sistema</p>
                         <p className="text-white">Estado: {feedbackModalInfra.health.status}</p>
-                        <p className="text-gray-400 text-xs">Modelo: {feedbackModalInfra.health.model?.version || '—'} · {feedbackModalInfra.health.model?.status || '—'}</p>
+                        <p className="text-gray-400 text-xs">
+                          Ollama default: {inferenceStatusLabel(feedbackModalInfra.health.model?.status)} · {feedbackModalInfra.health.model?.version || '—'}
+                          {feedbackModalInfra.health.inference_summary && feedbackModalInfra.health.inference_summary.third_party_models > 0 && (
+                            <> · +{feedbackModalInfra.health.inference_summary.third_party_models} vía API</>
+                          )}
+                        </p>
                       </div>
                     )}
                     {feedbackModalInfra?.gpuPerf && (

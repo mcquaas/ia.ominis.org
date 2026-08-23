@@ -7,6 +7,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from sqlalchemy import func, select, text
@@ -14,6 +15,7 @@ from sqlalchemy import func, select, text
 from app.auth.dependencies import get_current_user, require_role
 from app.auth.models import RoleEnum, User
 from app.database import get_db
+from app.doctor_directory.csv_export import profiles_to_csv_bytes
 from app.doctor_directory.models import DoctorDirectoryProfile, DoctorDirectoryScrapeRun, DoctorScrapeStatus
 from app.doctor_directory.doctoralia import SOURCE_SITE as DOCTORALIA_SITE
 from app.doctor_directory.doctoranytime import SOURCE_SITE as DOCTORANYTIME_SITE
@@ -90,6 +92,7 @@ class DoctorProfileOut(BaseModel):
     country_code: Optional[str]
     services_json: Optional[list]
     phones_json: Optional[list]
+    emails_json: Optional[list]
     external_reviews_json: Optional[list]
     rating_value: Optional[float]
     rating_count: Optional[int]
@@ -170,6 +173,7 @@ def _profile_to_out(p: DoctorDirectoryProfile) -> DoctorProfileOut:
         country_code=p.country_code,
         services_json=p.services_json,
         phones_json=p.phones_json,
+        emails_json=p.emails_json,
         external_reviews_json=p.external_reviews_json,
         rating_value=p.rating_value,
         rating_count=p.rating_count,
@@ -269,6 +273,23 @@ async def doctor_directory_stats(
         total_profiles=int(total or 0),
         by_source=by_source,
         last_scraped_at=last.isoformat() if last else None,
+    )
+
+
+@router.get("/api/doctor-directory/export.csv")
+async def export_doctor_directory_csv(
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+    db=Depends(get_db),
+):
+    """Full dump of doctor_directory_profiles as UTF-8 CSV (admin/developer)."""
+    data = await profiles_to_csv_bytes(db)
+    return Response(
+        content=data,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="doctor_directory_mexico.csv"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

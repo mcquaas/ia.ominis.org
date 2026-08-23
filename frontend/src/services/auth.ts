@@ -5,6 +5,7 @@
 
 import type {
   User,
+  HealthSnapshot,
   AuthResponse,
   LoginCredentials,
   RegisterData,
@@ -14,9 +15,11 @@ import type {
   CreateApiKeyResponse,
   RagSource,
   SystemStats,
+  QuerySeries,
   QueryStats,
   UserUsage,
   TaxonomyDict,
+  DashboardOverview,
 } from '@/types/auth';
 
 // Configuration - Haystack backend API URL
@@ -681,6 +684,38 @@ export async function startDoctorDirectoryScrape(body: {
 }
 
 /**
+ * Admin/developer: download full doctor_directory_profiles table as CSV (browser download).
+ */
+export async function downloadDoctorDirectoryCsv(): Promise<void> {
+  const token = getToken();
+  const response = await fetch(`${API_URL}${API_PREFIX}/api/doctor-directory/export.csv`, {
+    method: 'GET',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: null, message: null }));
+    let msg = 'Export failed';
+    if (error && typeof error === 'object') {
+      const e = error as { detail?: unknown; message?: string };
+      if (typeof e.detail === 'string') msg = e.detail;
+      else if (Array.isArray(e.detail) && e.detail[0]?.msg) msg = e.detail.map((d: { msg?: string }) => d.msg).join('; ');
+      else if (e.message) msg = e.message;
+    }
+    throw new Error(msg);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `doctor_directory_mexico_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/**
  * Preview: scrape a URL for PDF, CSV, XLS, XLSX links without indexing
  */
 export async function scrapePreview(url: string): Promise<{
@@ -867,6 +902,35 @@ export async function datosGobMxImport(options?: {
  */
 export async function getSystemStats(): Promise<{ data: SystemStats }> {
   return fetchApi('/api/system-stats');
+}
+
+/** Aggregated overview for Visión general (health checks, servers, queries, sources, users). */
+export async function getDashboardOverview(): Promise<{ data: DashboardOverview }> {
+  return fetchApi('/api/system-stats/dashboard-overview');
+}
+
+/**
+ * Time-bucketed query counts for admin dashboard charts.
+ * Same-origin /api/... so Next.js proxies to BACKEND_URL (see app/api/system-stats/query-series/route.ts).
+ */
+export async function getQuerySeries(): Promise<{ data: QuerySeries }> {
+  const token = getToken();
+  const headers: HeadersInit = { 'Content-Type': 'application/json' };
+  if (token) (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
+
+  const response = await fetch('/api/system-stats/query-series', { headers });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: null as string | null, message: null as string | null }));
+    let msg = 'Request failed';
+    if (error) {
+      if (typeof error.detail === 'string') msg = error.detail;
+      else if (Array.isArray(error.detail) && error.detail[0]?.msg)
+        msg = error.detail.map((d: { msg?: string }) => d.msg).join('; ');
+      else if (error.error?.message || error.message) msg = error.error?.message || error.message;
+    }
+    throw new Error(msg);
+  }
+  return response.json();
 }
 
 /**
@@ -1164,14 +1228,7 @@ export async function getGpuServerPerformance(): Promise<{
  * Get system health (public endpoint)
  * Note: This endpoint doesn't use the /v1 prefix
  */
-export async function getHealth(): Promise<{
-  status: string;
-  timestamp: string;
-  model: { version: string; status: string };
-  servers: { primary?: string; secondary?: string; cpu?: string; gpu?: string };
-  lastCheck?: string;
-  serverless?: { ollama_endpoint: string | null; api_key_configured: boolean };
-}> {
+export async function getHealth(): Promise<HealthSnapshot> {
   const response = await fetch(`${API_URL}${API_PREFIX}/system-stats/health`);
   return response.json();
 }

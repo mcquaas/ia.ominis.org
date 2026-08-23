@@ -4,6 +4,7 @@ Only Ominis 2.0 and Ominis 2.0 Med are shown.
 """
 
 import logging
+import os
 from typing import Any
 
 from app.config import get_settings
@@ -13,6 +14,7 @@ from app.admin.llm_instances import (
     get_llm_instance_status,
     _model_info_llm,
 )
+from app.admin.research_instances import get_research_instance_status
 
 # Approximate on-demand USD/month (24/7) for dashboard cost estimate — us-east-1, check AWS for current prices
 INSTANCE_ESTIMATED_MONTHLY_USD: dict[str, int] = {
@@ -28,6 +30,14 @@ INSTANCE_ESTIMATED_MONTHLY_USD: dict[str, int] = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+def _name_tag_from_instance(inst: dict) -> str | None:
+    for t in inst.get("Tags") or []:
+        if t.get("Key") == "Name":
+            v = (t.get("Value") or "").strip()
+            return v or None
+    return None
 
 
 def _get_ec2_client():
@@ -105,6 +115,7 @@ def get_servers_status() -> dict[str, Any]:
                         "state": inst["State"]["Name"],
                         "instanceType": itype,
                         "publicIp": (inst.get("PublicIpAddress") or "").strip() or None,
+                        "nameTag": _name_tag_from_instance(inst),
                         "vramGb": None,
                         "ramGb": None,
                     }
@@ -145,6 +156,7 @@ def get_servers_status() -> dict[str, Any]:
             "instanceId": iid,
             "instanceType": itype,
             "publicIp": info.get("publicIp"),
+            "nameTag": info.get("nameTag"),
             "state": info.get("state") or "unknown",
             "vramGb": info.get("vramGb"),
             "ramGb": info.get("ramGb"),
@@ -155,3 +167,233 @@ def get_servers_status() -> dict[str, Any]:
         })
 
     return {"servers": servers_out}
+
+
+RESEARCH_SERVER_LABELS: dict[str, str] = {
+    "openscholar": "OpenScholar 8K (investigación)",
+    "openscholar_128k": "OpenScholar 128K (investigación)",
+}
+
+
+def _vast_serverless_checklist_items() -> list[dict[str, Any]]:
+    """Vast.ai Serverless endpoints (workers from API). No EC2-style monthly estimate."""
+    s = get_settings()
+    vk = (getattr(s, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+    if not vk:
+        return [
+            {
+                "id": "vast-no-api-key",
+                "label": "Vast Serverless (sin API key)",
+                "kind": "vast",
+                "up": False,
+                "state": "not_configured",
+                "detail": "Configura VAST_API_KEY / vast_api_key",
+                "instance_id": None,
+                "name_tag": None,
+                "instance_type": None,
+                "estimated_monthly_usd": None,
+                "estimated_daily_usd": None,
+            }
+        ]
+
+    try:
+        from app.vast_serverless.status import list_vast_serverless_endpoints_sync
+
+        data = list_vast_serverless_endpoints_sync(timeout=25.0)
+    except Exception as e:
+        logger.warning("Vast checklist: list_endpoints failed: %s", e)
+        return [
+            {
+                "id": "vast-list-error",
+                "label": "Vast Serverless (error al listar)",
+                "kind": "vast",
+                "up": False,
+                "state": "error",
+                "detail": str(e)[:200],
+                "instance_id": None,
+                "name_tag": None,
+                "instance_type": "serverless",
+                "estimated_monthly_usd": None,
+                "estimated_daily_usd": None,
+            }
+        ]
+
+    if data.get("error"):
+        err = str(data.get("error"))[:200]
+        return [
+            {
+                "id": "vast-api-error",
+                "label": "Vast Serverless",
+                "kind": "vast",
+                "up": False,
+                "state": "error",
+                "detail": err,
+                "instance_id": None,
+                "name_tag": None,
+                "instance_type": "serverless",
+                "estimated_monthly_usd": None,
+                "estimated_daily_usd": None,
+            }
+        ]
+
+    eps = data.get("endpoints") or []
+    if not eps:
+        return [
+            {
+                "id": "vast-no-endpoints",
+                "label": "Vast Serverless (sin endpoints)",
+                "kind": "vast",
+                "up": False,
+                "state": "not_configured",
+                "detail": "Cuenta sin endpoints o lista vacía",
+                "instance_id": None,
+                "name_tag": None,
+                "instance_type": "serverless",
+                "estimated_monthly_usd": None,
+                "estimated_daily_usd": None,
+            }
+        ]
+
+    out: list[dict[str, Any]] = []
+    for ep in eps:
+        if not isinstance(ep, dict):
+            continue
+        name = (ep.get("name") or "endpoint").strip() or "endpoint"
+        eid = ep.get("id")
+        wid = f"vast-ep-{eid}" if eid is not None else f"vast-ep-{name}"
+        workers = ep.get("workers")
+        werr = ep.get("workers_error")
+        if werr:
+            out.append(
+                {
+                    "id": wid,
+                    "label": f"Vast · {name}",
+                    "kind": "vast",
+                    "up": False,
+                    "state": "error",
+                    "detail": str(werr)[:160],
+                    "instance_id": str(eid) if eid is not None else None,
+                    "name_tag": name,
+                    "instance_type": "serverless",
+                    "estimated_monthly_usd": None,
+                    "estimated_daily_usd": None,
+                }
+            )
+            continue
+        wn = int(workers) if workers is not None else 0
+        out.append(
+            {
+                "id": wid,
+                "label": f"Vast · {name}",
+                "kind": "vast",
+                "up": wn > 0,
+                "state": "running" if wn > 0 else "idle",
+                "detail": f"{wn} worker(s) activo(s)" if wn >= 0 else None,
+                "instance_id": str(eid) if eid is not None else None,
+                "name_tag": name,
+                "instance_type": "serverless",
+                "estimated_monthly_usd": None,
+                "estimated_daily_usd": None,
+            }
+        )
+    return out
+
+
+def get_ecosystem_servers_checklist() -> list[dict[str, Any]]:
+    """
+    Unified list of EC2, research GPU, and Vast Serverless endpoints for the admin overview.
+    Each item: id, label, kind, up (bool), state (str), optional cost and instance metadata.
+    """
+    out: list[dict[str, Any]] = []
+    sg = get_servers_status()
+    if sg.get("error"):
+        out.append(
+            {
+                "id": "llm_servers_error",
+                "label": "Instancias LLM (EC2)",
+                "kind": "llm",
+                "up": False,
+                "state": "error",
+                "detail": sg.get("error"),
+            }
+        )
+    else:
+        for s in sg.get("servers") or []:
+            iid = s.get("instanceId") or "unknown"
+            st = (s.get("state") or "").lower()
+            up = st == "running"
+            itype = s.get("instanceType")
+            monthly = s.get("estimatedMonthlyUsd")
+            daily = round(monthly / 30, 2) if isinstance(monthly, (int, float)) else None
+            name_tag = s.get("nameTag")
+            primary = s.get("primaryKey") or "?"
+            label = f"{primary} · {itype or 'EC2'}"
+            if name_tag:
+                label = f"{name_tag} · {label}"
+            out.append(
+                {
+                    "id": iid,
+                    "label": label,
+                    "kind": "llm",
+                    "up": up,
+                    "state": st or "unknown",
+                    "instance_id": iid,
+                    "name_tag": name_tag,
+                    "instance_type": itype,
+                    "primary_key": primary,
+                    "estimated_monthly_usd": monthly,
+                    "estimated_daily_usd": daily,
+                }
+            )
+
+    ri = get_research_instance_status()
+    for key in ("openscholar", "openscholar_128k"):
+        d = (ri.get("details") or {}).get(key) or {}
+        raw_iid = d.get("instanceId")
+        if not raw_iid:
+            out.append(
+                {
+                    "id": f"research-{key}",
+                    "label": RESEARCH_SERVER_LABELS.get(key, key),
+                    "kind": "research",
+                    "up": False,
+                    "state": "not_configured",
+                    "detail": "Sin instance_id en configuración",
+                    "instance_id": None,
+                    "name_tag": None,
+                    "instance_type": None,
+                    "estimated_monthly_usd": None,
+                    "estimated_daily_usd": None,
+                }
+            )
+            continue
+        iid = raw_iid
+        st = (d.get("state") or ri.get(key) or "unknown") or "unknown"
+        if isinstance(st, str):
+            st_lower = st.lower()
+        else:
+            st_lower = str(st).lower()
+        up = st_lower == "running"
+        itype = d.get("instanceType")
+        monthly = INSTANCE_ESTIMATED_MONTHLY_USD.get(itype) if itype else None
+        daily = round(monthly / 30, 2) if isinstance(monthly, (int, float)) else None
+        name_tag = d.get("nameTag")
+        base_label = RESEARCH_SERVER_LABELS.get(key, key)
+        label = f"{name_tag} · {base_label}" if name_tag else base_label
+        out.append(
+            {
+                "id": str(iid),
+                "label": label,
+                "kind": "research",
+                "up": up,
+                "state": st_lower,
+                "instance_id": str(iid),
+                "name_tag": name_tag,
+                "instance_type": itype,
+                "estimated_monthly_usd": monthly,
+                "estimated_daily_usd": daily,
+            }
+        )
+
+    out.extend(_vast_serverless_checklist_items())
+    return out

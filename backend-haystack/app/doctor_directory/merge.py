@@ -59,6 +59,9 @@ def _merge_phones(a: list | None, b: list | None) -> list | None:
     return out or None
 
 
+_merge_emails = _merge_phones
+
+
 def _merge_services(a: list | None, b: list | None) -> list | None:
     if not a and not b:
         return None
@@ -92,6 +95,7 @@ def merge_scalar_profile_fields(existing: dict[str, Any], incoming: dict[str, An
     out["specialties_json"] = _merge_services(existing.get("specialties_json"), incoming.get("specialties_json"))
     out["services_json"] = _merge_services(existing.get("services_json"), incoming.get("services_json"))
     out["phones_json"] = _merge_phones(existing.get("phones_json"), incoming.get("phones_json"))
+    out["emails_json"] = _merge_emails(existing.get("emails_json"), incoming.get("emails_json"))
     out["external_reviews_json"] = existing.get("external_reviews_json") or incoming.get("external_reviews_json")
     # Prefer rating with more reviews; else higher value
     er, ec = existing.get("rating_value"), existing.get("rating_count") or 0

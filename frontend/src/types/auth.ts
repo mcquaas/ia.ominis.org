@@ -121,6 +121,36 @@ export interface RagSource {
   publishedAt?: string;
 }
 
+export interface QuerySeriesPoint {
+  bucketStart: string;
+  count: number;
+}
+
+export interface QuerySeries {
+  last7Days: QuerySeriesPoint[];
+  last30Days: QuerySeriesPoint[];
+  last12Weeks: QuerySeriesPoint[];
+  last12Months: QuerySeriesPoint[];
+}
+
+/** GET /v1/system-stats/health — multi-LLM aware (Ollama, Vast, clinic, third-party APIs). */
+export interface HealthSnapshot {
+  status: string;
+  timestamp: string;
+  backend?: { status: string };
+  model: { version: string; status: string };
+  servers: { primary?: string; secondary?: string; cpu?: string; gpu?: string };
+  inference_summary?: {
+    ollama_default: string;
+    ollama_clinic: string | null;
+    clinic_configured: boolean;
+    serverless_configured: boolean;
+    third_party_models: number;
+  };
+  lastCheck?: string;
+  serverless?: { ollama_endpoint: string | null; api_key_configured: boolean };
+}
+
 export interface SystemStats {
   totalSources: number;
   indexedSources: number;
@@ -134,11 +164,70 @@ export interface SystemStats {
   gpuServerStatus: 'online' | 'offline' | 'degraded';
   avgResponseTimeCpu?: number;
   avgResponseTimeGpu?: number;
+  totalQueries1h?: number;
   totalQueries24h: number;
   totalQueriesWeek: number;
   totalQueriesMonth: number;
   errorRate24h: number;
   lastHealthCheck?: string;
+}
+
+export type DashboardLevel = 'ok' | 'warning' | 'error';
+
+/** GET /v1/api/system-stats/dashboard-overview — admin overview cards. */
+export interface DashboardOverview {
+  overall: { status?: string; timestamp?: string };
+  health_checks: Array<{
+    key: string;
+    label: string;
+    level: DashboardLevel;
+    detail?: string | null;
+  }>;
+  servers: Array<{
+    id: string;
+    label: string;
+    kind: string;
+    up: boolean;
+    state: string;
+    level: DashboardLevel;
+    detail?: string | null;
+    instance_id?: string | null;
+    name_tag?: string | null;
+    instance_type?: string | null;
+    primary_key?: string | null;
+    estimated_monthly_usd?: number | null;
+    estimated_daily_usd?: number | null;
+  }>;
+  queries: { last1h: number; last24h: number; last7d: number; last30d: number };
+  sources: Array<{
+    key: string;
+    label: string;
+    level: DashboardLevel;
+    count: number | null;
+    detail?: string | null;
+  }>;
+  sources_legacy?: {
+    vector_documents: number;
+    indexed_sources: number;
+    directory_specialists: number;
+    allcan_organizations: number | null;
+  };
+  users: { total: number; admins: number; researchers: number; developers: number };
+  ingestion?: {
+    jobs: Array<{
+      id: string;
+      kind: string;
+      label: string;
+      detail: string;
+      source_type?: string;
+      source_site?: string;
+      /** ISO 8601 — última actividad de ingesta (embed: último índice/actualización; scrape: max last_scraped o inicio de run). */
+      last_ingestion_at?: string | null;
+      /** Chunks indexados (RAG) o perfiles upserted (scrape). */
+      results_count?: number | null;
+    }>;
+  };
+  health: HealthSnapshot;
 }
 
 export interface QueryStats {

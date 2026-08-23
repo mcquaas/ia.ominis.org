@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 
 import httpx
 from bs4 import BeautifulSoup
+
+from app.doctor_directory.contact_info import (
+    build_phones_emails_for_row,
+    extract_all_ld_graph_items_from_html,
+    extract_phones_from_html_regex,
+    merge_unique_strings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +33,8 @@ USER_AGENT = "OminisDoctorDirectoryBot/1.0 (+https://ominis.org; ingest for inte
 
 _NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 
-_PHONE_PATTERNS = [
-    re.compile(r"\+52\s*\(?\d{2,3}\)?\s*[\d\s]{8,25}(?:\s*Ext\.?\s*\d+)?", re.I),
-    re.compile(r"\(\+52\)\s*[\d\s\(\)]{10,30}", re.I),
-]
+# Re-export for doctoralia / doctoranytime legacy imports
+_extract_phones_from_html = extract_phones_from_html_regex
 
 
 def profile_slug_from_url(url: str) -> str | None:
@@ -58,21 +62,6 @@ async def fetch_doctor_profile_urls(client: httpx.AsyncClient, max_urls: int) ->
         if "/doctor/" in u and profile_slug_from_url(u):
             out.append(u)
     return out
-
-
-def _extract_phones_from_html(html: str) -> list[str]:
-    seen: set[str] = set()
-    phones: list[str] = []
-    for pat in _PHONE_PATTERNS:
-        for m in pat.finditer(html):
-            raw = re.sub(r"\s+", " ", m.group(0)).strip()
-            if len(raw) < 12 or raw in seen:
-                continue
-            if "5593315610" in raw.replace(" ", ""):  # site-wide support line noise
-                continue
-            seen.add(raw)
-            phones.append(raw)
-    return phones[:6]
 
 
 def parse_physician_json_ld(html: str, profile_url: str) -> dict[str, Any] | None:
@@ -161,6 +150,51 @@ def physician_to_row_fields(physician: dict[str, Any], profile_url: str, slug: s
     }
 
 
+def _linked_center_urls(physician: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+    has_pos = physician.get("hasPOS")
+    candidates = has_pos if isinstance(has_pos, list) else [has_pos]
+    for item in candidates:
+        if isinstance(item, dict) and item.get("url"):
+            url = str(item["url"]).strip()
+        elif isinstance(item, str):
+            url = item.strip()
+        else:
+            continue
+        if url.startswith("http") and url not in urls:
+            urls.append(url)
+    return urls[:3]
+
+
+async def fetch_linked_center_contacts(
+    client: httpx.AsyncClient,
+    physician: dict[str, Any],
+    cache: dict[str, tuple[list[str], list[str]]] | None = None,
+) -> tuple[list[str], list[str]]:
+    phones: list[str] = []
+    emails: list[str] = []
+    for url in _linked_center_urls(physician):
+        if cache is not None and url in cache:
+            p, e = cache[url]
+            phones = merge_unique_strings(phones, p)
+            emails = merge_unique_strings(emails, e)
+            continue
+        try:
+            r = await client.get(url, timeout=60.0, follow_redirects=True)
+            if r.status_code != 200:
+                logger.warning("topdoctors center HTTP %s %s", r.status_code, url)
+                continue
+            graph = extract_all_ld_graph_items_from_html(r.text)
+            p, e = build_phones_emails_for_row(html=r.text, physician_ld=None, graph_items=graph)
+            if cache is not None:
+                cache[url] = (p, e)
+            phones = merge_unique_strings(phones, p)
+            emails = merge_unique_strings(emails, e)
+        except Exception as e:
+            logger.warning("topdoctors center fetch failed %s: %s", url, e)
+    return phones, emails
+
+
 async def fetch_and_parse_profile(client: httpx.AsyncClient, profile_url: str) -> dict[str, Any] | None:
     slug = profile_slug_from_url(profile_url)
     if not slug:
@@ -175,7 +209,13 @@ async def fetch_and_parse_profile(client: httpx.AsyncClient, profile_url: str) -
         logger.warning("no Physician JSON-LD %s", profile_url)
         return None
     row = physician_to_row_fields(physician, profile_url, slug)
-    phones = _extract_phones_from_html(html)
+    graph = extract_all_ld_graph_items_from_html(html)
+    phones, emails = build_phones_emails_for_row(html=html, physician_ld=physician, graph_items=graph)
+    center_phones, center_emails = await fetch_linked_center_contacts(client, physician)
+    phones = merge_unique_strings(phones, center_phones)
+    emails = merge_unique_strings(emails, center_emails)
     if phones:
         row["phones_json"] = phones
+    if emails:
+        row["emails_json"] = emails
     return row

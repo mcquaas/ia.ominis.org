@@ -52,6 +52,7 @@ _MERGE_FIELD_NAMES = (
     "country_code",
     "services_json",
     "phones_json",
+    "emails_json",
     "external_reviews_json",
     "rating_value",
     "rating_count",

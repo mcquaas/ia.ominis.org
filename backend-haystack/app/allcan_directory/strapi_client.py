@@ -41,3 +41,22 @@ async def fetch_organizations_all_pages(base: str, token: str, max_rows: int = 5
                 break
             page += 1
     return out[:max_rows]
+
+
+async def fetch_organization_total_count(base: str, token: str) -> int | None:
+    """Return Strapi pagination total for organizations (first page only)."""
+    base = base.rstrip("/")
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        url = f"{base}/api/organizations"
+        params = [("pagination[page]", "1"), ("pagination[pageSize]", "1")]
+        r = await client.get(url, params=params, headers={"Authorization": f"Bearer {token}"})
+        r.raise_for_status()
+        payload = r.json()
+        if not isinstance(payload, dict):
+            return None
+        meta = payload.get("meta") or {}
+        pagination = meta.get("pagination") or {}
+        total = pagination.get("total")
+        if isinstance(total, int):
+            return total
+        return None

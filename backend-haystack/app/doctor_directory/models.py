@@ -72,6 +72,7 @@ class DoctorDirectoryProfile(Base):
 
     services_json = Column(JSONB, nullable=True)
     phones_json = Column(JSONB, nullable=True)
+    emails_json = Column(JSONB, nullable=True)
     external_reviews_json = Column(JSONB, nullable=True)
 
     rating_value = Column(Float, nullable=True)

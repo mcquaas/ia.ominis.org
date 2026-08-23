@@ -49,6 +49,7 @@ lambda/**/package/
 # Local data
 data/
 *.faiss
+doctor_directory_export.csv
 
 # Lambda / pipeline output
 .lambda_*.json

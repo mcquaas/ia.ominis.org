@@ -14,7 +14,7 @@ import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, cast
+from typing import Any, Optional, cast
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -23,6 +23,7 @@ from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.models import ChatDefaults, LLMModelConfig, QueryLog, RAGSource, SiteConfig, SourceStatus, SystemStat
+from app.admin.query_series import build_query_series
 from app.admin.schemas import (
     AnalyticalQueryRequest,
     BatchReindexRequest,
@@ -37,6 +38,7 @@ from app.admin.schemas import (
     UrlsBatchRequest,
     UrlsBatchResponse,
     FileUploadResponse,
+    QuerySeriesOut,
     QueryStatsOut,
     RAGSourceCreate,
     RAGSourceListResponse,
@@ -74,7 +76,15 @@ from app.admin.llm_instances import (
     start_llm_instance,
     stop_llm_instance,
 )
-from app.admin.server_groups import get_servers_status
+from app.admin.server_groups import get_ecosystem_servers_checklist, get_servers_status
+from app.allcan_directory.strapi_client import fetch_organization_total_count
+from app.doctor_directory.models import DoctorDirectoryProfile, DoctorDirectoryScrapeRun, DoctorScrapeStatus
+from app.admin.dashboard_helpers import (
+    fetch_clinicaltrials_study_count,
+    fetch_pubmed_record_count,
+    server_row_level,
+    source_level_ok_count,
+)
 from app.auth.dependencies import require_role
 from app.auth.models import RoleEnum, User
 from app.admin.llm_crypto import decrypt_credentials_blob, merge_credential_patch
@@ -95,6 +105,48 @@ MAX_CRAWL_PAGES = 50
 
 # Dashboard logical IDs for Modo Investigación (OpenScholar) backend mapping — stored in llm_model_config, not chat registry
 RESEARCH_ROUTING_MODEL_IDS = frozenset({"research-8k", "research-128k"})
+
+
+def _mapped_default_model_availability(
+    health: dict,
+    default_model_id: str,
+    cfg_row: LLMModelConfig | None,
+) -> tuple[bool, str]:
+    """Whether the chat default model can be served, and a short Spanish detail string."""
+    mid = normalize_public_model_id(default_model_id or "ominis-2.0")
+    sum_ = health.get("inference_summary") or {}
+    ollama_def = (sum_.get("ollama_default") or "").lower()
+    clinic_on = (sum_.get("ollama_clinic") or "").lower() == "online"
+
+    if mid in RESEARCH_ROUTING_MODEL_IDS:
+        ri = get_research_instance_status()
+        vk = (getattr(settings, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+        if mid == "research-8k":
+            vast_ok = bool((getattr(settings, "vast_serverless_openscholar_endpoint", "") or "").strip() and vk)
+            run = (ri.get("openscholar") or "").lower() == "running"
+            if vast_ok or run:
+                return True, "Vast 8K" if vast_ok and not run else "GPU EC2 8K activo"
+            return False, "Investigación 8K sin GPU ni Vast"
+        vast_ok = bool((getattr(settings, "vast_serverless_openscholar_128k_endpoint", "") or "").strip() and vk)
+        run = (ri.get("openscholar_128k") or "").lower() == "running"
+        if vast_ok or run:
+            return True, "Vast 128K" if vast_ok and not run else "GPU EC2 128K activo"
+        return False, "Investigación 128K sin GPU ni Vast"
+
+    provider = (cfg_row.llm_provider or "ominis").strip().lower() if cfg_row else "ominis"
+    if provider != "ominis":
+        keys = _provider_keys_present(cfg_row)
+        if keys.get(provider, False):
+            return True, f"API ({provider})"
+        if any(keys.values()):
+            return True, "API (credenciales de otro proveedor)"
+        return False, f"Sin credenciales {provider}"
+
+    if ollama_def in ("online", "serverless") or clinic_on:
+        return True, "Ollama/Vast" if ollama_def in ("online", "serverless") else "Ollama clínica"
+    if int(sum_.get("third_party_models") or 0) > 0:
+        return True, "Ruta API de respaldo"
+    return False, "Sin Ollama ni API"
 
 
 def _provider_keys_present(row: LLMModelConfig | None) -> dict[str, bool]:
@@ -2171,6 +2223,13 @@ async def get_system_stats(
     ).scalar() or 0
     total_chunks = (await db.execute(select(func.sum(RAGSource.chunks_count)))).scalar() or 0
 
+    queries_1h = (
+        await db.execute(
+            select(func.count())
+            .select_from(QueryLog)
+            .where(QueryLog.created_at >= now - timedelta(hours=1))
+        )
+    ).scalar() or 0
     queries_24h = (
         await db.execute(
             select(func.count())
@@ -2208,6 +2267,7 @@ async def get_system_stats(
         modelStatus="active",
         cpuServerStatus="online",
         gpuServerStatus="online",
+        totalQueries1h=queries_1h,
         totalQueries24h=queries_24h,
         totalQueriesWeek=queries_week,
         totalQueriesMonth=queries_month,
@@ -2215,6 +2275,321 @@ async def get_system_stats(
     )
 
     return {"data": stats.model_dump()}
+
+
+@router.get("/api/system-stats/dashboard-overview")
+async def get_dashboard_overview(
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Single payload for admin overview cards: health checks, servers, queries, sources, users."""
+    now = datetime.now(timezone.utc)
+    health = await compute_health_snapshot(db)
+
+    queries_1h = (
+        await db.execute(
+            select(func.count())
+            .select_from(QueryLog)
+            .where(QueryLog.created_at >= now - timedelta(hours=1))
+        )
+    ).scalar() or 0
+    queries_24h = (
+        await db.execute(
+            select(func.count())
+            .select_from(QueryLog)
+            .where(QueryLog.created_at >= now - timedelta(hours=24))
+        )
+    ).scalar() or 0
+    queries_week = (
+        await db.execute(
+            select(func.count())
+            .select_from(QueryLog)
+            .where(QueryLog.created_at >= now - timedelta(days=7))
+        )
+    ).scalar() or 0
+    queries_month = (
+        await db.execute(
+            select(func.count())
+            .select_from(QueryLog)
+            .where(QueryLog.created_at >= now - timedelta(days=30))
+        )
+    ).scalar() or 0
+
+    total_users = (await db.execute(select(func.count()).select_from(User))).scalar() or 0
+    users_admins = (
+        await db.execute(
+            select(func.count()).select_from(User).where(User.role.in_([RoleEnum.admin, RoleEnum.superadmin]))
+        )
+    ).scalar() or 0
+    users_researchers = (
+        await db.execute(select(func.count()).select_from(User).where(User.role == RoleEnum.researcher))
+    ).scalar() or 0
+    users_developers = (
+        await db.execute(select(func.count()).select_from(User).where(User.role == RoleEnum.developer))
+    ).scalar() or 0
+
+    cd_row = (await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))).scalar_one_or_none()
+    default_model_id = normalize_public_model_id(getattr(cd_row, "default_model", None) or "ominis-2.0") if cd_row else "ominis-2.0"
+    llm_cfg = (await db.execute(select(LLMModelConfig).where(LLMModelConfig.model_id == default_model_id))).scalar_one_or_none()
+
+    db_ok = True
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception:
+        db_ok = False
+
+    sum_ = health.get("inference_summary") or {}
+    ollama_def = (sum_.get("ollama_default") or "").lower()
+    # Solo Ollama/Vast “base”; las APIs de terceros van en el check del modelo mapeado.
+    route_ok = ollama_def in ("online", "serverless")
+    mapped_ok, mapped_detail = _mapped_default_model_availability(health, default_model_id, llm_cfg)
+
+    indexed_sources = (
+        await db.execute(
+            select(func.count()).select_from(RAGSource).where(RAGSource.status == SourceStatus.active)
+        )
+    ).scalar() or 0
+    try:
+        doc_store = get_document_store()
+        store_count = doc_store.count_documents()
+    except Exception:
+        store_count = 0
+
+    directory_profiles = (
+        await db.execute(select(func.count()).select_from(DoctorDirectoryProfile))
+    ).scalar() or 0
+
+    allcan_total: int | None = None
+    try:
+        base = (getattr(settings, "allcan_strapi_url", None) or "").strip()
+        tok = (getattr(settings, "allcan_strapi_api_token", None) or "").strip()
+        if base and tok:
+            allcan_total = await fetch_organization_total_count(base, tok)
+    except Exception as e:
+        logger.debug("dashboard allcan count: %s", e)
+
+    ri = get_research_instance_status()
+    vk = (getattr(settings, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+    openscholar_any = bool(
+        (getattr(settings, "openscholar_api_url", "") or "").strip()
+        or ((getattr(settings, "vast_serverless_openscholar_endpoint", "") or "").strip() and vk)
+        or (ri.get("openscholar") or "").lower() == "running"
+    )
+    openscholar_128k_any = bool(
+        (getattr(settings, "openscholar_128k_api_url", "") or "").strip()
+        or ((getattr(settings, "vast_serverless_openscholar_128k_endpoint", "") or "").strip() and vk)
+        or (ri.get("openscholar_128k") or "").lower() == "running"
+    )
+
+    pubmed_corpus_count, clinical_trials_corpus_count = await asyncio.gather(
+        fetch_pubmed_record_count(),
+        fetch_clinicaltrials_study_count(),
+    )
+
+    strapi_base = (getattr(settings, "allcan_strapi_url", None) or "").strip()
+    strapi_tok = (getattr(settings, "allcan_strapi_api_token", None) or "").strip()
+    allcan_level: str
+    if strapi_base and strapi_tok:
+        if allcan_total is None:
+            allcan_level = "warning"
+        elif allcan_total > 0:
+            allcan_level = "ok"
+        else:
+            allcan_level = "warning"
+    else:
+        allcan_level = "warning"
+
+    source_checklist: list[dict[str, Any]] = [
+        {
+            "key": "pgvector",
+            "label": "Docs vectorizados (pgvector)",
+            "level": source_level_ok_count(int(store_count)),
+            "count": int(store_count),
+            "detail": None,
+        },
+        {
+            "key": "directory_mx",
+            "label": "Especialistas (directorio MX)",
+            "level": source_level_ok_count(int(directory_profiles or 0)),
+            "count": int(directory_profiles or 0),
+            "detail": None,
+        },
+        {
+            "key": "allcan",
+            "label": "Recursos All.Can (Strapi)",
+            "level": allcan_level,
+            "count": allcan_total,
+            "detail": None if (strapi_base and strapi_tok) else "Strapi URL o token no configurados",
+        },
+        {
+            "key": "clinical_trials",
+            "label": "Estudios clínicos (ClinicalTrials.gov)",
+            "level": "ok" if clinical_trials_corpus_count else "warning",
+            "count": clinical_trials_corpus_count,
+            "detail": "API v2 clinicaltrials.gov",
+        },
+        {
+            "key": "pubmed",
+            "label": "PubMed (NCBI)",
+            "level": "ok" if pubmed_corpus_count else "warning",
+            "count": pubmed_corpus_count,
+            "detail": "Corpus vía einfo",
+        },
+        {
+            "key": "openscholar",
+            "label": "OpenScholar (investigación)",
+            "level": "ok" if (openscholar_any or openscholar_128k_any) else "error",
+            "count": None,
+            "detail": "Modelo vLLM / Vast (sin corpus fijo indexado)",
+        },
+    ]
+
+    health_checks = [
+        {"key": "api", "label": "API Haystack", "level": "ok", "detail": None},
+        {"key": "database", "label": "PostgreSQL", "level": "ok" if db_ok else "error", "detail": None},
+        {
+            "key": "inference_route",
+            "label": "Inferencia base (Ollama / Vast)",
+            "level": "ok" if route_ok else "error",
+            "detail": health.get("model", {}).get("status"),
+        },
+        {
+            "key": "mapped_default_llm",
+            "label": f"Modelo por defecto en chat ({default_model_id})",
+            "level": "ok" if mapped_ok else "error",
+            "detail": mapped_detail,
+        },
+    ]
+
+    servers_raw = get_ecosystem_servers_checklist()
+    servers_out: list[dict[str, Any]] = []
+    for s in servers_raw:
+        lvl = server_row_level(bool(s.get("up")), str(s.get("state") or ""), s.get("detail"))
+        servers_out.append({**s, "level": lvl})
+
+    rag_indexing = (
+        await db.execute(
+            select(
+                RAGSource.id,
+                RAGSource.title,
+                RAGSource.source_type,
+                RAGSource.slug,
+                RAGSource.updated_at,
+                RAGSource.last_indexed_at,
+                RAGSource.chunks_count,
+            )
+            .where(RAGSource.status == SourceStatus.indexing)
+            .order_by(RAGSource.updated_at.desc())
+            .limit(25)
+        )
+    ).all()
+    doctor_runs = (
+        await db.execute(
+            select(DoctorDirectoryScrapeRun)
+            .where(DoctorDirectoryScrapeRun.status == DoctorScrapeStatus.running)
+            .order_by(DoctorDirectoryScrapeRun.id.desc())
+            .limit(15)
+        )
+    ).scalars().all()
+
+    last_scraped_by_run: dict[int, datetime] = {}
+    if doctor_runs:
+        run_ids = [r.id for r in doctor_runs]
+        mx_rows = (
+            await db.execute(
+                select(
+                    DoctorDirectoryProfile.scrape_run_id,
+                    func.max(DoctorDirectoryProfile.last_scraped_at),
+                )
+                .where(DoctorDirectoryProfile.scrape_run_id.in_(run_ids))
+                .group_by(DoctorDirectoryProfile.scrape_run_id)
+            )
+        ).all()
+        for rid, mx in mx_rows:
+            if rid is not None and mx is not None:
+                last_scraped_by_run[int(rid)] = mx
+
+    ingestion_jobs: list[dict[str, Any]] = []
+    for row in rag_indexing:
+        rid, title, stype, slug, updated_at, last_indexed_at, chunks = (
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+        )
+        label = (title or slug or f"fuente #{rid}")[:140]
+        last_at = last_indexed_at or updated_at
+        ingestion_jobs.append(
+            {
+                "id": f"rag-{rid}",
+                "kind": "embedder",
+                "label": "Vectorización / indexación RAG",
+                "detail": label,
+                "source_type": stype,
+                "last_ingestion_at": last_at.isoformat() if last_at else None,
+                "results_count": int(chunks or 0),
+            }
+        )
+    for run in doctor_runs:
+        last_at = last_scraped_by_run.get(run.id) or run.started_at or run.created_at
+        ingestion_jobs.append(
+            {
+                "id": f"doctor-scrape-{run.id}",
+                "kind": "scraper",
+                "label": "Scrape directorio médicos",
+                "detail": f"{run.source_site} · run #{run.id}",
+                "source_site": run.source_site,
+                "last_ingestion_at": last_at.isoformat() if last_at else None,
+                "results_count": int(run.profiles_upserted or 0),
+            }
+        )
+
+    return {
+        "data": {
+            "overall": {"status": health.get("status"), "timestamp": health.get("timestamp")},
+            "health_checks": health_checks,
+            "servers": servers_out,
+            "queries": {
+                "last1h": int(queries_1h),
+                "last24h": int(queries_24h),
+                "last7d": int(queries_week),
+                "last30d": int(queries_month),
+            },
+            "sources": source_checklist,
+            "sources_legacy": {
+                "vector_documents": int(store_count),
+                "indexed_sources": int(indexed_sources or 0),
+                "directory_specialists": int(directory_profiles or 0),
+                "allcan_organizations": allcan_total,
+            },
+            "users": {
+                "total": int(total_users),
+                "admins": int(users_admins),
+                "researchers": int(users_researchers),
+                "developers": int(users_developers),
+            },
+            "ingestion": {"jobs": ingestion_jobs},
+            "health": health,
+        }
+    }
+
+
+@router.get("/api/system-stats/query-series")
+async def get_query_series(
+    _: User = Depends(require_role(RoleEnum.admin, RoleEnum.developer)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Time-bucketed query counts for dashboard charts (Admin+)."""
+    try:
+        raw = await build_query_series(db)
+        data = QuerySeriesOut.model_validate(raw)
+        return {"data": data.model_dump()}
+    except Exception as e:
+        logger.exception("get_query_series failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/api/system-stats/refresh")
@@ -2490,14 +2865,14 @@ async def get_gpu_server_performance(
     return perf
 
 
-@router.get("/system-stats/health")
-async def health_check():
-    """Public health check endpoint (no auth required)."""
+async def compute_health_snapshot(db: AsyncSession) -> dict:
+    """Shared health payload for /system-stats/health and dashboard-overview."""
     now = datetime.now(timezone.utc)
 
     inference_status = "offline"
     try:
         import urllib.request
+
         req = urllib.request.Request(f"{settings.ollama_url}/api/tags")
         with urllib.request.urlopen(req, timeout=5) as resp:
             if resp.status == 200:
@@ -2513,9 +2888,11 @@ async def health_check():
 
     secondary_status = "offline"
     clinic_url = (getattr(settings, "ollama_clinic_url", None) or "").strip()
-    if clinic_url and clinic_url != settings.ollama_url.rstrip("/"):
+    clinic_is_distinct = bool(clinic_url and clinic_url.rstrip("/") != settings.ollama_url.rstrip("/"))
+    if clinic_is_distinct:
         try:
             import urllib.request
+
             req = urllib.request.Request(f"{clinic_url.rstrip('/')}/api/tags")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
@@ -2525,22 +2902,58 @@ async def health_check():
     else:
         secondary_status = inference_status  # same server as primary
 
-    if inference_status in ("online", "serverless") or secondary_status == "online":
-        overall = "healthy"
-    else:
-        overall = "degraded"
+    third_party_models = 0
+    try:
+        third_party_models = (
+            await db.execute(
+                select(func.count())
+                .select_from(LLMModelConfig)
+                .where(
+                    LLMModelConfig.llm_provider.isnot(None),
+                    LLMModelConfig.llm_provider != "",
+                    LLMModelConfig.llm_provider != "ominis",
+                )
+            )
+        ).scalar() or 0
+    except Exception:
+        pass
+
+    has_inference_path = (
+        inference_status in ("online", "serverless")
+        or secondary_status == "online"
+        or third_party_models > 0
+    )
+    overall = "healthy" if has_inference_path else "degraded"
 
     return {
         "status": overall,
         "timestamp": now.isoformat(),
+        "backend": {"status": "ok"},
         "model": {"version": "ominis-2.0", "status": inference_status},
         "servers": {"primary": inference_status, "secondary": secondary_status},
+        "inference_summary": {
+            "ollama_default": inference_status,
+            "ollama_clinic": secondary_status if clinic_is_distinct else None,
+            "clinic_configured": clinic_is_distinct,
+            "serverless_configured": bool(vsep and vk),
+            "third_party_models": int(third_party_models),
+        },
         "lastCheck": now.isoformat(),
         "serverless": {
             "ollama_endpoint": vsep or None,
             "api_key_configured": bool(vk),
         },
     }
+
+
+@router.get("/system-stats/health")
+async def health_check(db: AsyncSession = Depends(get_db)):
+    """Public health check endpoint (no auth required).
+
+    Overall status stays "healthy" if any inference path works: Ollama, Vast Serverless,
+    separate clinic Ollama, or at least one chat model routed to a third-party API (DB config).
+    """
+    return await compute_health_snapshot(db)
 
 
 @router.get("/system-stats/health/vast-serverless")

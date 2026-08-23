@@ -16,7 +16,8 @@ import xml.etree.ElementTree as ET
 import httpx
 from bs4 import BeautifulSoup
 
-from app.doctor_directory.topdoctors import USER_AGENT, _extract_phones_from_html
+from app.doctor_directory.contact_info import build_phones_emails_for_row, extract_all_ld_graph_items_from_html
+from app.doctor_directory.topdoctors import USER_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,11 @@ async def fetch_and_parse_profile(client: httpx.AsyncClient, profile_url: str) -
     if not row:
         logger.warning("no Physician microdata %s", profile_url)
         return None
-    phones = _extract_phones_from_html(html)
+    graph = extract_all_ld_graph_items_from_html(html)
+    phys = row.get("raw_json_ld") if isinstance(row.get("raw_json_ld"), dict) else None
+    phones, emails = build_phones_emails_for_row(html=html, physician_ld=phys, graph_items=graph)
     if phones:
         row["phones_json"] = phones
+    if emails:
+        row["emails_json"] = emails
     return row
