@@ -30,8 +30,85 @@ class ModelConfig:
     timeout: float | None = None  # Per-model HTTP timeout (s); None or 0 = use settings.ollama_timeout
     # OpenAI-compatible backend (e.g. vLLM serving gpt-oss)
     use_openai: bool = False     # If True, use OpenAIChatGenerator instead of Ollama
+    use_anthropic: bool = False  # If True, use Anthropic API (Claude); exclusive with use_openai
+    llm_provider: str = "ominis"  # Dashboard: ominis | openai | google | deepseek | claude
     openai_api_base: str = ""   # Base URL including /v1 (e.g. http://host:8000/v1)
-    openai_model: str = ""      # Model name for API (e.g. openai/gpt-oss-20b)
+    openai_model: str = ""      # Model name for API (e.g. openai/gpt-oss-20b); also Claude model id when use_anthropic
+    # When set, pipeline uses Vast Serverless (vastai SDK) instead of a fixed openai_api_base URL
+    vast_serverless_endpoint: str = ""  # Endpoint name from cloud.vast.ai/serverless/
+    # Dashboard JSON: openai_backend, api_key_env, timeout, etc.
+    extra_params: dict | None = None
+
+
+def _apply_llm_provider_override(cfg: ModelConfig, provider_id: str) -> None:
+    """Apply dashboard provider selection (URLs from server-side registry)."""
+    from app.admin.llm_provider_registry import PROVIDERS
+
+    pid = (provider_id or "ominis").strip().lower()
+    cfg.llm_provider = pid
+    meta = PROVIDERS.get(pid)
+    if not meta:
+        return
+    if pid == "ominis":
+        cfg.use_openai = False
+        cfg.use_anthropic = False
+    elif pid == "claude":
+        cfg.use_openai = False
+        cfg.use_anthropic = True
+    else:
+        cfg.use_anthropic = False
+        cfg.use_openai = True
+        base = (meta.get("openai_base") or "").strip().rstrip("/")
+        if base and not base.endswith("/v1"):
+            base = f"{base}/v1"
+        cfg.openai_api_base = base
+
+
+def _research_8k_should_register() -> bool:
+    """Register research-8k (Ominis Research / OpenScholar 8K) when env or dashboard has a backend."""
+    import os
+
+    settings = get_settings()
+    if (getattr(settings, "openscholar_api_url", "") or "").strip():
+        return True
+    vk = (getattr(settings, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+    if (getattr(settings, "vast_serverless_openscholar_endpoint", "") or "").strip() and vk:
+        return True
+    try:
+        from app.admin.llm_config_db import get_llm_config_overrides
+
+        o = get_llm_config_overrides().get("research-8k") or {}
+        if (o.get("backend_url_override") or "").strip() and (o.get("backend_model") or "").strip():
+            return True
+        # Provider + model in dashboard (URL comes from provider registry / merge — no backend_url_override row)
+        if (o.get("backend_model") or "").strip() and (o.get("llm_provider") or "").strip() not in ("", "ominis"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _research_128k_should_register() -> bool:
+    """Register research-128k when long-context backend or dashboard has a model."""
+    import os
+
+    settings = get_settings()
+    if (getattr(settings, "openscholar_128k_api_url", "") or "").strip():
+        return True
+    vk = (getattr(settings, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+    if (getattr(settings, "vast_serverless_openscholar_128k_endpoint", "") or "").strip() and vk:
+        return True
+    try:
+        from app.admin.llm_config_db import get_llm_config_overrides
+
+        o = get_llm_config_overrides().get("research-128k") or {}
+        if (o.get("backend_url_override") or "").strip() and (o.get("backend_model") or "").strip():
+            return True
+        if (o.get("backend_model") or "").strip() and (o.get("llm_provider") or "").strip() not in ("", "ominis"):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _build_model_registry() -> dict[str, ModelConfig]:
@@ -72,6 +149,71 @@ def _build_model_registry() -> dict[str, ModelConfig]:
             num_gpu=-1,
             is_default=False,
         )
+    # Ominis 2.0 Power: gpt-oss (vLLM, OpenAI-compatible). Static URL and/or Vast Serverless endpoint name.
+    pw_url = (getattr(settings, "power_api_url", None) or "").strip()
+    pw_ep = (getattr(settings, "vast_serverless_power_endpoint", None) or "").strip()
+    if pw_url or pw_ep:
+        if pw_url:
+            base = pw_url.rstrip("/")
+            if not base.endswith("/v1"):
+                base = f"{base}/v1"
+        else:
+            base = "http://vast-serverless.invalid/v1"
+        registry["ominis-2.0-power"] = ModelConfig(
+            id="ominis-2.0-power",
+            ollama_model="",
+            public_id="ominis-2.0-power",
+            display_name="Ominis 2.0 Power",
+            description="Modelo Power (gpt-oss) vía vLLM.",
+            ollama_url="",
+            use_openai=True,
+            llm_provider="openai",
+            openai_api_base=base,
+            openai_model=(getattr(settings, "power_model", None) or "openai/gpt-oss-20b").strip(),
+            temperature=0.3,
+            num_predict=2048,
+            context_window=8192,
+            vast_serverless_endpoint=pw_ep,
+            is_default=False,
+        )
+    if _research_8k_should_register():
+        registry["research-8k"] = ModelConfig(
+            id="research-8k",
+            ollama_model="",
+            public_id="ominis-2.0-research",
+            display_name="Ominis Research",
+            description="Modo investigación: motor académico (OpenAI, vLLM/OpenScholar, etc.). Configura proveedor y modelo en LLMs.",
+            ollama_url="",
+            use_openai=True,
+            openai_api_base="http://placeholder.invalid/v1",
+            openai_model=(getattr(settings, "openscholar_model", None) or "openscholar").strip(),
+            llm_provider="openai",
+            temperature=0.2,
+            num_predict=8192,
+            context_window=128000,
+            is_default=False,
+        )
+    if _research_128k_should_register():
+        u128 = (getattr(settings, "openscholar_128k_api_url", "") or "").strip()
+        base128 = u128.rstrip("/") if u128 else "http://placeholder.invalid"
+        if not base128.endswith("/v1"):
+            base128 = f"{base128}/v1"
+        registry["research-128k"] = ModelConfig(
+            id="research-128k",
+            ollama_model="",
+            public_id="ominis-2.0-research-128k",
+            display_name="Ominis Research (128K)",
+            description="Investigación con contexto largo. Mismo panel LLMs que research-8k; URL típica: instancia 128K o API con ventana grande.",
+            ollama_url="",
+            use_openai=True,
+            openai_api_base=base128,
+            openai_model=(getattr(settings, "openscholar_model", None) or "openscholar").strip(),
+            llm_provider="openai",
+            temperature=0.2,
+            num_predict=8192,
+            context_window=128000,
+            is_default=False,
+        )
     # Merge dashboard overrides from DB (assignments, prompts, version, params)
     try:
         from app.admin.llm_config_db import get_llm_config_overrides
@@ -94,24 +236,21 @@ def _build_model_registry() -> dict[str, ModelConfig]:
                 cfg.num_predict = int(o["num_predict"])
             if "is_default" in o:
                 cfg.is_default = bool(o["is_default"])
-            if "backend_model" in o:
-                # backend_model must be the actual Ollama/API model name (e.g. qwen3:14b), not the product id (ominis-2.0)
-                bm = (o["backend_model"] or "").strip()
-                if bm and bm != model_id:
-                    if getattr(cfg, "use_openai", False):
-                        cfg.openai_model = bm
-                    else:
-                        cfg.ollama_model = bm
-            if "backend_url_override" in o and (o["backend_url_override"] or "").strip():
-                url = (o["backend_url_override"] or "").strip().rstrip("/")
-                if getattr(cfg, "use_openai", False):
-                    cfg.openai_api_base = f"{url}/v1" if url and not url.endswith("/v1") else url
-                else:
-                    cfg.ollama_url = url
             if "extra_params" in o and isinstance(o["extra_params"], dict):
+                cfg.extra_params = {**(cfg.extra_params or {}), **o["extra_params"]}
+                ex = cfg.extra_params or {}
+                if ex.get("openai_backend") is True:
+                    cfg.use_openai = True
+                elif ex.get("openai_backend") is False:
+                    cfg.use_openai = False
                 for k, v in o["extra_params"].items():
                     if k == "num_gpu" and hasattr(cfg, "num_gpu"):
                         cfg.num_gpu = int(v)
+                    if k == "context_window" and v is not None:
+                        try:
+                            cfg.context_window = int(v)
+                        except (TypeError, ValueError):
+                            pass
                     if k == "timeout" and v is not None:
                         try:
                             t = float(v)
@@ -119,6 +258,26 @@ def _build_model_registry() -> dict[str, ModelConfig]:
                                 cfg.timeout = t
                         except (TypeError, ValueError):
                             pass
+            if "llm_provider" in o and o["llm_provider"]:
+                _apply_llm_provider_override(cfg, str(o["llm_provider"]))
+            if "backend_url_override" in o and (o["backend_url_override"] or "").strip():
+                url = (o["backend_url_override"] or "").strip().rstrip("/")
+                if getattr(cfg, "use_anthropic", False):
+                    pass
+                elif getattr(cfg, "use_openai", False):
+                    if "llm_provider" not in o or not o["llm_provider"]:
+                        cfg.openai_api_base = f"{url}/v1" if url and not url.endswith("/v1") else url
+                else:
+                    cfg.ollama_url = url
+            if "backend_model" in o:
+                bm = (o["backend_model"] or "").strip()
+                if bm and bm != model_id:
+                    if getattr(cfg, "use_anthropic", False):
+                        cfg.openai_model = bm
+                    elif getattr(cfg, "use_openai", False):
+                        cfg.openai_model = bm
+                    else:
+                        cfg.ollama_model = bm
     except Exception:
         pass
     return registry
@@ -143,6 +302,15 @@ def invalidate_model_registry() -> None:
 
 
 DEFAULT_MODEL_ID = "ominis-2.0"
+
+
+def normalize_public_model_id(model_id: str | None) -> str | None:
+    """Map legacy DB/UI public ids to the current canonical id (e.g. chat_defaults.default_model)."""
+    if not model_id:
+        return model_id
+    if model_id == "ominis-research":
+        return "ominis-2.0-research"
+    return model_id
 
 
 def get_model_config(model_id: str | None = None) -> ModelConfig:
@@ -189,6 +357,26 @@ class Settings(BaseSettings):
     power_api_key: str = "EMPTY"                         # vLLM often accepts any value
     power_timeout: float = 120                           # HTTP timeout (seconds)
     power_instance_id: str = ""                          # EC2 instance ID for dashboard start/stop (e.g. g5.2xlarge)
+
+    # Vast.ai Serverless — set VAST_API_KEY; use endpoint names from cloud.vast.ai/serverless/
+    vast_api_key: str = ""                               # Same as VAST_API_KEY; used by vastai SDK
+    vast_serverless_default_cost: int = 500              # Route API cost hint (tokens); per-service overrides below
+    vast_serverless_ollama_endpoint: str = ""          # Ollama PyWorker: /api/chat for ominis-2.0 / med / vision
+    vast_serverless_ollama_cost: int = 0                 # 0 = use vast_serverless_default_cost
+    vast_serverless_power_endpoint: str = ""             # vLLM: /v1/chat/completions for ominis-2.0-power
+    vast_serverless_power_cost: int = 0
+    vast_serverless_openscholar_endpoint: str = ""       # OpenScholar 8K (research)
+    vast_serverless_openscholar_cost: int = 0
+    vast_serverless_openscholar_128k_endpoint: str = ""  # Long-context research
+    vast_serverless_openscholar_128k_cost: int = 0
+    vast_serverless_med42_endpoint: str = ""             # Med42 clinical translator (OpenAI-compatible)
+    vast_serverless_med42_cost: int = 0
+    vast_serverless_qwen_vl_endpoint: str = ""           # Qwen2.5-VL vision (OpenAI multimodal)
+    vast_serverless_qwen_vl_cost: int = 0
+    # Vast Serverless cold start + routing can take many minutes; must exceed stream "first token" deadline
+    vast_serverless_client_timeout: float = 900.0      # vastai SDK request_timeout + worker_timeout (seconds)
+    # 0 = auto (use vast_serverless_client_timeout when serverless Ollama is configured)
+    query_stream_generation_timeout: float = 0.0
 
     # Embeddings
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -264,6 +452,15 @@ class Settings(BaseSettings):
 
     # Open Scholar (Semantic Scholar) — academic paper search as a source option (default off)
     semantic_scholar_api_key: str = ""  # Set in .env for higher rate limits; optional for low-volume use
+
+    # All.Can México (Strapi) — chat tool + directory search when ALLCAN_STRAPI_API_TOKEN is set
+    allcan_strapi_url: str = "https://api.allcan.mx"
+    allcan_strapi_api_token: str = ""
+
+    # Doctor / All.Can directory semantic search (multilingual embeddings; uses EMBEDDING_SERVICE_URL when set)
+    directory_semantic_embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
+    directory_semantic_max_candidates: int = 600
+    directory_semantic_broad_fallback_limit: int = 2000
 
     # Health datastore (nightly Mexican health pipeline: FAISS + OpenSearch)
     health_datastore_enabled: bool = True

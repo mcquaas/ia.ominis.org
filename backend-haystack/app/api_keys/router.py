@@ -18,6 +18,7 @@ from app.api_keys.schemas import (
     CreateAPIKeyRequest,
     CreateAPIKeyResponse,
 )
+from app.api_keys.request_log_service import list_recent_for_key
 from app.api_keys.service import (
     create_api_key,
     get_api_key_by_id,
@@ -153,6 +154,40 @@ async def get_key_usage(
     }
 
 
+@router.get("/api/api-keys/{key_id}/recent-requests")
+async def recent_key_requests(
+    key_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Last 5 API-key HTTP exchanges (request/response bodies) for the dashboard modal."""
+    api_key = await get_api_key_by_id(db, key_id)
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    if api_key.user_id != current_user.id and current_user.role.value != "superadmin":
+        raise HTTPException(status_code=403, detail="Cannot view another user's API key logs")
+
+    rows = await list_recent_for_key(db, key_id, limit=5)
+    return {
+        "data": [
+            {
+                "id": r.id,
+                "createdAt": r.created_at.isoformat() if r.created_at else "",
+                "method": r.method,
+                "path": r.path,
+                "statusCode": r.status_code,
+                "request": r.request_body or "",
+                "response": r.response_body or "",
+                "requestTruncated": r.request_truncated,
+                "responseTruncated": r.response_truncated,
+                "streamResponse": r.stream_response,
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.post("/api/api-keys/validate")
 async def validate_key(
     body: dict,
@@ -168,7 +203,7 @@ async def validate_key(
     if not api_key_str:
         raise HTTPException(status_code=400, detail="apiKey is required")
 
-    api_key = await validate_fn(db, api_key_str)
+    api_key = await validate_fn(db, api_key_str, record_usage=False)
     if not api_key:
         raise HTTPException(status_code=401, detail="Invalid or expired API key")
 

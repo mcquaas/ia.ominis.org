@@ -4,7 +4,7 @@ Haystack Indexing Pipeline — native file conversion + embedding + pgvector sto
 Supports PDF, DOCX, TXT, HTML, CSV, XLSX, XLS, and SAV (SPSS) files.
 SAV: variable dictionary + methodology only (no raw microdata); RAG = knowledge layer.
 Other tabular/standard formats use Haystack converters or custom CSV/Excel/SAV converters.
-Embeds with SentenceTransformers and writes to PgvectorDocumentStore.
+Embeds with SentenceTransformers or ExternalDocumentEmbedder (when configured) and writes to PgvectorDocumentStore.
 """
 
 import csv
@@ -280,7 +280,6 @@ def _sav_to_documents(file_path: Path) -> list[Document]:
     return docs
 
 _indexing_pipeline: Optional[Pipeline] = None
-_simple_pipeline: Optional[Pipeline] = None
 
 
 # ---------------------------------------------------------------------------
@@ -384,17 +383,15 @@ def build_file_indexing_pipeline() -> Pipeline:
 
 
 # ---------------------------------------------------------------------------
-# Simple text-based indexing pipeline (for raw text / content)
+# Raw text: clean / split / embed (same logic as former simple pipeline, no DocumentWriter)
 # ---------------------------------------------------------------------------
 
-def build_simple_indexing_pipeline() -> Pipeline:
-    """
-    Build a simpler pipeline for indexing pre-constructed Document objects.
-    Flow: Cleaner → Splitter → Embedder → Writer
-    """
-    document_store = get_document_store()
-    pipeline = Pipeline()
 
+def _clean_split_embed_documents(documents: list[Document]) -> list[Document]:
+    """
+    Clean → split → embed using the same settings as index_file_with_meta.
+    Does not write to pgvector; callers must use _index_write_lock around write_documents.
+    """
     cleaner = DocumentCleaner(
         remove_empty_lines=True,
         remove_extra_whitespaces=True,
@@ -404,24 +401,14 @@ def build_simple_indexing_pipeline() -> Pipeline:
         split_length=3,
         split_overlap=1,
     )
-    embedder = SentenceTransformersDocumentEmbedder(
-        model=settings.embedding_model,
-    )
-    writer = DocumentWriter(
-        document_store=document_store,
-        policy="overwrite",
-    )
-
-    pipeline.add_component("cleaner", cleaner)
-    pipeline.add_component("splitter", splitter)
-    pipeline.add_component("embedder", embedder)
-    pipeline.add_component("writer", writer)
-
-    pipeline.connect("cleaner", "splitter")
-    pipeline.connect("splitter", "embedder")
-    pipeline.connect("embedder", "writer")
-
-    return pipeline
+    cleaned = cleaner.run(documents=documents)["documents"]
+    chunks = splitter.run(documents=cleaned)["documents"]
+    if (getattr(settings, "embedding_service_url", None) or "").strip():
+        embedder = ExternalDocumentEmbedder()
+    else:
+        embedder = SentenceTransformersDocumentEmbedder(model=settings.embedding_model)
+    embedder.warm_up()
+    return embedder.run(documents=chunks)["documents"]
 
 
 # ---------------------------------------------------------------------------
@@ -435,15 +422,6 @@ def get_file_indexing_pipeline() -> Pipeline:
         _indexing_pipeline = build_file_indexing_pipeline()
         _indexing_pipeline.warm_up()
     return _indexing_pipeline
-
-
-def get_simple_indexing_pipeline() -> Pipeline:
-    """Get or create the simple text indexing pipeline."""
-    global _simple_pipeline
-    if _simple_pipeline is None:
-        _simple_pipeline = build_simple_indexing_pipeline()
-        _simple_pipeline.warm_up()
-    return _simple_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -532,8 +510,9 @@ def index_file_with_meta(file_path: str | Path, source_id: int, meta: dict | Non
         chunks = splitter.run(documents=cleaned)["documents"]
 
     # Step 3: Tag all chunks with source metadata (including taxonomy)
+    # Store source_id as string so pgvector filters (meta.source_id == "123") match retrieval/delete.
     default_meta = {
-        "source_id": source_id,
+        "source_id": str(source_id),
         "source_type": "rag",
     }
     if meta:
@@ -582,7 +561,7 @@ def index_raw_text(
         return 0
 
     meta: dict = {
-        "source_id": source_id,
+        "source_id": str(source_id),
         "title": title,
         "url": url,
         "source_type": source_type,
@@ -593,11 +572,22 @@ def index_raw_text(
         meta["taxonomy"] = taxonomy
     doc = Document(content=content, meta=meta)
 
-    pipeline = get_simple_indexing_pipeline()
-    result = pipeline.run({"cleaner": {"documents": [doc]}})
-    written = result.get("writer", {}).get("documents_written", 0)
-    logger.info(f"Indexed raw text (source_id={source_id}): {written} chunks")
-    return written
+    embedded = _clean_split_embed_documents([doc])
+    dim = settings.embedding_dimension
+    for d in embedded:
+        ev = getattr(d, "embedding", None) or []
+        if ev and len(ev) != dim:
+            raise ValueError(
+                f"Embedding length {len(ev)} != EMBEDDING_DIMENSION={dim}; "
+                "align the external embedding service with backend config."
+            )
+
+    document_store = get_document_store()
+    with _index_write_lock:
+        document_store.write_documents(embedded, policy="overwrite")
+    n = len(embedded)
+    logger.info(f"Indexed raw text (source_id={source_id}): {n} chunks")
+    return n
 
 
 async def index_from_url(
@@ -659,6 +649,43 @@ async def index_from_url(
         raise
 
 
+def _documents_for_source_id(store, source_id: int) -> list[Document]:
+    """Match chunks where meta.source_id is stored as string OR int (legacy)."""
+    seen: set[str] = set()
+    out = []
+    for val in (str(source_id), source_id):
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.source_id", "operator": "==", "value": val},
+            ],
+        }
+        try:
+            batch = store.filter_documents(filters=filters) or []
+        except Exception as e:
+            logger.error(f"Failed to filter chunks for source_id={source_id} val={val!r}: {e}")
+            batch = []
+        for d in batch:
+            did = getattr(d, "id", None) or ""
+            key = str(did)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(d)
+            elif not key:
+                out.append(d)
+    return out
+
+
+def count_source_chunks(source_id: int) -> int:
+    """Return how many vector documents exist for this source (string or int meta.source_id)."""
+    store = get_document_store()
+    try:
+        return len(_documents_for_source_id(store, source_id))
+    except Exception as e:
+        logger.error(f"count_source_chunks failed for source_id={source_id}: {e}")
+        return 0
+
+
 def delete_source_chunks(source_id: int) -> int:
     """
     Delete all document chunks belonging to a specific source.
@@ -667,18 +694,8 @@ def delete_source_chunks(source_id: int) -> int:
     """
     store = get_document_store()
 
-    # source_id is stored as string in document metadata
-    sid = str(source_id)
-
-    filters = {
-        "operator": "AND",
-        "conditions": [
-            {"field": "meta.source_id", "operator": "==", "value": sid},
-        ],
-    }
-
     try:
-        docs = store.filter_documents(filters=filters)
+        docs = _documents_for_source_id(store, source_id)
     except Exception as e:
         logger.error(f"Failed to filter chunks for source_id={source_id}: {e}")
         return 0
@@ -687,7 +704,7 @@ def delete_source_chunks(source_id: int) -> int:
         logger.info(f"No chunks found for source_id={source_id}")
         return 0
 
-    doc_ids = [d.id for d in docs]
+    doc_ids = list(dict.fromkeys([d.id for d in docs if d.id]))
     store.delete_documents(document_ids=doc_ids)
     logger.info(f"Deleted {len(doc_ids)} chunks for source_id={source_id}")
     return len(doc_ids)
@@ -699,18 +716,8 @@ def get_source_chunks(source_id: int, limit: int = 50, offset: int = 0) -> list[
     """
     store = get_document_store()
 
-    # source_id is stored as string in document metadata
-    sid = str(source_id)
-
-    filters = {
-        "operator": "AND",
-        "conditions": [
-            {"field": "meta.source_id", "operator": "==", "value": sid},
-        ],
-    }
-
     try:
-        docs = store.filter_documents(filters=filters)
+        docs = _documents_for_source_id(store, source_id)
     except Exception as e:
         logger.error(f"Failed to filter chunks for source_id={source_id}: {e}")
         return []

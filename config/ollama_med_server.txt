@@ -1,4 +1,5 @@
-# Ominis 2.0 Med — Med42-v2 (M42 Health). Si OLLAMA_MED_MODEL está definido, "Ominis 2.0 Med" aparece en el chat.
+# Ominis 2.0 Med (UI) = Med42. Backend: OLLAMA_MED_URL, OLLAMA_MED_MODEL.
+# Med42-v2 (M42 Health). Si OLLAMA_MED_MODEL está definido, "Ominis 2.0 Med" aparece en el chat.
 # Servidor Ollama:
 #   - Vacío: mismo que Ominis 2.0 (g4dn/g5). En ese servidor: ollama pull med42
 #   - Vast: más rápido. Crear instancia Ollama en Vast (docs/VAST_AI_POWER.md §10, 24d-vast-ai-create-ollama-med.sh),

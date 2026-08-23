@@ -3,8 +3,10 @@ Haystack RAG Pipeline definition — Haystack 2.23 native architecture.
 """
 
 import logging
+import os
+import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from haystack.components.embedders import SentenceTransformersTextEmbedder
 from haystack.dataclasses import ChatMessage, Document
@@ -19,13 +21,182 @@ from haystack_integrations.document_stores.pgvector import PgvectorDocumentStore
 
 from app.config import (
     DEFAULT_MODEL_ID,
+    ModelConfig,
     get_model_registry,
     get_settings,
+)
+from app.vast_serverless.generators import (
+    ServerlessOllamaChatGenerator,
+    ServerlessOpenAIChatGenerator,
 )
 from app.rag.document_store import get_document_store, migrate_chunks_from_s3
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _vast_api_key() -> str:
+    return (getattr(settings, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+
+
+def _vast_cost(override: int) -> int:
+    if override and override > 0:
+        return int(override)
+    return int(getattr(settings, "vast_serverless_default_cost", 500) or 500)
+
+
+def _vast_client_timeout() -> float:
+    """HTTP + worker timeout for vastai SDK (cold starts need many minutes)."""
+    return float(getattr(settings, "vast_serverless_client_timeout", 900) or 900)
+
+
+def _anthropic_api_key_for_model(model_cfg: ModelConfig) -> str:
+    from app.admin.llm_credentials_read import get_stored_provider_token
+
+    t = get_stored_provider_token(model_cfg.id, "claude")
+    if t:
+        return t
+    return os.environ.get("ANTHROPIC_API_KEY", "") or ""
+
+
+def _openai_api_key_for_model(model_cfg: ModelConfig) -> str:
+    """Stored dashboard token per provider, then extra_params.api_key_env, then power_api_key."""
+    from app.admin.llm_credentials_read import credential_key_for_provider, get_stored_provider_token
+
+    lp = getattr(model_cfg, "llm_provider", None) or "ominis"
+    ck = credential_key_for_provider(lp)
+    if ck:
+        tok = get_stored_provider_token(model_cfg.id, ck)
+        if tok:
+            return tok
+    ep = getattr(model_cfg, "extra_params", None) or {}
+    if isinstance(ep, dict):
+        envn = (ep.get("api_key_env") or "").strip()
+        if envn:
+            return os.environ.get(envn, "") or ""
+    return (getattr(settings, "power_api_key", None) or "EMPTY") or "EMPTY"
+
+
+def _openai_http_timeout_for_model(model_cfg: ModelConfig) -> float:
+    t = getattr(model_cfg, "timeout", None) or 0
+    try:
+        if t and float(t) > 0:
+            return float(t)
+    except (TypeError, ValueError):
+        pass
+    return float(getattr(settings, "power_timeout", 120) or 120)
+
+
+def openai_model_uses_completion_tokens_only(openai_model: str) -> bool:
+    """
+    GPT-5 and o-series Chat Completions: use max_completion_tokens (not max_tokens) and
+    do not send custom temperature — API only accepts the default sampling.
+    """
+    m = (openai_model or "").strip().lower()
+    if m.startswith("gpt-5"):
+        return True
+    if re.match(r"^o[0-9]", m):
+        return True
+    if m.startswith(("o1", "o3", "o4")):
+        return True
+    return False
+
+
+def openai_chat_completion_generation_kwargs(
+    openai_model: str,
+    *,
+    temperature: float | None,
+    num_predict: int | None,
+) -> dict[str, Any]:
+    """
+    Map dashboard fields to OpenAI Chat Completions parameters.
+    GPT-5 and o-series models require max_completion_tokens; max_tokens may be rejected.
+    """
+    out: dict[str, Any] = {}
+    if temperature is not None and not openai_model_uses_completion_tokens_only(openai_model):
+        out["temperature"] = float(temperature)
+    n = int(num_predict) if num_predict is not None else 1024
+    n = max(1, min(n, 128_000))
+    m = (openai_model or "").strip().lower()
+    if openai_model_uses_completion_tokens_only(m):
+        out["max_completion_tokens"] = n
+    else:
+        out["max_tokens"] = n
+    return out
+
+
+def openai_endpoint_should_use_responses_api(openai_model: str, api_base_url: str) -> bool:
+    """
+    Some OpenAI models (e.g. gpt-5.4) may reject /v1/chat/completions with "not a chat model";
+    the Responses API (/v1/responses) accepts the same accounts. Only enable for official
+    api.openai.com so vLLM/Ollama-compatible bases keep using chat/completions.
+    """
+    if "api.openai.com" not in (api_base_url or "").lower():
+        return False
+    m = (openai_model or "").strip().lower()
+    return m.startswith("gpt-5.4")
+
+
+def make_openai_generator_for_research(
+    *,
+    openai_model: str,
+    api_base_url: str,
+    api_key: str,
+    timeout: float,
+    temperature: float,
+    num_predict: int,
+    log_label: str = "",
+) -> Any:
+    """
+    Build OpenAIChatGenerator or OpenAIResponsesChatGenerator for research / dashboard overrides.
+    """
+    from app.rag.openai_responses_chat import OpenAIResponsesChatGenerator
+
+    om = openai_model or ""
+    gk = openai_chat_completion_generation_kwargs(
+        om,
+        temperature=temperature,
+        num_predict=num_predict,
+    )
+    use_resp = openai_endpoint_should_use_responses_api(om, api_base_url)
+    if not use_resp and not openai_model_uses_completion_tokens_only(om):
+        gk["top_p"] = 0.9
+    if use_resp:
+        if log_label:
+            logger.info(
+                "OpenAIResponsesChatGenerator [%s] -> %s (model=%s)",
+                log_label,
+                (api_base_url or "").rstrip("/")[:80],
+                om,
+            )
+        return OpenAIResponsesChatGenerator(
+            model=om,
+            api_key=api_key,
+            api_base_url=api_base_url or "",
+            timeout=timeout,
+            default_generation_kwargs=gk,
+        )
+    return OpenAIChatGenerator(
+        model=om,
+        api_key=Secret.from_token(api_key),
+        api_base_url=api_base_url,
+        timeout=timeout,
+        generation_kwargs=gk,
+    )
+
+
+def _make_openai_remote_generator(model_cfg: ModelConfig) -> Any:
+    """Direct OpenAI-compatible HTTP generator: Chat Completions or Responses API as needed."""
+    return make_openai_generator_for_research(
+        openai_model=model_cfg.openai_model or "",
+        api_base_url=model_cfg.openai_api_base or "",
+        api_key=_openai_api_key_for_model(model_cfg),
+        timeout=_openai_http_timeout_for_model(model_cfg),
+        temperature=float(model_cfg.temperature),
+        num_predict=int(model_cfg.num_predict or 1024),
+        log_label=getattr(model_cfg, "display_name", "") or model_cfg.id,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Current datetime for agent awareness (injected into system prompts)
@@ -132,6 +303,13 @@ MED_ORCHESTRATOR_INSTRUCTION = (
     "si es así, indica brevemente qué datos deben mostrarse en tabla o gráfica."
 )
 
+# When refiner_hint=True (Ominis 2.0), model can request a second phase from Med or Research
+REFINAR_INSTRUCTION = (
+    "\n\nAl final de tu respuesta, si la pregunta se beneficiaría de una opinión clínica más precisa (Ominis Med) "
+    "o de investigación con más fuentes (Research), escribe exactamente en una nueva línea: [REFINAR:med] o [REFINAR:research]. "
+    "Si no hace falta, no escribas esa línea."
+)
+
 def build_chat_messages(
     question: str,
     documents: list[Document],
@@ -141,6 +319,8 @@ def build_chat_messages(
     system_prompt: str | None = None,
     max_content_per_doc: int = 800,
     med_orchestrator: bool = False,
+    refiner_hint: bool = False,
+    extra_system_suffix: str | None = None,
 ) -> list[ChatMessage]:
     """
     Build a list of ChatMessage objects for the OllamaChatGenerator.
@@ -148,6 +328,8 @@ def build_chat_messages(
     If system_prompt is provided (e.g. from dashboard config), it overrides the default SYSTEM_PROMPT.
     max_content_per_doc: max chars per document content (smaller = faster prefill for large models like gpt-oss).
     med_orchestrator: when True (Ominis Med as orchestrator), appends instructions to decide image/file relevance and table/chart use.
+    refiner_hint: when True (Ominis 2.0), adds instruction so the model can request a follow-up from Med or Research via [REFINAR:med] / [REFINAR:research].
+    extra_system_suffix: optional transparency instructions (e.g. which search tools ran).
     """
     messages: list[ChatMessage] = []
 
@@ -155,6 +337,10 @@ def build_chat_messages(
     prompt = (system_prompt or "").strip() or SYSTEM_PROMPT
     if med_orchestrator:
         prompt = prompt.rstrip() + MED_ORCHESTRATOR_INSTRUCTION
+    if refiner_hint:
+        prompt = prompt.rstrip() + REFINAR_INSTRUCTION
+    if extra_system_suffix:
+        prompt = prompt.rstrip() + "\n\n" + extra_system_suffix.strip()
     prompt = _current_datetime_context() + "\n\n" + prompt
     messages.append(ChatMessage.from_system(prompt))
 
@@ -180,7 +366,8 @@ def build_chat_messages(
             title = doc.meta.get("title", "Sin título")
             url = doc.meta.get("url", "")
             citation = doc.meta.get("citation", "")
-            content = (doc.content or "")[:max_content_per_doc]
+            cap = max_content_per_doc if raw_type != "clinicaltrials" else max(max_content_per_doc, 2400)
+            content = (doc.content or "")[:cap]
             # Evidence Pack: source = Document – Institution – Year
             taxonomy = doc.meta.get("taxonomy") or {}
             inst = (taxonomy.get("institucion") or [""])
@@ -198,6 +385,15 @@ def build_chat_messages(
             source_text += f"Contenido: {content}\n---"
 
         user_parts.append(source_text)
+        if any((d.meta or {}).get("source_type") == "clinicaltrials" for d in documents):
+            user_parts.append(
+                "\nPRIORIDAD (ENSAYOS CLÍNICOS — ClinicalTrials.gov, criterio México en la API):\n"
+                "- Responde PRIMERO con la información de las fuentes marcadas CLINICALTRIALS [N] (estado, fechas, sedes en México, condiciones, intervenciones, resumen).\n"
+                "- Redacta en español mexicano; si el registro trae texto en inglés, traduce o parafrasea los datos (no dejes estados crudos en inglés si ya hay etiqueta en español en el contenido).\n"
+                "- Incluye en la respuesta metadatos concretos de cada ensayo relevante (estado, inicio, sitios mexicanos cuando consten).\n"
+                "- Las demás fuentes (OMINIS, PubMed, web, etc.) son complementarias: no las uses para contradecir datos explícitos de los ensayos citados.\n"
+                "- Cita con [N] cada ensayo del que tomes datos."
+            )
 
     # Include file context if available
     if file_context:
@@ -304,6 +500,12 @@ def build_research_messages(
                 source_text += f"Cita: {citation}\n"
             source_text += f"Contenido: {content}\n---"
         user_parts.append(source_text)
+        if any((d.meta or {}).get("source_type") == "clinicaltrials" for d in documents):
+            user_parts.append(
+                "\nPRIORIDAD (ENSAYOS CLÍNICOS — ClinicalTrials.gov):\n"
+                "- Si el tema incluye ensayos o estudios clínicos, prioriza las fuentes CLINICALTRIALS [N] en el reporte y traduce/parafrasea al español los metadatos del registro.\n"
+                "- No contradigas con fuentes web genéricas lo que indiquen explícitamente esos registros."
+            )
 
     if file_context:
         user_parts.append(f"\nARCHIVO ADJUNTO (contenido extraído):\n{file_context}")
@@ -383,7 +585,7 @@ class PipelineManager:
     """
 
     def __init__(self):
-        self._generators: dict[str, OllamaChatGenerator] = {}
+        self._generators: dict[str, Any] = {}
         self._vision_generator: Optional[OllamaChatGenerator] = None
         self._text_embedder: Optional[SentenceTransformersTextEmbedder] = None
         self._retriever: Optional[PgvectorEmbeddingRetriever] = None
@@ -422,23 +624,170 @@ class PipelineManager:
         """Clear generator cache so next get_generator() rebuilds from current registry (e.g. after LLM config change)."""
         self._generators.clear()
 
+    def _setup_vision_generator(self, vk: str, v_ollama_ep: str) -> None:
+        """Configure multimodal vision: Ollama ImageContent or OpenAI-compatible (handled in vision.py)."""
+        from app.admin.vision_runtime import get_vision_runtime_settings, vision_prefers_openai_multimodal
+
+        vr = get_vision_runtime_settings()
+        if vision_prefers_openai_multimodal(vr):
+            self._vision_generator = None
+            logger.info("Vision: OpenAI-compatible multimodal (dashboard or QWEN_VL); Ollama vision generator skipped.")
+            return
+        if not vr.use_ollama_vision:
+            self._vision_generator = None
+            return
+        vm = (vr.vision_model or "").strip()
+        if not vm:
+            self._vision_generator = None
+            return
+        qwen_http = (getattr(settings, "qwen_vl_api_url", "") or "").strip()
+        qwen_slv = (getattr(settings, "vast_serverless_qwen_vl_endpoint", "") or "").strip()
+        vision_timeout = int(getattr(settings, "ollama_timeout", 90) or 90)
+        vision_url = (vr.ollama_url or settings.ollama_url or "").rstrip("/")
+        if getattr(vr, "force_direct_ollama", False):
+            logger.info(
+                "Creating Vision OllamaChatGenerator (dashboard) model=%s -> %s",
+                vm,
+                vision_url,
+            )
+            self._vision_generator = OllamaChatGenerator(
+                model=vm,
+                url=vision_url,
+                timeout=vision_timeout,
+                generation_kwargs={
+                    "temperature": 0.3,
+                    "num_predict": 1024,
+                },
+            )
+            logger.info("  Vision OllamaChatGenerator ready (direct).")
+            return
+        if v_ollama_ep and vk and not qwen_http and not (qwen_slv and vk):
+            logger.info(
+                "Creating Vision ServerlessOllamaChatGenerator (model=%s) -> endpoint=%s",
+                vm,
+                v_ollama_ep,
+            )
+            vst = _vast_client_timeout()
+            oc = int(getattr(settings, "vast_serverless_ollama_cost", 0) or 0)
+            self._vision_generator = ServerlessOllamaChatGenerator(
+                endpoint_name=v_ollama_ep,
+                model=vm,
+                api_key=vk,
+                cost=_vast_cost(oc),
+                timeout=vst,
+                worker_timeout=vst,
+                generation_kwargs={
+                    "temperature": 0.3,
+                    "num_predict": 1024,
+                },
+            )
+            logger.info("  Vision ServerlessOllamaChatGenerator ready.")
+        elif not qwen_http and not (qwen_slv and vk):
+            logger.info(
+                "Creating Vision OllamaChatGenerator (model=%s) -> %s",
+                vm,
+                vision_url,
+            )
+            self._vision_generator = OllamaChatGenerator(
+                model=vm,
+                url=vision_url,
+                timeout=vision_timeout,
+                generation_kwargs={
+                    "temperature": 0.3,
+                    "num_predict": 1024,
+                },
+            )
+            logger.info("  Vision OllamaChatGenerator ready.")
+        else:
+            self._vision_generator = None
+            logger.info("Vision: Qwen-VL URL or Vast Qwen-VL active; Ollama vision generator skipped.")
+
+    def rebuild_vision_generator(self) -> None:
+        """Reload vision generator after dashboard vision settings change."""
+        vk = _vast_api_key()
+        v_ollama_ep = (getattr(settings, "vast_serverless_ollama_endpoint", "") or "").strip()
+        self._setup_vision_generator(vk, v_ollama_ep)
+
     def _rebuild_generators(self) -> None:
         """Rebuild _generators from current get_model_registry() (used after invalidate_generators)."""
+        vk = _vast_api_key()
+        v_ollama_ep = (getattr(settings, "vast_serverless_ollama_endpoint", "") or "").strip()
         for model_id, model_cfg in get_model_registry().items():
-            if getattr(model_cfg, "use_openai", False) and model_cfg.openai_api_base:
-                power_key = getattr(settings, "power_api_key", "EMPTY") or "EMPTY"
-                power_timeout = getattr(settings, "power_timeout", 120) or 120
-                generator = OpenAIChatGenerator(
+            if model_id == "research-8k":
+                try:
+                    from app.rag.openscholar import get_openscholar_generator
+
+                    self._generators["research-8k"] = get_openscholar_generator()
+                    logger.info("  research-8k (Ominis Research) ready.")
+                except Exception as e:
+                    logger.warning("research-8k generator skipped: %s", e)
+                continue
+            if model_id == "research-128k":
+                try:
+                    from app.rag.openscholar import get_openscholar_128k_generator
+
+                    self._generators["research-128k"] = get_openscholar_128k_generator()
+                    logger.info("  research-128k (Ominis Research 128K) ready.")
+                except Exception as e:
+                    logger.warning("research-128k generator skipped: %s", e)
+                continue
+            if getattr(model_cfg, "use_anthropic", False):
+                oto = _openai_http_timeout_for_model(model_cfg)
+                akey = _anthropic_api_key_for_model(model_cfg)
+                from app.rag.anthropic_chat import AnthropicChatGenerator
+
+                self._generators[model_id] = AnthropicChatGenerator(
                     model=model_cfg.openai_model,
-                    api_key=Secret.from_token(power_key),
-                    api_base_url=model_cfg.openai_api_base,
-                    timeout=power_timeout,
+                    api_key=akey,
+                    timeout=oto,
                     generation_kwargs={
                         "temperature": model_cfg.temperature,
                         "max_tokens": model_cfg.num_predict,
                     },
                 )
-                self._generators[model_id] = generator
+            elif getattr(model_cfg, "use_openai", False) and model_cfg.openai_api_base:
+                v_ep = (getattr(model_cfg, "vast_serverless_endpoint", None) or "").strip()
+                if v_ep and vk:
+                    oc = int(getattr(settings, "vast_serverless_power_cost", 0) or 0)
+                    vst = _vast_client_timeout()
+                    self._generators[model_id] = ServerlessOpenAIChatGenerator(
+                        endpoint_name=v_ep,
+                        model=model_cfg.openai_model,
+                        api_key=vk,
+                        cost=_vast_cost(oc),
+                        timeout=vst,
+                        worker_timeout=vst,
+                        generation_kwargs=openai_chat_completion_generation_kwargs(
+                            model_cfg.openai_model or "",
+                            temperature=model_cfg.temperature,
+                            num_predict=model_cfg.num_predict,
+                        ),
+                    )
+                elif "vast-serverless.invalid" not in (model_cfg.openai_api_base or ""):
+                    self._generators[model_id] = _make_openai_remote_generator(model_cfg)
+                else:
+                    logger.warning(
+                        "Model %s needs VAST_API_KEY / vast_api_key for Serverless or a real power_api_url",
+                        model_id,
+                    )
+            elif v_ollama_ep and vk and not getattr(model_cfg, "use_openai", False) and not getattr(
+                model_cfg, "use_anthropic", False
+            ):
+                vst = _vast_client_timeout()
+                oc = int(getattr(settings, "vast_serverless_ollama_cost", 0) or 0)
+                self._generators[model_id] = ServerlessOllamaChatGenerator(
+                    endpoint_name=v_ollama_ep,
+                    model=model_cfg.ollama_model,
+                    api_key=vk,
+                    cost=_vast_cost(oc),
+                    timeout=vst,
+                    worker_timeout=vst,
+                    generation_kwargs={
+                        "temperature": model_cfg.temperature,
+                        "num_predict": model_cfg.num_predict,
+                        "num_gpu": model_cfg.num_gpu,
+                    },
+                )
             else:
                 ollama_url = model_cfg.ollama_url or settings.ollama_url
                 timeout = (getattr(model_cfg, "timeout", None) or 0) or getattr(settings, "ollama_timeout", 90) or 90
@@ -478,6 +827,9 @@ class PipelineManager:
         """Resolve a model ID (accepts both internal and public IDs)."""
         if not model_id:
             return DEFAULT_MODEL_ID
+        # Legacy public id before ominis-2.0-research
+        if model_id == "ominis-research":
+            model_id = "ominis-2.0-research"
         registry = get_model_registry()
         if model_id in registry:
             return model_id
@@ -524,26 +876,111 @@ class PipelineManager:
         )
 
         # 4. Build one generator per registered model (Ollama or OpenAI-compatible e.g. vLLM)
+        vk = _vast_api_key()
+        v_ollama_ep = (getattr(settings, "vast_serverless_ollama_endpoint", "") or "").strip()
         for model_id, model_cfg in get_model_registry().items():
-            if getattr(model_cfg, "use_openai", False) and model_cfg.openai_api_base:
+            if model_id == "research-8k":
+                try:
+                    from app.rag.openscholar import get_openscholar_generator
+
+                    self._generators["research-8k"] = get_openscholar_generator()
+                    logger.info("  research-8k (Ominis Research) ready.")
+                except Exception as e:
+                    logger.warning("research-8k generator skipped: %s", e)
+                continue
+            if model_id == "research-128k":
+                try:
+                    from app.rag.openscholar import get_openscholar_128k_generator
+
+                    self._generators["research-128k"] = get_openscholar_128k_generator()
+                    logger.info("  research-128k (Ominis Research 128K) ready.")
+                except Exception as e:
+                    logger.warning("research-128k generator skipped: %s", e)
+                continue
+            if getattr(model_cfg, "use_anthropic", False):
                 logger.info(
-                    f"Creating OpenAIChatGenerator for '{model_cfg.display_name}' "
-                    f"-> {model_cfg.openai_api_base} (model={model_cfg.openai_model})"
+                    "Creating AnthropicChatGenerator for '%s' -> model=%s",
+                    model_cfg.display_name,
+                    model_cfg.openai_model,
                 )
-                power_key = getattr(settings, "power_api_key", "EMPTY") or "EMPTY"
-                power_timeout = getattr(settings, "power_timeout", 120) or 120
-                generator = OpenAIChatGenerator(
+                oto = _openai_http_timeout_for_model(model_cfg)
+                akey = _anthropic_api_key_for_model(model_cfg)
+                from app.rag.anthropic_chat import AnthropicChatGenerator
+
+                self._generators[model_id] = AnthropicChatGenerator(
                     model=model_cfg.openai_model,
-                    api_key=Secret.from_token(power_key),
-                    api_base_url=model_cfg.openai_api_base,
-                    timeout=power_timeout,
+                    api_key=akey,
+                    timeout=oto,
                     generation_kwargs={
                         "temperature": model_cfg.temperature,
                         "max_tokens": model_cfg.num_predict,
                     },
                 )
-                self._generators[model_id] = generator
-                logger.info(f"  OpenAIChatGenerator '{model_id}' ready.")
+                logger.info("  AnthropicChatGenerator '%s' ready.", model_id)
+            elif getattr(model_cfg, "use_openai", False) and model_cfg.openai_api_base:
+                v_ep = (getattr(model_cfg, "vast_serverless_endpoint", None) or "").strip()
+                if v_ep and vk:
+                    logger.info(
+                        "Creating ServerlessOpenAIChatGenerator for '%s' -> endpoint=%s (model=%s)",
+                        model_cfg.display_name,
+                        v_ep,
+                        model_cfg.openai_model,
+                    )
+                    oc = int(getattr(settings, "vast_serverless_power_cost", 0) or 0)
+                    vst = _vast_client_timeout()
+                    self._generators[model_id] = ServerlessOpenAIChatGenerator(
+                        endpoint_name=v_ep,
+                        model=model_cfg.openai_model,
+                        api_key=vk,
+                        cost=_vast_cost(oc),
+                        timeout=vst,
+                        worker_timeout=vst,
+                        generation_kwargs=openai_chat_completion_generation_kwargs(
+                            model_cfg.openai_model or "",
+                            temperature=model_cfg.temperature,
+                            num_predict=model_cfg.num_predict,
+                        ),
+                    )
+                    logger.info("  ServerlessOpenAIChatGenerator '%s' ready.", model_id)
+                elif "vast-serverless.invalid" not in (model_cfg.openai_api_base or ""):
+                    logger.info(
+                        "Creating OpenAI remote generator for '%s' -> %s (model=%s)",
+                        model_cfg.display_name,
+                        model_cfg.openai_api_base,
+                        model_cfg.openai_model,
+                    )
+                    self._generators[model_id] = _make_openai_remote_generator(model_cfg)
+                    logger.info("  OpenAI remote generator '%s' ready.", model_id)
+                else:
+                    logger.warning(
+                        "Skipping model %s: set VAST_API_KEY and vast_serverless_power_endpoint or power_api_url",
+                        model_id,
+                    )
+            elif v_ollama_ep and vk and not getattr(model_cfg, "use_openai", False) and not getattr(
+                model_cfg, "use_anthropic", False
+            ):
+                logger.info(
+                    "Creating ServerlessOllamaChatGenerator for '%s' -> endpoint=%s (model=%s)",
+                    model_cfg.display_name,
+                    v_ollama_ep,
+                    model_cfg.ollama_model,
+                )
+                vst = _vast_client_timeout()
+                oc = int(getattr(settings, "vast_serverless_ollama_cost", 0) or 0)
+                self._generators[model_id] = ServerlessOllamaChatGenerator(
+                    endpoint_name=v_ollama_ep,
+                    model=model_cfg.ollama_model,
+                    api_key=vk,
+                    cost=_vast_cost(oc),
+                    timeout=vst,
+                    worker_timeout=vst,
+                    generation_kwargs={
+                        "temperature": model_cfg.temperature,
+                        "num_predict": model_cfg.num_predict,
+                        "num_gpu": model_cfg.num_gpu,
+                    },
+                )
+                logger.info("  ServerlessOllamaChatGenerator '%s' ready.", model_id)
             else:
                 ollama_url = model_cfg.ollama_url or settings.ollama_url
                 logger.info(
@@ -564,24 +1001,8 @@ class PipelineManager:
                 self._generators[model_id] = generator
                 logger.info(f"  OllamaChatGenerator '{model_id}' ready.")
 
-        # 5. Vision generator (separate OllamaChatGenerator with vision model)
-        if settings.vision_model:
-            vision_url = settings.ollama_url
-            logger.info(
-                f"Creating Vision OllamaChatGenerator "
-                f"(model={settings.vision_model}) -> {vision_url}"
-            )
-            vision_timeout = getattr(settings, "ollama_timeout", 90) or 90
-            self._vision_generator = OllamaChatGenerator(
-                model=settings.vision_model,
-                url=vision_url,
-                timeout=vision_timeout,
-                generation_kwargs={
-                    "temperature": 0.3,
-                    "num_predict": 1024,
-                },
-            )
-            logger.info("  Vision OllamaChatGenerator ready.")
+        # 5. Vision generator (dashboard + env; OpenAI multimodal vs Ollama)
+        self._setup_vision_generator(vk, v_ollama_ep)
 
         self._ready = True
         logger.info(

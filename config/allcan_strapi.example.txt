@@ -1,0 +1,4 @@
+# Copy to config/allcan_strapi.txt (gitignored) for local deploys / 12-sync-frontend.sh.
+# Strapi REST read token from All.Can (api.allcan.mx).
+ALLCAN_STRAPI_URL=https://api.allcan.mx
+ALLCAN_STRAPI_API_TOKEN=

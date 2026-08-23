@@ -16,7 +16,6 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import ARRAY
 
 from app.database import Base
 
@@ -53,6 +52,35 @@ class APIKey(Base):
 
     # Relationships
     user = relationship("User", back_populates="api_keys")
+    request_logs = relationship(
+        "APIKeyRequestLog",
+        back_populates="api_key",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self):
         return f"<APIKey {self.key_prefix}... user_id={self.user_id}>"
+
+
+class APIKeyRequestLog(Base):
+    """Last N request/response samples for an API key (dashboard modal)."""
+
+    __tablename__ = "api_key_request_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    api_key_id = Column(Integer, ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    method = Column(String(16), nullable=False)
+    path = Column(String(512), nullable=False)
+    status_code = Column(Integer, nullable=False)
+    request_body = Column(Text, nullable=True)
+    response_body = Column(Text, nullable=True)
+    request_truncated = Column(Boolean, default=False, nullable=False)
+    response_truncated = Column(Boolean, default=False, nullable=False)
+    stream_response = Column(Boolean, default=False, nullable=False)
+
+    api_key = relationship("APIKey", back_populates="request_logs")

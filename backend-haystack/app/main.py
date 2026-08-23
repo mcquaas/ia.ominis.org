@@ -3,11 +3,12 @@ Ominis Health - Agent Backend
 FastAPI application entry point.
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import update
+from sqlalchemy import select
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,10 +28,14 @@ from app.admin.router import router as admin_router
 from app.chat.router import router as chat_router
 from app.feedback.router import router as feedback_router
 from app.sinba.router import router as sinba_router
+from app.clinical_trials.router import router as clinical_trials_router
+from app.doctor_directory.router import router as doctor_directory_router
+from app.allcan_directory.router import router as allcan_directory_router
 from app.auth.dependencies import get_current_user
 from app.auth.models import RoleEnum, User
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.api_key_auth import APIKeyAuthMiddleware
+from app.middleware.api_key_request_log import APIKeyRequestLogMiddleware
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -43,26 +48,53 @@ STUCK_INDEXING_THRESHOLD_MINUTES = 60
 
 
 async def _mark_stuck_indexing_on_startup() -> None:
-    """Mark RAG sources stuck in 'indexing' (no update for > threshold) as error so they can be reindexed."""
+    """
+    Resolve RAG sources stuck in 'indexing' (no update for > threshold).
+    If vectors exist in pgvector, promote to active; otherwise mark as error for reindex.
+    """
     try:
+        from app.rag.indexing import count_source_chunks
+
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=STUCK_INDEXING_THRESHOLD_MINUTES)
         async with async_session() as db:
-            stmt = (
-                update(RAGSource)
-                .where(
+            result = await db.execute(
+                select(RAGSource.id).where(
                     RAGSource.status == SourceStatus.indexing,
                     RAGSource.updated_at < cutoff,
                 )
-                .values(
-                    status=SourceStatus.error,
-                    indexing_error="Indexing timed out (backend restarted or task lost; reindex to retry)",
-                )
             )
-            result = await db.execute(stmt)
-            await db.commit()
-            marked = result.rowcount
-            if marked:
-                logger.info("Marked %s RAG source(s) stuck in indexing as error (older than %s min)", marked, STUCK_INDEXING_THRESHOLD_MINUTES)
+            stuck_ids = [row[0] for row in result.fetchall()]
+
+        promoted = 0
+        marked_error = 0
+        for sid in stuck_ids:
+            n = await asyncio.to_thread(count_source_chunks, sid)
+            async with async_session() as db:
+                r = await db.execute(select(RAGSource).where(RAGSource.id == sid))
+                src = r.scalar_one_or_none()
+                if not src or src.status != SourceStatus.indexing:
+                    continue
+                if n > 0:
+                    src.status = SourceStatus.active
+                    src.chunks_count = n
+                    src.indexing_error = None
+                    await db.commit()
+                    promoted += 1
+                else:
+                    src.status = SourceStatus.error
+                    src.indexing_error = (
+                        "Indexing timed out (backend restarted or task lost; reindex to retry)"
+                    )
+                    await db.commit()
+                    marked_error += 1
+        if promoted or marked_error:
+            logger.info(
+                "Stuck indexing cleanup: promoted %s source(s) to active (vectors found), "
+                "marked %s as error (no vectors) — threshold %s min",
+                promoted,
+                marked_error,
+                STUCK_INDEXING_THRESHOLD_MINUTES,
+            )
     except Exception as e:
         logger.warning("Could not mark stuck indexing sources on startup: %s", e)
 
@@ -171,6 +203,9 @@ app.add_middleware(
 # Rate limiting
 app.add_middleware(RateLimitMiddleware)
 
+# Log API-key request/response samples (runs inside APIKeyAuth's next; sees request.state.api_key_id)
+app.add_middleware(APIKeyRequestLogMiddleware)
+
 # API key authentication for query endpoints
 app.add_middleware(APIKeyAuthMiddleware)
 
@@ -185,6 +220,9 @@ app.include_router(admin_router, prefix="/v1")
 app.include_router(chat_router, prefix="/v1")
 app.include_router(feedback_router, prefix="/v1")
 app.include_router(sinba_router, prefix="/v1")
+app.include_router(clinical_trials_router, prefix="/v1")
+app.include_router(doctor_directory_router, prefix="/v1")
+app.include_router(allcan_directory_router, prefix="/v1")
 
 
 @app.get("/v1/health", tags=["system"])

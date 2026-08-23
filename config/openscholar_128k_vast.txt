@@ -1,3 +1,4 @@
+# Ominis 2.0 Research 128k (UI) = OpenScholar. Backend: OPENSCHOLAR_128K_API_URL.
 # OpenScholar 128K on Vast.ai (no EC2 instance ID)
 # Copy to config/openscholar_128k_vast.txt and set the URL after running 24e-vast-ai-create-openscholar-128k.sh
 # Get IP:PORT from Vast instance → IP Port Info → mapping for 8000/tcp

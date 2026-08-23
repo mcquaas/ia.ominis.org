@@ -9,13 +9,16 @@ SSE event format:
   data: {"type": "status", "message": "..."}\n\n
   data: {"type": "chunk", "text": "..."}\n\n
   data: {"type": "sources", "sources": [...]}\n\n
-  data: {"type": "done", "answer": "...", "sources": [...]}\n\n
+  data: {"type": "done", "answer": "...", "sources": [...], "sources_not_used": [...]}\n\n
 """
 
 import asyncio
+from collections import Counter
+import io
 import json
 import logging
 import math
+import os
 import re
 import time
 from typing import Literal, Optional
@@ -38,12 +41,13 @@ from haystack.dataclasses import ChatMessage, StreamingChunk
 import httpx
 import html2text
 
-from app.config import DEFAULT_MODEL_ID, get_model_config, get_model_registry, get_settings
+from app.config import DEFAULT_MODEL_ID, get_model_config, get_model_registry, get_settings, normalize_public_model_id
 from app.rag.pipeline import (
     SYSTEM_PROMPT,
     _current_datetime_context,
     build_chat_messages,
     get_pipeline_manager,
+    openai_chat_completion_generation_kwargs,
 )
 from app.rag.document_store import get_document_store
 from app.rag.charting import generate_chart_specs, parse_chart_specs_from_text, render_chart_images, strip_chart_block_from_text
@@ -77,14 +81,27 @@ from app.rag.research_quality import (
     REPETITION_SIMILARITY_THRESHOLD,
 )
 from app.rag.intent import (
+    CLINICAL_RISK_LOW,
+    conversation_only_default_intent,
     filter_documents_by_intent,
     get_rag_top_k_multiplier,
+    heuristic_conversation_only,
+    is_conversation_only_turn,
     orchestrate_route,
     run_metadata_intent_mapper,
     should_use_clinical_validator,
     ORCHESTRATOR_ROUTE_MEDICAL,
     ORCHESTRATOR_ROUTE_RESEARCH,
     ORCHESTRATOR_ROUTE_SIMPLE,
+)
+from app.rag.tool_orchestration import (
+    apply_tool_plan_to_query_request,
+    eff_from_body,
+    format_tool_plan_message,
+    infer_tool_sources_heuristic,
+    plan_tools_for_query,
+    suggest_tools_for_followup,
+    tool_labels_es,
 )
 from app.rag.clinical_validator import (
     content_has_clinical_signals,
@@ -144,7 +161,11 @@ class QueryRequest(BaseModel):
     web_search: bool = True
     pubmed_search: bool = True
     openscholar_search: bool = False  # Semantic Scholar / Open Scholar (default off)
-    num_sources: int = 3
+    clinical_trials_search: bool = False  # ClinicalTrials.gov (Mexico); requires authenticated user on backend
+    doctor_directory_search: bool = False  # Ingested doctor profiles (México); requires login
+    allcan_search: bool = False  # All.Can México organizations (Strapi); requires login + server token
+    tool_automation: bool = True  # When true, orchestrator sets search tools from intent + heuristics
+    num_sources: int = 6  # more hits per backend when orchestrator enables several tools
     file_context: Optional[str] = None  # Extracted text from attached files
 
 
@@ -154,6 +175,7 @@ class QueryResponse(BaseModel):
     query: str
     model: str
     charts: Optional[list[dict]] = None
+    sources_not_used: Optional[list[dict]] = None
 
 
 class ResearchRequest(BaseModel):
@@ -166,7 +188,10 @@ class ResearchRequest(BaseModel):
     rag_search: bool = True
     web_search: bool = True
     pubmed_search: bool = True
-    openscholar_search: bool = False  # Semantic Scholar / Open Scholar (default off)
+    openscholar_search: bool = False
+    clinical_trials_search: bool = False
+    doctor_directory_search: bool = False
+    allcan_search: bool = False
     num_sources: int = 10
     file_context: Optional[str] = None
     iterations: int = 5
@@ -298,6 +323,98 @@ def _select_docs_for_section(
     return selected if selected else [d for d, _ in scored[:max_docs]]
 
 
+def _filter_chat_documents_by_relevance(
+    documents: list[Document],
+    question: str,
+    *,
+    min_keep: int = 6,
+    max_keep: int = 28,
+) -> list[Document]:
+    """
+    Drop clearly off-topic documents before they reach chat synthesis and source UI.
+    Uses heuristic score + source-type thresholds; keeps fallback top docs if overly strict.
+    """
+    if not documents:
+        return documents
+    topic_terms = _extract_topic_terms(question or "")
+    enforce_health = _topic_is_health_related(question or "")
+    scored: list[tuple[Document, float]] = []
+    for d in documents:
+        s = _heuristic_source_score(d, topic_terms, enforce_health)
+        scored.append((d, s))
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Stricter for generic web pages; more permissive for curated/structured sources.
+    per_type_min = {
+        "web": 0.10,
+        "webpage": 0.10,
+        "rag": -0.20,
+        "pdf": -0.20,
+        "health_datastore": -0.20,
+        "pubmed": -0.15,
+        "openscholar": -0.15,
+        "clinicaltrials": -0.20,
+        "directorio_mx": -0.30,
+        "allcan": -0.30,
+    }
+
+    kept: list[Document] = []
+    seen: set[str] = set()
+    per_type_count: dict[str, int] = {}
+    per_type_cap = {
+        "web": 6,
+        "webpage": 6,
+        "rag": 12,
+        "pdf": 12,
+        "health_datastore": 12,
+        "pubmed": 8,
+        "openscholar": 8,
+        "clinicaltrials": 10,
+        "directorio_mx": 10,
+        "allcan": 10,
+    }
+
+    for d, s in scored:
+        st = str((d.meta or {}).get("source_type", "unknown"))
+        min_s = per_type_min.get(st, -0.10)
+        if s < min_s:
+            continue
+        u = ((d.meta or {}).get("url") or "").strip()
+        key = u or f"id:{getattr(d, 'id', '')}:{st}"
+        if key in seen:
+            continue
+        c = per_type_count.get(st, 0)
+        if c >= per_type_cap.get(st, 8):
+            continue
+        seen.add(key)
+        per_type_count[st] = c + 1
+        kept.append(d)
+        if len(kept) >= max_keep:
+            break
+
+    if len(kept) >= min_keep:
+        return kept
+    # Safety fallback: avoid empty context on narrow queries.
+    return [d for d, _ in scored[: min(max_keep, max(min_keep, 10))]]
+
+
+def _likely_cold_gpu(settings) -> bool:
+    """Heuristic: remote Ollama or Vast Serverless often implies cold GPU / long first token."""
+    vk = (getattr(settings, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip()
+    if (getattr(settings, "vast_serverless_ollama_endpoint", "") or "").strip() and vk:
+        return True
+    u = (getattr(settings, "ollama_url", None) or "").strip()
+    if not u:
+        return False
+    try:
+        host = (urlparse(u).hostname or "").lower()
+    except Exception:
+        return True
+    if not host:
+        return True
+    return host not in ("localhost", "127.0.0.1", "::1")
+
+
 # --- SSE Helpers ---
 
 def sse_event(data: dict) -> str:
@@ -327,17 +444,55 @@ def _source_display_title(meta: dict) -> str:
     return title
 
 
+def _source_citation_label(meta: dict) -> str:
+    """Build a citation-style display: 'Title - Authors - Year' (e.g. for article cards).
+    Falls back to _source_display_title when we only have URL/title."""
+    title = (meta.get("title") or "").strip()
+    if title.upper().startswith("OPENSCHOLAR"):
+        rest = title[11:].lstrip()
+        if rest.startswith("—") or rest.startswith("-"):
+            title = rest[1:].strip()
+        else:
+            title = rest
+    authors = (meta.get("authors") or "").strip()
+    year = str(meta.get("year") or "").strip()
+    if not title or title.lower() in ("url", "sin título", "sin titulo"):
+        return _source_display_title(meta)
+    parts = [title]
+    if authors:
+        parts.append(authors)
+    if year:
+        parts.append(year)
+    return " - ".join(parts)
+
+
+def _clinical_trials_keywords_from_documents(documents: list[Document]) -> str:
+    """English query.term keywords used for the CT.gov API (same for all trials in one fetch)."""
+    for d in documents:
+        meta = d.meta or {}
+        if meta.get("source_type") == "clinicaltrials":
+            kw = (meta.get("ct_search_keywords") or "").strip()
+            if kw:
+                return kw
+    return ""
+
+
 def _doc_to_source(doc: Document) -> dict:
     """Convert a Haystack Document to a source dict for the API response.
     Includes sourceType and meta.page_number for PDFs so the frontend can build #page=N links.
     Optional snippet (first 600 chars of content) for the preview modal.
+    Title is citation-style (Title - Authors - Year) when metadata is available.
     """
     source_type = doc.meta.get("source_type", "rag")
     content = (doc.content or "").strip()
     snippet = content[:600] + ("…" if len(content) > 600 else "") if content else ""
+    url = doc.meta.get("url", "")
+    citation_label = _source_citation_label(doc.meta)
     out = {
-        "title": _source_display_title(doc.meta),
-        "url": doc.meta.get("url", ""),
+        "title": citation_label,
+        "url": url,
+        "link": url,
+        "attribution": citation_label,
         "score": round(doc.score or 0.0, 4) if doc.score else None,
         "type": source_type,
         "sourceType": source_type,
@@ -348,12 +503,32 @@ def _doc_to_source(doc: Document) -> dict:
         "doi": doc.meta.get("doi", ""),
         "snippet": snippet or None,
     }
-    # Include page_number for PDFs so the frontend can append #page=N to the URL
+    if source_type == "clinicaltrials":
+        out["nctId"] = doc.meta.get("nct_id") or ""
+        out["ctStartDate"] = doc.meta.get("ct_start_date") or ""
+        out["ctLocationsSummary"] = doc.meta.get("ct_locations_summary") or ""
+        fb = (doc.meta or {}).get("ct_fallback_search_url") or ""
+        cl = (doc.meta or {}).get("ct_classic_show_url") or ""
+        if fb:
+            out["ctFallbackSearchUrl"] = fb
+        if cl:
+            out["ctClassicShowUrl"] = cl
+    # Rich meta for deep links / UI: page, file name, short excerpt for PDF search anchors
+    meta_out: dict = {}
     page_number = doc.meta.get("page_number")
     if page_number is not None:
-        out["meta"] = {"page_number": int(page_number)}
-        if doc.meta.get("file_name"):
-            out["meta"]["file_name"] = str(doc.meta["file_name"])
+        meta_out["page_number"] = int(page_number)
+    if doc.meta.get("file_name"):
+        meta_out["file_name"] = str(doc.meta["file_name"])
+    # Stable chunk id when Haystack provides it (string/UUID — avoid casting to int in filters)
+    did = getattr(doc, "id", None)
+    if did:
+        meta_out["chunk_id"] = str(did)
+    excerpt = (content or "").replace("\n", " ").strip()
+    if excerpt:
+        meta_out["text_excerpt"] = excerpt[:240]
+    if meta_out:
+        out["meta"] = meta_out
     return out
 
 
@@ -362,59 +537,150 @@ def _deduplicate_and_rank(documents: list[Document], max_total: int = 10) -> lis
     Deduplicate documents by URL, keeping the version with the MOST content.
     Then rank by relevance with a balanced mix of source types.
     """
-    url_best: dict[str, Document] = {}
+    # For chunked corpora (RAG/PDF/health_datastore), several relevant chunks can share
+    # the same URL (different pages). Deduping only by URL drops evidence.
+    chunked_types = {"rag", "pdf", "health_datastore"}
+    best_by_key: dict[str, Document] = {}
+
+    def _doc_key(doc: Document) -> str:
+        meta = doc.meta or {}
+        url = (meta.get("url") or "").strip()
+        if not url or not doc.content:
+            return ""
+        normalized = urlparse(url)._replace(fragment="").geturl().rstrip("/")
+        source_type = str(meta.get("source_type", "rag") or "rag")
+        if source_type in chunked_types:
+            page = meta.get("page_number")
+            chunk_id = meta.get("chunk_id") or getattr(doc, "id", None)
+            if page is not None:
+                return f"{normalized}#p:{page}"
+            if chunk_id:
+                return f"{normalized}#c:{chunk_id}"
+            # Fallback: preserve more than one chunk from same URL by content prefix.
+            prefix = re.sub(r"\s+", " ", (doc.content or "")[:180]).strip().lower()
+            return f"{normalized}#t:{prefix}"
+        return normalized
 
     for doc in documents:
-        url = doc.meta.get("url", "")
-        if not url or not doc.content:
+        key = _doc_key(doc)
+        if not key:
             continue
-
-        normalized = urlparse(url)._replace(fragment="").geturl().rstrip("/")
-        existing = url_best.get(normalized)
+        existing = best_by_key.get(key)
         if existing is None:
-            url_best[normalized] = doc
+            best_by_key[key] = doc
         else:
-            # Keep the version with more content (full page > snippet)
+            # Keep richer variant for same semantic key
             if len(doc.content or "") > len(existing.content or ""):
-                url_best[normalized] = doc
+                best_by_key[key] = doc
 
-    unique = list(url_best.values())
+    unique = list(best_by_key.values())
 
     def sort_key(d: Document) -> tuple:
         source_type = d.meta.get("source_type", "rag")
         score = d.score or 0
         # 1 Ominis, 2 OpenScholar, 3 PubMed, 4 Web
-        type_priority = {"rag": 0, "pdf": 0, "health_datastore": 0, "openscholar": 1, "pubmed": 2, "web": 3, "webpage": 3}.get(source_type, 3)
+        type_priority = {
+            "rag": 0,
+            "pdf": 0,
+            "health_datastore": 0,
+            "clinicaltrials": 1,
+            "directorio_mx": 1,
+            "allcan": 1,
+            "openscholar": 2,
+            "pubmed": 3,
+            "web": 4,
+            "webpage": 4,
+        }.get(source_type, 4)
         return (type_priority, -score)
 
     unique.sort(key=sort_key)
     return unique[:max_total]
 
 
+def _merge_sources_for_chat(
+    documents: list[Document],
+    max_total: int,
+    prioritize_clinical_trials: bool,
+) -> list[Document]:
+    """
+    When ClinicalTrials.gov is enabled, keep trial registry docs in the context window:
+    they used to share default priority with web and were often trimmed out.
+    """
+    if not prioritize_clinical_trials:
+        return _deduplicate_and_rank(documents, max_total=max_total)
+
+    def norm_url(d: Document) -> str:
+        u = (d.meta or {}).get("url", "")
+        if not u:
+            return ""
+        return urlparse(u)._replace(fragment="").geturl().rstrip("/")
+
+    ct = [d for d in documents if (d.meta or {}).get("source_type") == "clinicaltrials"]
+    rest = [d for d in documents if (d.meta or {}).get("source_type") != "clinicaltrials"]
+    cap_ct = min(14, max_total)
+    ct_ranked = _deduplicate_and_rank(ct, max_total=cap_ct)
+    rest_ranked = _deduplicate_and_rank(rest, max_total=max_total)
+
+    out: list[Document] = []
+    seen: set[str] = set()
+    for d in ct_ranked:
+        u = norm_url(d)
+        if u and u not in seen:
+            seen.add(u)
+            out.append(d)
+    for d in rest_ranked:
+        if len(out) >= max_total:
+            break
+        u = norm_url(d)
+        if u and u not in seen:
+            seen.add(u)
+            out.append(d)
+    return out[:max_total]
+
+
+def _split_sources_by_citation(
+    answer: str,
+    all_sources: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """
+    Split retrieved sources into (cited, uncited) using [N] markers in the answer.
+    When the answer has no [N] citations, returns (all_sources with ref_num, []) so the
+    UI still shows a single list (undistinguishable case).
+    """
+    cited_nums: set[int] = set()
+    for match in re.finditer(r"\[(\d+)\]", answer):
+        cited_nums.add(int(match.group(1)))
+
+    def _with_ref(i: int, src: dict) -> dict:
+        out = dict(src)
+        out["ref_num"] = i + 1
+        return out
+
+    if not all_sources:
+        return [], []
+
+    if not cited_nums:
+        return [_with_ref(i, s) for i, s in enumerate(all_sources)], []
+
+    cited: list[dict] = []
+    uncited: list[dict] = []
+    for i, source in enumerate(all_sources):
+        ref_num = i + 1
+        s = _with_ref(i, source)
+        if ref_num in cited_nums:
+            cited.append(s)
+        else:
+            uncited.append(s)
+    return cited, uncited
+
+
 def _filter_cited_sources(
     answer: str,
     all_sources: list[dict],
 ) -> list[dict]:
-    """
-    Filter sources to only include those actually cited in the answer.
-    Looks for [N] patterns in the text and returns only matching sources.
-    If no citations found at all, returns empty list.
-    """
-    cited_nums = set()
-    for match in re.finditer(r"\[(\d+)\]", answer):
-        cited_nums.add(int(match.group(1)))
-
-    if not cited_nums:
-        return []
-
-    cited_sources = []
-    for i, source in enumerate(all_sources):
-        ref_num = i + 1
-        if ref_num in cited_nums:
-            source["ref_num"] = ref_num
-            cited_sources.append(source)
-
-    return cited_sources
+    """Sources actually cited in the answer ([N] markers). Delegates to _split_sources_by_citation."""
+    cited, _ = _split_sources_by_citation(answer, all_sources)
+    return cited
 
 
 def _is_trustworthy_domain(url: str) -> bool:
@@ -429,6 +695,7 @@ def _is_trustworthy_domain(url: str) -> bool:
         "nih.gov",
         "ncbi.nlm.nih.gov",
         "pubmed.ncbi.nlm.nih.gov",
+        "clinicaltrials.gov",
         "sciencedirect.com",
         "nature.com",
         "thelancet.com",
@@ -454,7 +721,18 @@ def _source_priority(doc: Document) -> tuple:
     score = doc.score or 0
     trusted = 0 if _is_trustworthy_domain(url) else 1
     # 1 Ominis, 2 OpenScholar, 3 PubMed, 4 Web
-    type_priority = {"rag": 0, "health_datastore": 0, "openscholar": 1, "pubmed": 2, "web": 3, "webpage": 3}.get(source_type, 3)
+    type_priority = {
+        "rag": 0,
+        "pdf": 0,
+        "health_datastore": 0,
+        "clinicaltrials": 1,
+        "directorio_mx": 1,
+        "allcan": 1,
+        "openscholar": 2,
+        "pubmed": 3,
+        "web": 4,
+        "webpage": 4,
+    }.get(source_type, 4)
     return (trusted, type_priority, -score)
 
 
@@ -521,6 +799,54 @@ def _is_captcha_or_error_page(text: str, url: str = "") -> bool:
     return False
 
 
+def _looks_like_pdf_url(url: str) -> bool:
+    u = (url or "").lower()
+    return ".pdf" in u or "/pdf/" in u
+
+
+def _question_needs_structured_evidence(question: str) -> bool:
+    q = (question or "").lower()
+    return bool(re.search(r"\b(presupuesto|ppef|pef|mdp|millones|monto|montos|cifra|cifras|tabla|cuadro|anexo|recorte)\b", q))
+
+
+async def _fetch_pdf_text(url: str, timeout: float = 20.0) -> tuple[str, str]:
+    """
+    Fetch PDF bytes and extract text. Returns (title, text).
+    """
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            headers=BROWSER_HEADERS,
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "").lower()
+            if "application/pdf" not in content_type and not _looks_like_pdf_url(url):
+                return "", ""
+            pdf_bytes = resp.content
+    except Exception as e:
+        logger.warning("PDF fetch failed for %s: %s", url, e)
+        return "", ""
+
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        pages: list[str] = []
+        for i, page in enumerate(reader.pages[:40]):  # hard cap for latency
+            t = (page.extract_text() or "").strip()
+            if t:
+                pages.append(f"[Página {i+1}]\n{t}")
+        text = "\n\n".join(pages).strip()
+        title = ""
+        if reader.metadata:
+            title = str(getattr(reader.metadata, "title", "") or "").strip()
+        return title, text[:30000]
+    except Exception as e:
+        logger.warning("PDF parse failed for %s: %s", url, e)
+        return "", ""
+
+
 async def _fetch_url_content(url: str, timeout: float = 20.0) -> tuple[str, str, list[str]]:
     """
     Fetch a URL and return (title, text_content, links). Returns ("", "", []) on failure.
@@ -534,6 +860,9 @@ async def _fetch_url_content(url: str, timeout: float = 20.0) -> tuple[str, str,
             resp = await client.get(url)
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "").lower()
+            if "application/pdf" in content_type or _looks_like_pdf_url(url):
+                title, text = await _fetch_pdf_text(url, timeout=timeout)
+                return title, text, []
             if "text/html" not in content_type and "text/plain" not in content_type:
                 return "", "", []
             html = resp.text
@@ -729,6 +1058,7 @@ async def _get_deepening_queries(
     focus: str,
     research_notes: list[str],
     generator,
+    backend_openai_model: str,
 ) -> list[str]:
     """Research 2.1: generate 3-5 queries to deepen on the most relevant findings."""
     if not research_notes or len(research_notes) < 2:
@@ -740,8 +1070,11 @@ async def _get_deepening_queries(
     ]
     try:
         loop = asyncio.get_event_loop()
+        gk = openai_chat_completion_generation_kwargs(
+            backend_openai_model, temperature=0.3, num_predict=1024
+        )
         result = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: generator.run(messages=messages, generation_kwargs={"max_tokens": 1024, "temperature": 0.3})),
+            loop.run_in_executor(None, lambda: generator.run(messages=messages, generation_kwargs=gk)),
             timeout=60.0,
         )
         replies = result.get("replies", [])
@@ -862,6 +1195,14 @@ async def _gather_sources(
     manager,
     refined_queries: list[str] | None = None,
     intent: dict | None = None,
+    clinical_trials_search: bool = False,
+    ct_model_id: str | None = None,
+    clinical_trials_allowed: bool = False,
+    doctor_directory_search: bool = False,
+    allcan_search: bool = False,
+    doctor_directory_allowed: bool = False,
+    allcan_allowed: bool = False,
+    db: AsyncSession | None = None,
 ) -> list[Document]:
     """
     Gather documents from all enabled search sources in parallel.
@@ -1054,6 +1395,48 @@ async def _gather_sources(
                         return []
                 tasks.append(do_openscholar_refined())
 
+    if clinical_trials_search and clinical_trials_allowed and ct_model_id:
+        async def do_clinical_trials():
+            try:
+                from app.rag.clinical_trials_search import fetch_clinical_trials_documents
+
+                size = min(24, max(num_sources * 2, 16))
+                docs, _kw = await fetch_clinical_trials_documents(
+                    question, manager, ct_model_id, max_results=size
+                )
+                return docs
+            except Exception as e:
+                logger.warning("Clinical trials search error: %s", e)
+                return []
+
+        tasks.append(do_clinical_trials())
+
+    if doctor_directory_search and doctor_directory_allowed and db is not None:
+        async def do_doctor_directory():
+            try:
+                from app.rag.directory_tools_search import fetch_doctor_directory_documents
+
+                size = min(24, max(num_sources * 2, 12))
+                return await fetch_doctor_directory_documents(db, question, max_results=size)
+            except Exception as e:
+                logger.warning("Doctor directory search error: %s", e)
+                return []
+
+        tasks.append(do_doctor_directory())
+
+    if allcan_search and allcan_allowed:
+        async def do_allcan():
+            try:
+                from app.rag.directory_tools_search import fetch_allcan_documents
+
+                size = min(32, max(num_sources * 2, 16))
+                return await fetch_allcan_documents(question, max_results=size)
+            except Exception as e:
+                logger.warning("All.Can search error: %s", e)
+                return []
+
+        tasks.append(do_allcan())
+
     if not tasks:
         return []
 
@@ -1066,6 +1449,31 @@ async def _gather_sources(
             continue
         if isinstance(result, list):
             combined.extend(result)
+
+    # Targeted enrichment: web PDF snippets often lack table/figure values (e.g., budget PDFs).
+    # For structured-evidence questions, fetch and parse top PDF URLs before synthesis.
+    if web_search and combined and _question_needs_structured_evidence(question):
+        pdf_candidates: list[Document] = []
+        for d in combined:
+            meta = d.meta or {}
+            st = str(meta.get("source_type", ""))
+            url = str(meta.get("url", "") or "")
+            if st in {"web", "webpage"} and url and _looks_like_pdf_url(url):
+                pdf_candidates.append(d)
+        if pdf_candidates:
+            pdf_candidates = pdf_candidates[: min(6, max(3, num_sources))]
+            enrich_tasks = [_fetch_pdf_text((d.meta or {}).get("url", ""), timeout=25.0) for d in pdf_candidates]
+            enriched = await asyncio.gather(*enrich_tasks, return_exceptions=True)
+            for d, payload in zip(pdf_candidates, enriched):
+                if isinstance(payload, Exception):
+                    continue
+                title, text = payload
+                if text and len(text) > 300:
+                    if title:
+                        d.meta["title"] = title
+                    d.meta["source_type"] = "pdf"
+                    d.content = text
+            logger.info("Web PDF enrichment: %s candidates processed", len(pdf_candidates))
 
     return combined
 
@@ -1246,19 +1654,89 @@ GUEST_ONLY_MODEL_ID = "ominis-2.0"
 ACADEMIC_MODEL_ID_128K = "ominis-2.0-research-128k"
 
 
+def _backend_openai_model_for_research_stream(public_model_id: str) -> str:
+    """
+    Backend OpenAI model id for the active research generator (maps public UI id + registry).
+    Used to build per-request generation_kwargs (max_tokens vs max_completion_tokens, temperature rules).
+    """
+    reg = get_model_registry()
+    if public_model_id == ACADEMIC_MODEL_ID_128K and "research-128k" in reg:
+        return (get_model_config("research-128k").openai_model or "").strip()
+    if "research-8k" in reg:
+        c8 = get_model_config("research-8k")
+        b = (c8.openai_api_base or "").strip()
+        if b and "placeholder.invalid" not in b:
+            return (c8.openai_model or "").strip()
+    for _mid, cfg in reg.items():
+        if getattr(cfg, "public_id", "") == public_model_id and getattr(cfg, "use_openai", False):
+            return (cfg.openai_model or "").strip()
+    return (getattr(get_settings(), "openscholar_model", None) or "openscholar").strip()
+
+
+def _openai_non_chat_model_user_message(api_error_text: str) -> str | None:
+    """
+    OpenAI returns this when the configured model id is not allowed on POST /v1/chat/completions
+    (e.g. legacy completions-only models, embeddings, or a mismatched proxy deployment).
+    """
+    low = (api_error_text or "").lower()
+    if "not a chat model" in low or "not supported in the v1/chat/completions" in low:
+        return (
+            "Error al generar el reporte. El **modelo backend** de investigación no es un modelo de **chat** para esa API "
+            "(no admite `/v1/chat/completions`). En el panel **LLMs**, edita **research-128k** o **research-8k**: "
+            "usa un id de modelo de chat de OpenAI, p. ej. `gpt-5.4`, `gpt-4o` o `gpt-4o-mini` (confírmalo con «Listar modelos»). "
+            "Evita modelos solo de completions (`text-…`), embeddings o audio. "
+            f"Detalle: {api_error_text}"
+        )
+    return None
+
+
 def _research_128k_available() -> bool:
-    return bool((get_settings().openscholar_128k_api_url or "").strip())
+    import os
+
+    s = get_settings()
+    if (getattr(s, "openscholar_128k_api_url", "") or "").strip():
+        return True
+    if (getattr(s, "vast_serverless_openscholar_128k_endpoint", "") or "").strip():
+        return bool((getattr(s, "vast_api_key", None) or os.environ.get("VAST_API_KEY", "") or "").strip())
+    return False
 
 
 def _get_research_generator_and_model_id():
-    """Use OpenScholar 128K when configured (e.g. Vast.ai); else fallback to default chat model."""
+    """
+    Prefer dashboard-configured research-8k (OpenAI, Anthropic, vLLM, etc.), then legacy 128K URL, else default chat.
+    """
     manager = get_pipeline_manager()
+    reg = get_model_registry()
+    if "research-8k" in reg:
+        cfg8 = get_model_config("research-8k")
+        base = (cfg8.openai_api_base or "").strip()
+        if base and "placeholder.invalid" not in base:
+            try:
+                gen = manager.get_generator("research-8k")
+                return gen, cfg8.public_id, ""
+            except Exception as e:
+                logger.warning("research-8k generator unavailable (%s); trying 128K fallback", e)
     if _research_128k_available():
         try:
             return get_openscholar_128k_generator(), ACADEMIC_MODEL_ID_128K, ""
         except ValueError:
             pass
     return manager.get_generator(), manager.get_public_model_id(DEFAULT_MODEL_ID), "Ominis 2.0 Research 128K no configurado. Usando Ominis 2.0."
+
+
+def _research_context_token_budget(public_model_id: str) -> int:
+    """Use dashboard context_window for research slots (large models / long reports)."""
+    mid = "research-128k" if public_model_id == ACADEMIC_MODEL_ID_128K else "research-8k"
+    reg = get_model_registry()
+    if mid not in reg:
+        return MODEL_CTX_LIMIT_128K if public_model_id == ACADEMIC_MODEL_ID_128K else MODEL_CTX_LIMIT
+    cfg = get_model_config(mid)
+    try:
+        cw = int(getattr(cfg, "context_window", MODEL_CTX_LIMIT) or MODEL_CTX_LIMIT)
+    except (TypeError, ValueError):
+        cw = MODEL_CTX_LIMIT
+    cap = MODEL_CTX_LIMIT_128K if public_model_id == ACADEMIC_MODEL_ID_128K else 200_000
+    return max(MODEL_CTX_LIMIT, min(cw, cap))
 
 
 async def _researcher_allowed_chat_model_ids(db: AsyncSession) -> set[str]:
@@ -1396,7 +1874,7 @@ async def list_models(
     try:
         row = (await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))).scalar_one_or_none()
         if row and getattr(row, "default_model", None):
-            candidate = (row.default_model or "").strip()
+            candidate = normalize_public_model_id((row.default_model or "").strip()) or ""
             if candidate and any(x["id"] == candidate for x in result_models):
                 default_id = candidate
     except Exception:
@@ -1422,8 +1900,19 @@ async def query_stream(
     model_id = manager.get_model_id(body.model)
     researcher_allowed = await _researcher_allowed_chat_model_ids(db) if db else set()
     default_public_id = manager.get_public_model_id(DEFAULT_MODEL_ID)
+    # Dashboard toggle: when public access is disabled, block anonymous visitors.
+    public_access_enabled = True
+    try:
+        result = await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))
+        row = result.scalar_one_or_none()
+        public_access_enabled = bool(getattr(row, "public_access_enabled", True))
+    except Exception as e:
+        logger.warning("Could not read chat_defaults.public_access_enabled; defaulting to enabled: %s", e)
 
     async def main_stream():
+        if not public_access_enabled and user is None:
+            yield sse_event({"type": "error", "message": "registration_required"})
+            return
         # Send first byte immediately so frontend does not stay on "Pensando"
         yield sse_event({
             "type": "status",
@@ -1431,28 +1920,75 @@ async def query_stream(
             "model": default_public_id,
         })
         # Orchestrator: intent and route (run intent whenever we have a question so we can auto-enable web for recency)
-        intent = None
-        if (body.question or "").strip():
-            try:
-                intent = await asyncio.wait_for(
-                    run_metadata_intent_mapper(
-                        question=body.question,
-                        history=[msg.model_dump() for msg in body.history] if body.history else None,
-                        generator=manager.get_generator(DEFAULT_MODEL_ID),
-                    ),
-                    timeout=20.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Intent mapper timeout (20s); using default intent")
         has_image = bool(body.image and len(body.image) > 50)
         has_file = bool((body.file_context or "").strip())
-        route = orchestrate_route(body.question, has_image, has_file, body.research_mode, intent)
-        logger.info("Orchestrator route: %s (research_mode=%s, clinical_risk=%s)", route, body.research_mode, (intent or {}).get("clinical_risk"))
+        intent = None
+        q_text = (body.question or "").strip()
+        if q_text:
+            if heuristic_conversation_only(body.question) and not has_image and not has_file:
+                intent = conversation_only_default_intent()
+                logger.info("Intent mapper skipped (heuristic conversation-only)")
+            elif (
+                not has_image
+                and not has_file
+                and not body.research_mode
+                and len(q_text) <= 180
+            ):
+                # Fast path: for normal short chat turns, rely on deterministic heuristics
+                # to avoid slow first-token latency when DEFAULT_MODEL_ID is GPT-5.x.
+                heur_ts = infer_tool_sources_heuristic(body.question, None)
+                if any(heur_ts.values()):
+                    intent = {"tool_sources": heur_ts}
+                logger.info("Intent mapper skipped (fast heuristic mode)")
+            else:
+                try:
+                    intent = await asyncio.wait_for(
+                        run_metadata_intent_mapper(
+                            question=body.question,
+                            history=[msg.model_dump() for msg in body.history] if body.history else None,
+                            generator=manager.get_generator(DEFAULT_MODEL_ID),
+                        ),
+                        timeout=8.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Intent mapper timeout (8s); using heuristic fallback")
+        conv_only = is_conversation_only_turn(body.question, intent, has_image, has_file)
+        if conv_only:
+            logger.info(
+                "Orchestrator: conversation-only turn — skipping RAG/web/PubMed/OpenScholar/clinical trials and research mode",
+            )
+            body.research_mode = False
+            body.rag_search = False
+            body.web_search = False
+            body.pubmed_search = False
+            body.openscholar_search = False
+            body.clinical_trials_search = False
+            body.doctor_directory_search = False
+            body.allcan_search = False
+            if intent:
+                intent = {
+                    **intent,
+                    "needs_recent_info": False,
+                    "needs_pubmed": False,
+                    "needs_long_context": False,
+                    "needs_evidence_sources": False,
+                    "clinical_risk": CLINICAL_RISK_LOW,
+                }
+            route = ORCHESTRATOR_ROUTE_SIMPLE
+        else:
+            if not body.research_mode and getattr(body, "tool_automation", True):
+                plan = plan_tools_for_query(body.question, intent)
+                eff = apply_tool_plan_to_query_request(body, plan["sources"], user=user)
+                yield sse_event({
+                    "type": "status",
+                    "message": format_tool_plan_message(eff),
+                    "phase": "tool_plan",
+                    "tools": tool_labels_es(eff),
+                    "model": default_public_id,
+                })
+            route = orchestrate_route(body.question, has_image, has_file, body.research_mode, intent)
 
-        # Auto-enable web search when the user asks about current events (after model cutoff)
-        if intent and intent.get("needs_recent_info") and not body.web_search:
-            body.web_search = True
-            logger.info("Auto-enabled web search: needs_recent_info=true for question about current events")
+        logger.info("Orchestrator route: %s (research_mode=%s, clinical_risk=%s)", route, body.research_mode, (intent or {}).get("clinical_risk"))
 
         if route == ORCHESTRATOR_ROUTE_RESEARCH and _research_128k_available() and _model_access(user, ACADEMIC_MODEL_ID_128K, researcher_allowed)[0]:
             research_body = ResearchRequest(
@@ -1465,6 +2001,9 @@ async def query_stream(
                 web_search=body.web_search,
                 pubmed_search=body.pubmed_search,
                 openscholar_search=body.openscholar_search,
+                clinical_trials_search=body.clinical_trials_search,
+                doctor_directory_search=body.doctor_directory_search,
+                allcan_search=body.allcan_search,
                 num_sources=10,
                 file_context=body.file_context,
                 iterations=5,
@@ -1475,7 +2014,12 @@ async def query_stream(
                 excluded_sources=getattr(body, "excluded_sources", None) or [],
                 excluded_topics=[],
             )
-            async for evt in _research_stream_events(research_body, research_2_1=_should_use_research_21(research_body)):
+            async for evt in _research_stream_events(
+                research_body,
+                research_2_1=_should_use_research_21(research_body),
+                user=user,
+                db=db,
+            ):
                 yield evt
             return
 
@@ -1502,6 +2046,7 @@ async def query_stream(
             manager=manager,
             researcher_allowed=researcher_allowed,
             user=user,
+            db=db,
         ):
             yield evt
 
@@ -1516,6 +2061,37 @@ async def query_stream(
     )
 
 
+def _tool_transparency_system_suffix(body: QueryRequest) -> str | None:
+    """Tell the model which search backends ran so it can acknowledge web vs OMINIS honestly."""
+    parts: list[str] = []
+    if body.rag_search:
+        parts.append("OMINIS (base indexada)")
+    if body.web_search:
+        parts.append("búsqueda web")
+    if body.pubmed_search:
+        parts.append("PubMed")
+    if body.openscholar_search:
+        parts.append("OpenScholar")
+    if getattr(body, "clinical_trials_search", False):
+        parts.append("ClinicalTrials.gov")
+    if getattr(body, "doctor_directory_search", False):
+        parts.append("Directorio de médicos MX")
+    if getattr(body, "allcan_search", False):
+        parts.append("All.Can México")
+    if not parts:
+        return None
+    return (
+        "TRANSPARENCIA SOBRE HERRAMIENTAS (no repitas esta lista literalmente):\n"
+        "Para esta respuesta se activaron: "
+        + ", ".join(parts)
+        + ".\n"
+        "Si la búsqueda web está en esa lista y el usuario pedía un dato concreto que no aparecía en los documentos OMINIS, "
+        "empieza tu respuesta con UNA frase breve en español mexicano, por ejemplo: "
+        "\"Como no encontré esa información en la base indexada OMINIS, activé la búsqueda web para complementar.\" "
+        "Adapta la frase al caso. Si no se usó la web, no digas que la activaste. Si no hubo datos en las fuentes, dilo con claridad."
+    )
+
+
 async def _chat_event_generator(
     *,
     body: QueryRequest,
@@ -1525,6 +2101,7 @@ async def _chat_event_generator(
     manager,
     researcher_allowed: set,
     user: User | None,
+    db: AsyncSession | None = None,
 ):
     use_128k = False
     research_generator = None
@@ -1561,17 +2138,48 @@ async def _chat_event_generator(
                     vision_generator=vision_gen,
                 )
 
-            # Status: searching
+            # Intent already computed in main_stream; use it for filtering/refinement
+            generator = research_generator if use_128k else manager.get_generator(model_id)
+            history_dicts = [msg.model_dump() for msg in body.history] if body.history else None
+            ct_allowed = user is not None
+            tools_allowed = ct_allowed
+            any_search = (
+                body.rag_search
+                or body.web_search
+                or body.pubmed_search
+                or body.openscholar_search
+                or (body.clinical_trials_search and ct_allowed)
+                or (body.doctor_directory_search and tools_allowed)
+                or (body.allcan_search and tools_allowed)
+            )
+
+            # Status: searching (explicit by tool so users can see orchestration decisions)
             search_parts = []
+            status_steps: list[str] = []
             if body.rag_search:
-                search_parts.append("base de datos")
+                search_parts.append("OMINIS")
+                status_steps.append("Consultando base indexada OMINIS...")
             if body.web_search:
-                search_parts.append("web")
+                search_parts.append("Web")
+                status_steps.append("Buscando en la web fuentes recientes y oficiales...")
             if body.pubmed_search:
                 search_parts.append("PubMed")
+                status_steps.append("Buscando evidencia biomédica en PubMed...")
+            if body.openscholar_search:
+                search_parts.append("OpenScholar")
+                status_steps.append("Investigando en OpenScholar para evidencia académica...")
+            if body.clinical_trials_search and ct_allowed:
+                search_parts.append("ClinicalTrials.gov")
+                status_steps.append("Consultando ClinicalTrials.gov (criterio México)...")
+            if body.doctor_directory_search and tools_allowed:
+                search_parts.append("Directorio MX")
+                status_steps.append("Consultando Directorio MX para especialistas...")
+            if body.allcan_search and tools_allowed:
+                search_parts.append("All.Can México")
+                status_steps.append("Consultando All.Can México para organizaciones de apoyo...")
 
             if search_parts:
-                status_msg = f"Buscando en {', '.join(search_parts)}..."
+                status_msg = f"Plan de búsqueda activado: {', '.join(search_parts)}."
             else:
                 status_msg = "Generando respuesta..."
 
@@ -1580,20 +2188,36 @@ async def _chat_event_generator(
                 "message": status_msg,
                 "model": public_model_id,
             })
+            for step in status_steps:
+                yield sse_event({
+                    "type": "status",
+                    "message": step,
+                    "model": public_model_id,
+                })
 
-            # Intent already computed in main_stream; use it for filtering/refinement
-            generator = research_generator if use_128k else manager.get_generator(model_id)
-            history_dicts = [msg.model_dump() for msg in body.history] if body.history else None
-            if body.rag_search or body.web_search or body.pubmed_search or body.openscholar_search:
+            if any_search:
                 yield sse_event({
                     "type": "status",
                     "message": "Analizando consulta...",
                     "model": public_model_id,
                 })
+                yield sse_event({
+                    "type": "status",
+                    "message": "Interpretando intención y preparando consultas de búsqueda...",
+                    "model": public_model_id,
+                })
             refined_queries: list[str] = []
 
-            # Refine queries when history or external search enabled
-            if (history_dicts and len(history_dicts) > 0) or body.web_search or body.pubmed_search or body.openscholar_search:
+            # Refine queries only when at least one search backend is on (skip for conversation-only turns)
+            if any_search and (
+                (history_dicts and len(history_dicts) > 0)
+                or body.web_search
+                or body.pubmed_search
+                or body.openscholar_search
+                or (body.clinical_trials_search and ct_allowed)
+                or (body.doctor_directory_search and tools_allowed)
+                or (body.allcan_search and tools_allowed)
+            ):
                 refined_queries = await _refine_search_query(
                     question=body.question,
                     history=history_dicts,
@@ -1601,6 +2225,28 @@ async def _chat_event_generator(
                 )
                 if refined_queries:
                     logger.info(f"LLM-refined queries: {refined_queries}")
+                    preview = " | ".join(q.strip() for q in refined_queries[:3] if q.strip())
+                    if preview:
+                        yield sse_event({
+                            "type": "status",
+                            "message": f"Consultas clave: {preview}",
+                            "model": public_model_id,
+                        })
+            elif any_search:
+                yield sse_event({
+                    "type": "status",
+                    "message": "Usando la pregunta original como consulta de búsqueda.",
+                    "model": public_model_id,
+                })
+
+            if any_search:
+                effective_queries = [q.strip() for q in (refined_queries or [body.question]) if (q or "").strip()]
+                if effective_queries:
+                    yield sse_event({
+                        "type": "status",
+                        "message": "Consultas enviadas: " + " | ".join(effective_queries[:3]),
+                        "model": public_model_id,
+                    })
 
             # Gather sources (RAG request uses intent for top_k so post-filter has enough candidates)
             raw_documents = await _gather_sources(
@@ -1613,7 +2259,59 @@ async def _chat_event_generator(
                 manager=manager,
                 refined_queries=refined_queries if refined_queries else None,
                 intent=intent,
+                clinical_trials_search=body.clinical_trials_search,
+                ct_model_id=model_id if body.clinical_trials_search and ct_allowed else None,
+                clinical_trials_allowed=ct_allowed,
+                doctor_directory_search=body.doctor_directory_search,
+                allcan_search=body.allcan_search,
+                doctor_directory_allowed=tools_allowed,
+                allcan_allowed=tools_allowed,
+                db=db,
             )
+            if any_search:
+                st_counts = Counter((d.meta or {}).get("source_type", "unknown") for d in raw_documents)
+                labels = {
+                    "rag": "OMINIS",
+                    "web": "Web",
+                    "pubmed": "PubMed",
+                    "openscholar": "OpenScholar",
+                    "clinicaltrials": "ClinicalTrials.gov",
+                    "directorio_mx": "Directorio MX",
+                    "allcan": "All.Can México",
+                }
+                pieces = [f"{labels.get(k, k)}={v}" for k, v in st_counts.items() if v > 0]
+                if pieces:
+                    yield sse_event({
+                        "type": "status",
+                        "message": "Resultados preliminares: " + ", ".join(pieces) + ".",
+                        "model": public_model_id,
+                    })
+                # Stream top findings so users can see what was actually retrieved before synthesis.
+                top_hits: list[str] = []
+                for d in raw_documents[:8]:
+                    meta = d.meta or {}
+                    st = str(meta.get("source_type", "unknown"))
+                    lbl = labels.get(st, st.upper())
+                    title = (meta.get("title") or "").strip()
+                    url = (meta.get("url") or "").strip()
+                    host = ""
+                    if url:
+                        try:
+                            host = urlparse(url).netloc.replace("www.", "")
+                        except Exception:
+                            host = ""
+                    if not title and host:
+                        title = host
+                    if title:
+                        top_hits.append(f"[{lbl}] {title[:90]}")
+                    if len(top_hits) >= 4:
+                        break
+                if top_hits:
+                    yield sse_event({
+                        "type": "status",
+                        "message": "Fuentes encontradas (muestra): " + " | ".join(top_hits),
+                        "model": public_model_id,
+                    })
 
             # RAG filtered by orchestrator: keep only docs whose taxonomy matches retrieval_constraints
             if intent and body.rag_search and raw_documents:
@@ -1625,7 +2323,24 @@ async def _chat_event_generator(
                     logger.info("RAG filtered by intent: %s -> %s docs (constraints=%s)", before, len(filtered_rag), list((k, v) for k, v in (intent.get("retrieval_constraints") or {}).items() if v))
                 raw_documents = filtered_rag + other_docs
 
-            documents = _deduplicate_and_rank(raw_documents, max_total=24)
+            # Drop off-topic/noisy hits before they affect synthesis and source UI.
+            if raw_documents:
+                before_rel = len(raw_documents)
+                raw_documents = _filter_chat_documents_by_relevance(raw_documents, body.question)
+                if len(raw_documents) != before_rel:
+                    yield sse_event({
+                        "type": "status",
+                        "message": f"Filtro de relevancia: {before_rel} → {len(raw_documents)} fuentes útiles.",
+                        "model": public_model_id,
+                    })
+
+            documents = _merge_sources_for_chat(
+                raw_documents,
+                max_total=24,
+                prioritize_clinical_trials=bool(body.clinical_trials_search and ct_allowed),
+            )
+
+            ct_keywords_sse = _clinical_trials_keywords_from_documents(documents)
 
             all_sources_list = []
             for i, doc in enumerate(documents):
@@ -1635,7 +2350,10 @@ async def _chat_event_generator(
                     all_sources_list.append(s)
 
             if all_sources_list:
-                yield sse_event({"type": "sources", "sources": all_sources_list})
+                src_evt: dict = {"type": "sources", "sources": all_sources_list}
+                if ct_keywords_sse:
+                    src_evt["clinical_trials_keywords"] = ct_keywords_sse
+                yield sse_event(src_evt)
 
             yield sse_event({
                 "type": "status",
@@ -1662,6 +2380,8 @@ async def _chat_event_generator(
                 system_prompt=getattr(model_cfg, "system_prompt", None) or None,
                 max_content_per_doc=chat_max_content,
                 med_orchestrator=(model_id_for_config == "ominis-2.0-med"),
+                refiner_hint=(model_id_for_config == DEFAULT_MODEL_ID),
+                extra_system_suffix=_tool_transparency_system_suffix(body),
             )
 
             # Step 3: Stream generation via OllamaChatGenerator
@@ -1674,30 +2394,62 @@ async def _chat_event_generator(
 
             generator = research_generator if use_128k else manager.get_generator(model_id)
 
+            _s_gpu = get_settings()
+            # Remote Ollama cold-start hints are misleading when this model uses OpenAI / Anthropic / etc.
+            _uses_remote_ollama = not (
+                getattr(model_cfg, "use_openai", False) or getattr(model_cfg, "use_anthropic", False)
+            )
+            _cold_gpu = _uses_remote_ollama and _likely_cold_gpu(_s_gpu)
             yield sse_event({
                 "type": "status",
-                "message": "Conectando con el modelo...",
+                "message": (
+                    "Iniciando GPU (30s–5 min si está fría). Puedes esperar en esta pantalla…"
+                    if _cold_gpu
+                    else "Conectando con el modelo…"
+                ),
                 "model": public_model_id,
+                "phase": "gpu_warmup" if _cold_gpu else "connecting",
             })
 
             async def run_generator():
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
-                    None,
-                    lambda: generator.run(
-                        messages=messages,
-                        streaming_callback=streaming_callback,
-                    ),
-                )
-                await chunk_queue.put(None)
-                return result
+                try:
+                    return await loop.run_in_executor(
+                        None,
+                        lambda: generator.run(
+                            messages=messages,
+                            streaming_callback=streaming_callback,
+                        ),
+                    )
+                finally:
+                    # Always unblock the SSE loop if the executor raises (e.g. OpenAI 400 unknown model).
+                    try:
+                        chunk_queue.put_nowait(None)
+                    except Exception:
+                        pass
 
             gen_task = asyncio.create_task(run_generator())
 
-            # Power and Med can need longer for first token (large or remote model); allow longer before aborting
-            generation_timeout = 180.0 if model_id == "ominis-2.0-med" else 120.0
-            heartbeat_interval = 20.0
+            # First-token deadline: cold GPU load (localhost Docker Ollama, Vast, serverless) often exceeds 120s.
+            _s = _s_gpu
+            _qst = float(getattr(_s, "query_stream_generation_timeout", 0) or 0)
+            _vct = float(getattr(_s, "vast_serverless_client_timeout", 900) or 900)
+            _baseline = max(_vct, 600.0)
+            if _qst > 0:
+                generation_timeout = _qst
+            elif model_id == "ominis-2.0-med":
+                generation_timeout = max(180.0, _baseline)
+            else:
+                generation_timeout = _baseline
+            heartbeat_interval = 25.0 if generation_timeout >= 600 else 20.0
             wait_elapsed = 0.0
+
+            # Refiner phase: when Ominis 2.0 outputs [REFINAR:med] or [REFINAR:research], we stream a second response
+            REFINAR_MED = "[REFINAR:med]"
+            REFINAR_RESEARCH = "[REFINAR:research]"
+            stream_buffer = ""
+            emitted_len = 0
+            refiner_phase: Optional[str] = None  # "med" | "research"
 
             while True:
                 try:
@@ -1712,6 +2464,8 @@ async def _chat_event_generator(
                         "type": "status",
                         "message": "El modelo está generando... (puede tardar un momento)" + status_extra,
                         "model": public_model_id,
+                        "phase": "waiting_first_token",
+                        "waitSeconds": int(wait_elapsed),
                     })
                     continue
 
@@ -1720,11 +2474,106 @@ async def _chat_event_generator(
 
                 wait_elapsed = 0.0  # reset so timeout only applies when no tokens arrive
                 token = _sanitize_text(token)
-                full_answer += token
+                stream_buffer += token
+                rest = stream_buffer[emitted_len:]
+                # Check for refiner tag (longer first to avoid partial match)
+                if REFINAR_RESEARCH in rest:
+                    pos = rest.find(REFINAR_RESEARCH)
+                    to_emit = rest[:pos]
+                    if to_emit:
+                        full_answer += to_emit
+                        chunk_count += 1
+                        yield sse_event({"type": "chunk", "text": to_emit})
+                    emitted_len += pos + len(REFINAR_RESEARCH)
+                    refiner_phase = "research"
+                elif REFINAR_MED in rest:
+                    pos = rest.find(REFINAR_MED)
+                    to_emit = rest[:pos]
+                    if to_emit:
+                        full_answer += to_emit
+                        chunk_count += 1
+                        yield sse_event({"type": "chunk", "text": to_emit})
+                    emitted_len += pos + len(REFINAR_MED)
+                    refiner_phase = "med"
+                else:
+                    # Emit only the part that cannot start a tag (hold back up to 18 chars)
+                    max_hold = 18
+                    if len(rest) > max_hold:
+                        safe = rest[:-max_hold]
+                        full_answer += safe
+                        chunk_count += 1
+                        yield sse_event({"type": "chunk", "text": safe})
+                        emitted_len = len(stream_buffer) - max_hold
+                    elif rest and "[" not in rest:
+                        full_answer += rest
+                        chunk_count += 1
+                        yield sse_event({"type": "chunk", "text": rest})
+                        emitted_len = len(stream_buffer)
+
+            # Emit any remaining buffer (after last possible tag)
+            if emitted_len < len(stream_buffer):
+                tail = stream_buffer[emitted_len:]
+                full_answer += tail
                 chunk_count += 1
-                yield sse_event({"type": "chunk", "text": token})
+                yield sse_event({"type": "chunk", "text": tail})
 
             await gen_task
+
+            # Second phase: if Ominis 2.0 requested Med or Research, stream a follow-up
+            if refiner_phase == "med":
+                yield sse_event({
+                    "type": "status",
+                    "message": "Consultando Ominis Med para una opinión clínica más precisa...",
+                    "model": public_model_id,
+                })
+                try:
+                    med_gen = manager.get_generator("ominis-2.0-med")
+                    med_cfg = get_model_config("ominis-2.0-med")
+                    med_messages = build_chat_messages(
+                        question=body.question,
+                        documents=[],  # no extra docs for refiner
+                        history=history_list + [{"role": "user", "content": body.question}, {"role": "assistant", "content": full_answer}],
+                        image_description=image_description,
+                        file_context=body.file_context or "",
+                        system_prompt=getattr(med_cfg, "system_prompt", None) or None,
+                        max_content_per_doc=400,
+                        med_orchestrator=True,
+                        refiner_hint=False,
+                    )
+                    med_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+                    def med_cb(chunk: StreamingChunk):
+                        if chunk.content:
+                            med_queue.put_nowait(chunk.content)
+
+                    async def run_med():
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(
+                            None,
+                            lambda: med_gen.run(messages=med_messages, streaming_callback=med_cb),
+                        )
+                        await med_queue.put(None)
+
+                    task_med = asyncio.create_task(run_med())
+                    while True:
+                        try:
+                            tok = await asyncio.wait_for(med_queue.get(), timeout=30.0)
+                        except asyncio.TimeoutError:
+                            yield sse_event({"type": "status", "message": "Ominis Med está generando...", "model": public_model_id})
+                            continue
+                        if tok is None:
+                            break
+                        tok = _sanitize_text(tok)
+                        full_answer += tok
+                        chunk_count += 1
+                        yield sse_event({"type": "chunk", "text": tok})
+                    await task_med
+                except Exception as e:
+                    logger.warning("Refiner Med phase failed: %s", e)
+                    full_answer += "\n\n(Ominis Med no disponible para refinar en este momento.)"
+                    yield sse_event({"type": "chunk", "text": "\n\n(Ominis Med no disponible para refinar en este momento.)"})
+            elif refiner_phase == "research":
+                # Suggested extra sources are sent on `done` as suggested_add_tools; no footer chunk.
+                pass
 
             # Any clinical response validated by Ominis 2.0 Med when enabled
             use_validator = (
@@ -1750,7 +2599,7 @@ async def _chat_event_generator(
                     logger.warning("Clinical validator skip: %s", e)
                     full_answer += VALIDATOR_UNAVAILABLE_DISCLAIMER
 
-            sources_list = _filter_cited_sources(full_answer, all_sources_list)
+            sources_list, sources_not_used = _split_sources_by_citation(full_answer, all_sources_list)
             charts: list[dict] = []
             try:
                 chart_specs = await generate_chart_specs(
@@ -1770,14 +2619,31 @@ async def _chat_event_generator(
             # Output token estimate: streaming chunk count (Ollama often 1 chunk ≈ 1 token)
             tokens_per_sec = (chunk_count / (elapsed_ms / 1000.0)) if elapsed_ms > 0 else None
 
-            yield sse_event({
+            done_evt: dict = {
                 "type": "done",
                 "answer": full_answer,
                 "sources": sources_list,
                 "charts": charts if charts else None,
                 "model": public_model_id,
                 "elapsed_ms": elapsed_ms,
-            })
+            }
+            if sources_not_used:
+                done_evt["sources_not_used"] = sources_not_used
+            if ct_keywords_sse:
+                done_evt["clinical_trials_keywords"] = ct_keywords_sse
+            try:
+                suggested_add = suggest_tools_for_followup(
+                    body.question,
+                    full_answer,
+                    intent,
+                    eff_from_body(body),
+                    user=user,
+                )
+                if suggested_add:
+                    done_evt["suggested_add_tools"] = suggested_add
+            except Exception as ex:
+                logger.debug("suggested_add_tools skip: %s", ex)
+            yield sse_event(done_evt)
 
             asyncio.create_task(
                 _log_query(
@@ -1808,7 +2674,12 @@ async def _chat_event_generator(
         yield evt
 
 
-async def _research_stream_events(body: ResearchRequest, research_2_1: bool = False):
+async def _research_stream_events(
+    body: ResearchRequest,
+    research_2_1: bool = False,
+    user: User | None = None,
+    db: AsyncSession | None = None,
+):
     """
     Research/academic mode: OpenScholar 128K when OPENSCHOLAR_128K_API_URL is set (e.g. Vast.ai).
     When research_2_1=True: deep multi-round (second round from conclusions) + section-by-section report + final assembly.
@@ -1821,7 +2692,20 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
 
     manager = get_pipeline_manager()
     generator, public_model_id, degradation_msg = _get_research_generator_and_model_id()
+    research_api_model = _backend_openai_model_for_research_stream(public_model_id)
     logger.info("Research mode: using %s", public_model_id)
+    gather_kw = {
+        "clinical_trials_search": body.clinical_trials_search,
+        "ct_model_id": (
+            DEFAULT_MODEL_ID if body.clinical_trials_search and user is not None else None
+        ),
+        "clinical_trials_allowed": user is not None,
+        "doctor_directory_search": body.doctor_directory_search,
+        "allcan_search": body.allcan_search,
+        "doctor_directory_allowed": user is not None,
+        "allcan_allowed": user is not None,
+        "db": db,
+    }
 
     start_time = time.time()
     full_answer = ""
@@ -1895,10 +2779,15 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                     rag_search=body.rag_search, web_search=body.web_search,
                     pubmed_search=body.pubmed_search, openscholar_search=body.openscholar_search,
                     num_sources=min(max(body.num_sources, 5), 8), manager=manager,
+                    **gather_kw,
                 )
                 collected.extend(docs)
             # Phase 1: filter by topic (drop obvious off-topic), then LLM relevance for plan sources.
-            candidates = _deduplicate_and_rank(collected, max_total=30)
+            candidates = _merge_sources_for_chat(
+                collected,
+                max_total=30,
+                prioritize_clinical_trials=bool(body.clinical_trials_search and user is not None),
+            )
             topic_terms = _extract_topic_terms(body.question)
             enforce_health = _topic_is_health_related(body.question)
             scored = [(d, _heuristic_source_score(d, topic_terms, enforce_health)) for d in candidates]
@@ -1960,6 +2849,7 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                     web_search=body.web_search, pubmed_search=body.pubmed_search,
                     openscholar_search=body.openscholar_search,
                     num_sources=body.num_sources, manager=manager,
+                    **gather_kw,
                 )
                 collected.extend(docs)
                 total_found += len(docs)
@@ -1980,6 +2870,7 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                         web_search=body.web_search, pubmed_search=body.pubmed_search,
                         openscholar_search=body.openscholar_search,
                         num_sources=body.num_sources, manager=manager,
+                        **gather_kw,
                     )
                     collected.extend(docs)
                     total_found += len(docs)
@@ -2107,7 +2998,7 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                 yield sse_event({"type": "status", "message": "Ronda 2: profundizando en hallazgos...", "model": public_model_id})
                 yield emit_step("round2", "Profundizando en hallazgos clave",
                     reasoning="Analizando las notas de lectura para identificar áreas que requieren mayor profundidad.")
-                deepening = await _get_deepening_queries(focus, research_notes, generator)
+                deepening = await _get_deepening_queries(focus, research_notes, generator, research_api_model)
                 for q in deepening:
                     yield sse_event({"type": "status", "message": f"Profundizando: {q[:50]}...", "model": public_model_id})
                     yield emit_step("search", f"Profundización: {q}",
@@ -2117,6 +3008,7 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                         web_search=body.web_search, pubmed_search=body.pubmed_search,
                         openscholar_search=body.openscholar_search,
                         num_sources=body.num_sources, manager=manager,
+                        **gather_kw,
                     )
                     collected.extend(docs)
                     total_found += len(docs)
@@ -2151,7 +3043,15 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                     gap_msgs = [ChatMessage.from_system(gap_sys), ChatMessage.from_user(gap_usr)]
                     loop = asyncio.get_event_loop()
                     gap_result = await asyncio.wait_for(
-                        loop.run_in_executor(None, lambda: generator.run(messages=gap_msgs, generation_kwargs={"max_tokens": 1024, "temperature": 0.3})),
+                        loop.run_in_executor(
+                            None,
+                            lambda om=research_api_model: generator.run(
+                                messages=gap_msgs,
+                                generation_kwargs=openai_chat_completion_generation_kwargs(
+                                    om, temperature=0.3, num_predict=1024
+                                ),
+                            ),
+                        ),
                         timeout=60.0,
                     )
                     gap_text = (gap_result.get("replies", [{}])[0].text or "") if gap_result.get("replies") else ""
@@ -2170,6 +3070,7 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                             web_search=body.web_search, pubmed_search=body.pubmed_search,
                             openscholar_search=body.openscholar_search,
                             num_sources=body.num_sources, manager=manager,
+                            **gather_kw,
                         )
                         collected.extend(docs)
                         total_found += len(docs)
@@ -2203,7 +3104,11 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                 rerank_if_available=True,
             )
         else:
-            documents = _deduplicate_and_rank(collected, max_total=final_max)
+            documents = _merge_sources_for_chat(
+                collected,
+                max_total=final_max,
+                prioritize_clinical_trials=bool(body.clinical_trials_search and user is not None),
+            )
         if body.excluded_sources:
             excluded_set = set(body.excluded_sources)
             before = len(documents)
@@ -2274,10 +3179,14 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                 s = _doc_to_source(doc)
                 s["ref_num"] = i + 1
                 all_sources_list.append(s)
+        ct_kw_research = _clinical_trials_keywords_from_documents(documents)
         if all_sources_list:
             # En fase 2 no enviamos la lista completa; solo las fuentes citadas en el payload "done".
             if not is_phase2:
-                yield sse_event({"type": "sources", "sources": all_sources_list})
+                rs_evt: dict = {"type": "sources", "sources": all_sources_list}
+                if ct_kw_research:
+                    rs_evt["clinical_trials_keywords"] = ct_kw_research
+                yield sse_event(rs_evt)
             if is_phase2:
                 yield emit_step("sources", f"{len(all_sources_list)} fuentes para el reporte",
                     reasoning=f"Generando reporte con {len(all_sources_list)} fuentes, citando científicamente cada origen.")
@@ -2326,7 +3235,15 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                 outline_msgs = [ChatMessage.from_system(outline_sys), ChatMessage.from_user(outline_usr)]
                 loop = asyncio.get_event_loop()
                 outline_result = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: generator.run(messages=outline_msgs, generation_kwargs={"max_tokens": 2048, "temperature": 0.3})),
+                    loop.run_in_executor(
+                        None,
+                        lambda om=research_api_model: generator.run(
+                            messages=outline_msgs,
+                            generation_kwargs=openai_chat_completion_generation_kwargs(
+                                om, temperature=0.3, num_predict=2048
+                            ),
+                        ),
+                    ),
                     timeout=90.0,
                 )
                 outline_text = (outline_result.get("replies", [{}])[0].text or "") if outline_result.get("replies") else ""
@@ -2383,7 +3300,12 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                 thread_result = await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
-                        lambda: generator.run(messages=thread_messages, generation_kwargs={"max_tokens": 320, "temperature": 0.2}),
+                        lambda om=research_api_model: generator.run(
+                            messages=thread_messages,
+                            generation_kwargs=openai_chat_completion_generation_kwargs(
+                                om, temperature=0.2, num_predict=320
+                            ),
+                        ),
                     ),
                     timeout=45.0,
                 )
@@ -2465,7 +3387,12 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                     result = await asyncio.wait_for(
                         loop.run_in_executor(
                             None,
-                            lambda m=messages_sec: generator.run(messages=m, generation_kwargs={"max_tokens": 4096, "temperature": 0.3}),
+                            lambda m=messages_sec, om=research_api_model: generator.run(
+                                messages=m,
+                                generation_kwargs=openai_chat_completion_generation_kwargs(
+                                    om, temperature=0.3, num_predict=4096
+                                ),
+                            ),
                         ),
                         timeout=section_timeout,
                     )
@@ -2473,7 +3400,11 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                     section_text = (replies[0].text or "").strip() if replies else ""
                 except Exception as e:
                     logger.warning("Research 2.1 section %s failed: %s", sec_title, e)
-                    section_text = f"\n## {sec_title}\n\n(Sección no generada por error: {str(e)[:60]})"
+                    raw = str(e)
+                    hint = _openai_non_chat_model_user_message(raw) or raw
+                    if len(hint) > 800:
+                        hint = hint[:797] + "…"
+                    section_text = f"\n## {sec_title}\n\n(Sección no generada por error: {hint})"
 
                 section_text = _normalize_citation_markers(section_text, len(section_docs))
 
@@ -2544,7 +3475,15 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                 ]
                 loop = asyncio.get_event_loop()
                 result = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: generator.run(messages=intro_messages, generation_kwargs={"max_tokens": 1024, "temperature": 0.2})),
+                    loop.run_in_executor(
+                        None,
+                        lambda om=research_api_model: generator.run(
+                            messages=intro_messages,
+                            generation_kwargs=openai_chat_completion_generation_kwargs(
+                                om, temperature=0.2, num_predict=1024
+                            ),
+                        ),
+                    ),
                     timeout=60.0,
                 )
                 replies = result.get("replies", [])
@@ -2584,6 +3523,7 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                 f.write(full_answer)
             logger.info("Research 2.1 final report saved: %s (%d chars, %d sections)", final_path, len(full_answer), len(detailed_sections))
         else:
+            ctx_budget = _research_context_token_budget(public_model_id)
             messages = build_academic_messages(
                 question=body.question,
                 documents=documents,
@@ -2596,18 +3536,23 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                 excluded_topics=body.excluded_topics or None,
                 evidence_extracts=evidence_extracts if evidence_extracts else None,
                 bias_audit=bias_audit if bias_audit else None,
+                context_token_budget=ctx_budget,
             )
 
             if is_phase2:
-                ctx_limit = MODEL_CTX_LIMIT_128K if public_model_id == ACADEMIC_MODEL_ID_128K else MODEL_CTX_LIMIT
+                ctx_limit = ctx_budget
                 input_tokens = _estimate_input_tokens_from_messages(messages)
                 space_for_output = ctx_limit - input_tokens - OUTPUT_TOKEN_BUFFER
                 max_tokens_cap = 8192 if public_model_id == ACADEMIC_MODEL_ID_128K else MAX_OUTPUT_TOKENS_CAP
                 max_tokens = max(MIN_OUTPUT_TOKENS, min(max_tokens_cap, space_for_output))
-                research_gen_kwargs = {"max_tokens": max_tokens, "temperature": 0.3}
+                research_gen_kwargs = openai_chat_completion_generation_kwargs(
+                    research_api_model, temperature=0.3, num_predict=max_tokens
+                )
                 logger.info("Research report: input_tokens≈%s, max_tokens=%s", input_tokens, max_tokens)
             else:
-                research_gen_kwargs = {"max_tokens": 800, "temperature": 0.3}
+                research_gen_kwargs = openai_chat_completion_generation_kwargs(
+                    research_api_model, temperature=0.3, num_predict=800
+                )
 
             chunk_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
 
@@ -2664,7 +3609,9 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
                 })
                 return
             except Exception as e:
-                yield sse_event({"type": "error", "message": f"Error al generar el reporte: {str(e)}"})
+                raw = str(e)
+                msg = _openai_non_chat_model_user_message(raw) or f"Error al generar el reporte: {raw}"
+                yield sse_event({"type": "error", "message": msg})
                 return
 
         # Optional: Clinical Translator (Med42) — append implications when configured and phase 2
@@ -2685,7 +3632,7 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
         full_answer = _normalize_citation_markers(full_answer, len(documents))
         full_answer = _strip_invalid_citations(full_answer, len(documents))
         full_answer = _dedupe_repeated_paragraphs(full_answer)
-        sources_list = _filter_cited_sources(full_answer, all_sources_list)
+        sources_list, sources_not_used = _split_sources_by_citation(full_answer, all_sources_list)
         charts: list[dict] = []
         answer_for_client = full_answer
         quality_result = None
@@ -2730,7 +3677,7 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
             raw = (body.question or "").strip()
             if raw:
                 report_title = raw[:80].replace("\n", " ").strip() or report_title
-        # Plan phase (not is_phase2): keep all plan sources so the user can check/uncheck; report phase: only cited sources
+        # Plan phase (not is_phase2): keep all plan sources so the user can check/uncheck; report phase: cited vs uncited
         done_sources = all_sources_list if not is_phase2 else sources_list
         payload = {
             "type": "done",
@@ -2742,6 +3689,10 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
             "is_report": is_phase2,
             "report_title": report_title if is_phase2 else None,
         }
+        if is_phase2 and sources_not_used:
+            payload["sources_not_used"] = sources_not_used
+        if ct_kw_research:
+            payload["clinical_trials_keywords"] = ct_kw_research
         if quality_result is not None:
             payload["research_quality"] = quality_result
         if degradation_msg:
@@ -2761,7 +3712,9 @@ async def _research_stream_events(body: ResearchRequest, research_2_1: bool = Fa
         )
     except Exception as e:
         logger.error(f"Research streaming error: {e}", exc_info=True)
-        yield sse_event({"type": "error", "message": str(e)})
+        raw = str(e)
+        msg = _openai_non_chat_model_user_message(raw) or raw
+        yield sse_event({"type": "error", "message": msg})
 
 
 def _should_use_research_21(body: ResearchRequest) -> bool:
@@ -2771,9 +3724,37 @@ def _should_use_research_21(body: ResearchRequest) -> bool:
 
 
 @router.post("/query-research-stream")
-async def query_research_stream(body: ResearchRequest, request: Request):
+async def query_research_stream(
+    body: ResearchRequest,
+    request: Request,
+    user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Research mode streaming (OpenScholar 128K when configured, e.g. Vast.ai). Research 2.1 if enabled."""
-    events = _research_stream_events(body, research_2_1=_should_use_research_21(body))
+    # Dashboard toggle: when public access is disabled, block anonymous visitors.
+    public_access_enabled = True
+    try:
+        result = await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))
+        row = result.scalar_one_or_none()
+        public_access_enabled = bool(getattr(row, "public_access_enabled", True))
+    except Exception as e:
+        logger.warning("Could not read chat_defaults.public_access_enabled; defaulting to enabled: %s", e)
+
+    if not public_access_enabled and user is None:
+        async def blocked_events():
+            yield sse_event({"type": "error", "message": "registration_required"})
+
+        return StreamingResponse(
+            blocked_events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    events = _research_stream_events(body, research_2_1=_should_use_research_21(body), user=user)
     return StreamingResponse(
         events,
         media_type="text/event-stream",
@@ -2790,6 +3771,7 @@ async def academic_query_stream(
     body: ResearchRequest,
     request: Request,
     user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Modo Investigación (OpenScholar 128K). Requires login. Research 2.1 if enabled in options."""
     if user is None:
@@ -2797,7 +3779,12 @@ async def academic_query_stream(
             status_code=403,
             detail={"code": "model_not_allowed", "reason": "login_required"},
         )
-    events = _research_stream_events(body, research_2_1=_should_use_research_21(body))
+    events = _research_stream_events(
+        body,
+        research_2_1=_should_use_research_21(body),
+        user=user,
+        db=db,
+    )
     return StreamingResponse(
         events,
         media_type="text/event-stream",
@@ -2812,11 +3799,25 @@ async def academic_query_stream(
 # --- Non-streaming endpoint ---
 
 @router.post("/query", response_model=QueryResponse)
-async def query(body: QueryRequest):
+async def query(
+    body: QueryRequest,
+    user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Non-streaming query endpoint using Haystack OllamaChatGenerator."""
     manager = get_pipeline_manager()
     model_id = manager.get_model_id(body.model)
     public_model_id = manager.get_public_model_id(model_id)
+    # Dashboard toggle: when public access is disabled, block anonymous visitors.
+    public_access_enabled = True
+    try:
+        result = await db.execute(select(ChatDefaults).where(ChatDefaults.id == 1))
+        row = result.scalar_one_or_none()
+        public_access_enabled = bool(getattr(row, "public_access_enabled", True))
+    except Exception as e:
+        logger.warning("Could not read chat_defaults.public_access_enabled; defaulting to enabled: %s", e)
+    if not public_access_enabled and user is None:
+        raise HTTPException(status_code=403, detail={"code": "registration_required", "reason": "login_required"})
 
     start_time = time.time()
 
@@ -2832,6 +3833,7 @@ async def query(body: QueryRequest):
         )
 
     # Gather sources
+    ct_allowed = user is not None
     raw_documents = await _gather_sources(
         question=body.question,
         rag_search=body.rag_search,
@@ -2840,8 +3842,20 @@ async def query(body: QueryRequest):
         openscholar_search=body.openscholar_search,
         num_sources=body.num_sources,
         manager=manager,
+        clinical_trials_search=body.clinical_trials_search,
+        ct_model_id=model_id if body.clinical_trials_search and ct_allowed else None,
+        clinical_trials_allowed=ct_allowed,
+        doctor_directory_search=body.doctor_directory_search,
+        allcan_search=body.allcan_search,
+        doctor_directory_allowed=ct_allowed,
+        allcan_allowed=ct_allowed,
+        db=db,
     )
-    documents = _deduplicate_and_rank(raw_documents, max_total=8)
+    documents = _merge_sources_for_chat(
+        raw_documents,
+        max_total=8,
+        prioritize_clinical_trials=bool(body.clinical_trials_search and ct_allowed),
+    )
 
     # Build ChatMessages and generate; use per-model system prompt if set
     model_cfg = get_model_config(model_id)
@@ -2852,6 +3866,7 @@ async def query(body: QueryRequest):
         image_description=image_description,
         file_context=body.file_context or "",
         system_prompt=getattr(model_cfg, "system_prompt", None) or None,
+        extra_system_suffix=_tool_transparency_system_suffix(body),
     )
 
     generator = manager.get_generator(model_id)
@@ -2863,7 +3878,7 @@ async def query(body: QueryRequest):
         _doc_to_source(doc) for doc in documents
         if doc.content and doc.meta.get("url")
     ]
-    sources = _filter_cited_sources(answer, all_sources)
+    sources, sources_not_used = _split_sources_by_citation(answer, all_sources)
     charts: list[dict] = []
     try:
         chart_specs = await generate_chart_specs(
@@ -2898,6 +3913,7 @@ async def query(body: QueryRequest):
         query=body.question,
         model=public_model_id,
         charts=charts if charts else None,
+        sources_not_used=sources_not_used if sources_not_used else None,
     )
 
 

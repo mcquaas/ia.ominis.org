@@ -2,7 +2,7 @@
 
 This guide describes how to host **Ominis Power** (gpt-oss via vLLM) on [Vast.ai](https://www.vast.ai) instead of a fixed EC2 GPU, and how to get the **best availability** for ia.ominis.org.
 
-References: [Vast.ai docs](https://docs.vast.ai/documentation/get-started), [GPT_OSS_POWER.md](GPT_OSS_POWER.md).
+References: [Vast.ai docs](https://docs.vast.ai/documentation/get-started), [GPT_OSS_POWER.md](GPT_OSS_POWER.md). For **pay-per-use Serverless** (scale-down GPU billing) vs always-on instances, see [VAST_SERVERLESS.md](VAST_SERVERLESS.md).
 
 ---
 

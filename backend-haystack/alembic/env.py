@@ -20,10 +20,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app.database import Base
 from app.auth.models import User  # noqa: F401 - import so metadata registers
-from app.api_keys.models import APIKey  # noqa: F401
+from app.api_keys.models import APIKey, APIKeyRequestLog  # noqa: F401
 from app.admin.models import RAGSource, QueryLog, SystemStat, ChatDefaults, LLMModelConfig  # noqa: F401
 from app.chat.models import Conversation, ChatMessage  # noqa: F401
 from app.feedback.models import MessageFeedback  # noqa: F401
+from app.doctor_directory.models import DoctorDirectoryProfile, DoctorDirectoryScrapeRun  # noqa: F401
 
 config = context.config
 

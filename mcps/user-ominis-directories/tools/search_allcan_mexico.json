@@ -1,0 +1,17 @@
+{
+  "name": "search_allcan_mexico",
+  "description": "Search All.Can México organizations (Strapi). Semantic ranking aligns Spanish/English medical terms (e.g. oncology vs oncología).",
+  "arguments": {
+    "type": "object",
+    "properties": {
+      "q": { "type": "string", "description": "Free-text search across name, type, specialty, address, city" },
+      "organization_type": { "type": "string", "description": "Strapi organization type filter (maps to type=)" },
+      "state": { "type": "string", "description": "Mexican state" },
+      "specialty": { "type": "string", "description": "Focus area / cancer type label" },
+      "city": { "type": "string", "description": "City or locality" },
+      "page": { "type": "integer", "description": "Page number (1-based)" },
+      "page_size": { "type": "integer", "description": "Page size (max 200)" },
+      "semantic": { "type": "boolean", "description": "Rank by semantic similarity (default true)" }
+    }
+  }
+}

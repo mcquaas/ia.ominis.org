@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import Header from '@/components/Header';
 import Link from 'next/link';
 import {
   getSystemStats,
+  getQuerySeries,
   getUsers,
   getHealth,
   toggleUserBlock,
@@ -29,9 +30,25 @@ import {
   updateSiteConfig,
   getServersStatus,
   getLLMModelsConfig,
+  getLLMModelProviders,
+  getVisionLlmConfig,
+  postLLMListModels,
+  putVisionLlmConfig,
   updateLLMModelConfig,
+  getDoctorDirectoryStats,
+  getDoctorDirectoryRuns,
+  startDoctorDirectoryScrape,
+  downloadDoctorDirectoryCsv,
+  getDashboardOverview,
 } from '@/services/auth';
-import type { InstanceDetails, ServerWithModels, LLMModelConfigItem } from '@/services/auth';
+import type { DoctorDirectoryScrapeRun } from '@/services/auth';
+import type {
+  InstanceDetails,
+  ServerWithModels,
+  LLMModelConfigItem,
+  LlmProviderOption,
+  VisionLlmConfig,
+} from '@/services/auth';
 import { listFeedback, REASON_CATEGORIES } from '@/services/feedback';
 import type { FeedbackOut } from '@/services/feedback';
 
@@ -65,7 +82,67 @@ function formatFeedbackDate(createdAt: string | undefined): string {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('es-MX');
 }
 
-import type { SystemStats, User } from '@/types/auth';
+import type { DashboardLevel, DashboardOverview, HealthSnapshot, QuerySeries, SystemStats, User } from '@/types/auth';
+import { QuerySeriesChart } from '@/components/dashboard/QuerySeriesChart';
+
+function StatusGlyph({ level, compact }: { level: DashboardLevel; compact?: boolean }) {
+  const w = compact ? 'w-3 text-[11px] leading-none' : 'w-4';
+  if (level === 'ok') {
+    return <span className={`text-green-400 shrink-0 ${w} text-center font-semibold`} aria-hidden>✓</span>;
+  }
+  if (level === 'warning') {
+    return (
+      <span className={`text-amber-400 shrink-0 ${w} text-center`} aria-hidden title="Advertencia">
+        ⚠
+      </span>
+    );
+  }
+  return (
+    <span className={`text-red-400 shrink-0 ${w} text-center font-semibold`} aria-hidden title="No disponible">
+      ✗
+    </span>
+  );
+}
+
+function formatSourceCount(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return '';
+  return n.toLocaleString('es-MX');
+}
+
+function formatIngestionDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function formatServerCostLine(sv: {
+  estimated_daily_usd?: number | null;
+  estimated_monthly_usd?: number | null;
+}): string | null {
+  const parts: string[] = [];
+  if (sv.estimated_daily_usd != null && !Number.isNaN(sv.estimated_daily_usd)) {
+    parts.push(`~US$${sv.estimated_daily_usd.toFixed(2)}/día`);
+  }
+  if (sv.estimated_monthly_usd != null && !Number.isNaN(sv.estimated_monthly_usd)) {
+    parts.push(`~US$${sv.estimated_monthly_usd.toLocaleString('es-MX')}/mes`);
+  }
+  if (parts.length === 0) return null;
+  return `${parts.join(' · ')} (on-demand aprox.)`;
+}
+
+/** Human-readable Ollama / Vast default route status (not "model name" — use for LLM routing). */
+function inferenceStatusLabel(s: string | undefined): string {
+  switch ((s || '').toLowerCase()) {
+    case 'online':
+      return 'En línea';
+    case 'serverless':
+      return 'Vast (serverless)';
+    case 'offline':
+      return 'Sin Ollama';
+    default:
+      return s || '—';
+  }
+}
 
 // ---------- tiny stat card ----------
 function StatCard({ label, value, sub, color = 'cyan' }: { label: string; value: string | number; sub?: string; color?: string }) {
@@ -132,36 +209,98 @@ function LLMModelConfigCard({
   saving: boolean;
   onSave: (body: Parameters<typeof updateLLMModelConfig>[1]) => Promise<void>;
 }) {
+  const [providerOptions, setProviderOptions] = useState<LlmProviderOption[]>([]);
   const [displayName, setDisplayName] = useState(model.display_name);
   const [versionLabel, setVersionLabel] = useState(model.version_label);
   const [description, setDescription] = useState(model.description);
+  const [llmProvider, setLlmProvider] = useState(model.llm_provider || 'ominis');
   const [backendModel, setBackendModel] = useState(model.backend_model);
   const [backendUrlOverride, setBackendUrlOverride] = useState(model.backend_url_override ?? '');
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [apiToken, setApiToken] = useState('');
   const [systemPrompt, setSystemPrompt] = useState(model.system_prompt ?? '');
   const [temperature, setTemperature] = useState(String(model.temperature ?? ''));
   const [numPredict, setNumPredict] = useState(String(model.num_predict ?? ''));
   const [extraParamsJson, setExtraParamsJson] = useState(() => JSON.stringify(model.extra_params ?? {}, null, 2));
   const [isDefault, setIsDefault] = useState(model.is_default);
   const [availableForResearcher, setAvailableForResearcher] = useState(model.available_for_researcher !== false);
+
+  useEffect(() => {
+    getLLMModelProviders()
+      .then((r) => setProviderOptions(r.providers || []))
+      .catch(() => setProviderOptions([]));
+  }, []);
+
+  const credentialKey =
+    providerOptions.find((p) => p.id === llmProvider)?.credential_key ||
+    ({ ominis: 'ominis', openai: 'openai', google: 'google', deepseek: 'deepseek', claude: 'claude' } as Record<string, string>)[
+      llmProvider
+    ] ||
+    '';
+  const needsApiToken = Boolean(credentialKey);
+  const hasStoredToken = Boolean(credentialKey && model.provider_keys_present?.[credentialKey]);
+
+  const refreshModelList = useCallback(async () => {
+    setLoadingModels(true);
+    try {
+      const token = apiToken.trim() || undefined;
+      const { models } = await postLLMListModels({
+        model_id: model.model_id,
+        provider_id: llmProvider,
+        api_token: token,
+      });
+      setModelOptions(models || []);
+    } catch {
+      setModelOptions([]);
+    } finally {
+      setLoadingModels(false);
+    }
+  }, [apiToken, llmProvider, model.model_id]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    void refreshModelList();
+  }, [expanded, llmProvider, model.model_id, refreshModelList]);
+
   // Sync from model when it changes (e.g. after save)
   useEffect(() => {
     setDisplayName(model.display_name);
     setVersionLabel(model.version_label);
     setDescription(model.description);
+    setLlmProvider(model.llm_provider || 'ominis');
     setBackendModel(model.backend_model);
     setBackendUrlOverride(model.backend_url_override ?? '');
+    setApiToken('');
     setSystemPrompt(model.system_prompt ?? '');
     setTemperature(String(model.temperature ?? ''));
     setNumPredict(String(model.num_predict ?? ''));
     setExtraParamsJson(JSON.stringify(model.extra_params ?? {}, null, 2));
     setIsDefault(model.is_default);
     setAvailableForResearcher(model.available_for_researcher !== false);
-  }, [model.model_id, model.display_name, model.version_label, model.description, model.backend_model, model.backend_url_override, model.system_prompt, model.temperature, model.num_predict, model.extra_params, model.is_default, model.available_for_researcher]);
+  }, [
+    model.model_id,
+    model.display_name,
+    model.version_label,
+    model.description,
+    model.llm_provider,
+    model.backend_model,
+    model.backend_url_override,
+    model.system_prompt,
+    model.temperature,
+    model.num_predict,
+    model.extra_params,
+    model.is_default,
+    model.available_for_researcher,
+    model.provider_keys_present,
+  ]);
+
   const handleSave = () => {
     const body: Parameters<typeof updateLLMModelConfig>[1] = {
       display_name: displayName,
       version_label: versionLabel || undefined,
       description: description || undefined,
+      llm_provider: llmProvider,
       backend_model: backendModel || undefined,
       backend_url_override: backendUrlOverride.trim() || undefined,
       system_prompt: systemPrompt.trim() || undefined,
@@ -170,6 +309,9 @@ function LLMModelConfigCard({
       is_default: isDefault,
       available_for_researcher: availableForResearcher,
     };
+    if (credentialKey && apiToken.trim()) {
+      body.provider_credentials_patch = { [credentialKey]: apiToken.trim() };
+    }
     try {
       const extra = JSON.parse(extraParamsJson || '{}') as Record<string, unknown>;
       if (extra && typeof extra === 'object' && Object.keys(extra).length) body.extra_params = extra;
@@ -178,6 +320,13 @@ function LLMModelConfigCard({
     }
     onSave(body);
   };
+
+  const modelSelectOptions = useMemo(() => {
+    if (!backendModel.trim()) return modelOptions;
+    if (modelOptions.includes(backendModel)) return modelOptions;
+    return [...modelOptions, backendModel];
+  }, [modelOptions, backendModel]);
+
   return (
     <div className="bg-white/5 border border-white/10 rounded-lg overflow-hidden">
       <button
@@ -210,12 +359,89 @@ function LLMModelConfigCard({
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
-              <label className="block text-[10px] text-gray-500 uppercase mb-1">Backend ({model.backend_type}) — modelo</label>
-              <input type="text" value={backendModel} onChange={(e) => setBackendModel(e.target.value)} placeholder="ej. qwen2.5:14b" className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white" />
+              <label className="block text-[10px] text-gray-500 uppercase mb-1">Proveedor (backend)</label>
+              <select
+                value={llmProvider}
+                onChange={(e) => {
+                  setLlmProvider(e.target.value);
+                  setBackendModel('');
+                }}
+                className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+              >
+                {(providerOptions.length ? providerOptions : [{ id: 'ominis', label: 'OMINIS (Ollama)', credential_key: '' }]).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
-              <label className="block text-[10px] text-gray-500 uppercase mb-1">URL override (opcional)</label>
-              <input type="text" value={backendUrlOverride} onChange={(e) => setBackendUrlOverride(e.target.value)} placeholder="http://host:11434" className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white" />
+              <label className="block text-[10px] text-gray-500 uppercase mb-1">
+                Modelo remoto {loadingModels ? '(cargando…)' : ''}
+              </label>
+              {modelSelectOptions.length > 0 ? (
+                <select
+                  value={backendModel}
+                  onChange={(e) => setBackendModel(e.target.value)}
+                  className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+                >
+                  <option value="">— Seleccionar —</option>
+                  {modelSelectOptions.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={backendModel}
+                  onChange={(e) => setBackendModel(e.target.value)}
+                  placeholder={llmProvider === 'ominis' ? 'ej. qwen2.5:14b' : 'Lista vacía: escribe el id del modelo'}
+                  className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+                />
+              )}
+            </div>
+          </div>
+          {needsApiToken && (
+            <div>
+              <label className="block text-[10px] text-gray-500 uppercase mb-1">API token (se guarda cifrado por proveedor)</label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={apiToken}
+                onChange={(e) => setApiToken(e.target.value)}
+                placeholder={hasStoredToken ? 'Clave guardada — escribe solo para reemplazar' : 'Pega la API key'}
+                className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+              />
+              {hasStoredToken && !apiToken.trim() && (
+                <p className="text-[10px] text-gray-500 mt-1">Hay una clave guardada para este proveedor. Las demás claves se conservan al cambiar de proveedor.</p>
+              )}
+            </div>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[10px] text-gray-500 uppercase mb-1">
+                URL override {llmProvider === 'ominis' ? '(Ollama)' : '(solo OMINIS; ignorado en APIs cloud)'}
+              </label>
+              <input
+                type="text"
+                value={backendUrlOverride}
+                onChange={(e) => setBackendUrlOverride(e.target.value)}
+                placeholder="http://host:11434"
+                disabled={llmProvider !== 'ominis'}
+                className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white disabled:opacity-40"
+              />
+            </div>
+            <div className="flex items-end">
+              <button
+                type="button"
+                onClick={() => void refreshModelList()}
+                disabled={loadingModels}
+                className="text-xs px-3 py-1.5 border border-white/20 rounded text-gray-300 hover:bg-white/5 disabled:opacity-50"
+              >
+                Actualizar lista de modelos
+              </button>
             </div>
           </div>
           <div>
@@ -253,6 +479,231 @@ function LLMModelConfigCard({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------- Vision LLM (images / multimodal) ----------
+function VisionLLMConfigSection({
+  showError,
+  showMsg,
+}: {
+  showError: (s: string) => void;
+  showMsg: (s: string) => void;
+}) {
+  const [cfg, setCfg] = useState<VisionLlmConfig | null>(null);
+  const [visionLoadError, setVisionLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [providerOptions, setProviderOptions] = useState<LlmProviderOption[]>([]);
+  const [llmProvider, setLlmProvider] = useState('ominis');
+  const [backendModel, setBackendModel] = useState('');
+  const [ollamaUrl, setOllamaUrl] = useState('');
+  const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
+  const [apiToken, setApiToken] = useState('');
+  const [modelOpts, setModelOpts] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [visionReady, setVisionReady] = useState(false);
+
+  useEffect(() => {
+    getLLMModelProviders()
+      .then((r) => setProviderOptions(r.providers || []))
+      .catch(() => setProviderOptions([]));
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    getVisionLlmConfig()
+      .then((c) => {
+        setCfg(c);
+        setVisionLoadError(null);
+        setLlmProvider(c.llm_provider || 'ominis');
+        setBackendModel(c.backend_model || '');
+        setOllamaUrl(c.ollama_url || '');
+        setOpenaiBaseUrl(c.openai_base_url || '');
+        setApiToken('');
+        setVisionReady(true);
+      })
+      .catch((e) => {
+        setCfg(null);
+        setVisionLoadError(e instanceof Error ? e.message : 'Error al cargar la configuración de visión');
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const credentialKey =
+    providerOptions.find((p) => p.id === llmProvider)?.credential_key ||
+    ({ ominis: 'ominis', openai: 'openai', google: 'google', deepseek: 'deepseek', claude: 'claude' } as Record<string, string>)[
+      llmProvider
+    ] ||
+    '';
+  const needsToken = Boolean(credentialKey);
+  const hasStored = Boolean(credentialKey && cfg?.provider_keys_present?.[credentialKey]);
+
+  const refreshModels = useCallback(async () => {
+    setLoadingModels(true);
+    try {
+      const { models } = await postLLMListModels({
+        model_id: '__vision__',
+        provider_id: llmProvider,
+        api_token: apiToken.trim() || undefined,
+      });
+      setModelOpts(models || []);
+    } catch {
+      setModelOpts([]);
+    } finally {
+      setLoadingModels(false);
+    }
+  }, [apiToken, llmProvider]);
+
+  useEffect(() => {
+    if (!visionReady) return;
+    void refreshModels();
+  }, [llmProvider, apiToken, visionReady, refreshModels]);
+
+  const modelSelectOptions = useMemo(() => {
+    if (!backendModel.trim()) return modelOpts;
+    if (modelOpts.includes(backendModel)) return modelOpts;
+    return [...modelOpts, backendModel];
+  }, [modelOpts, backendModel]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const patch: Record<string, string> = {};
+      if (credentialKey && apiToken.trim()) patch[credentialKey] = apiToken.trim();
+      const next = await putVisionLlmConfig({
+        llm_provider: llmProvider,
+        backend_model: backendModel || undefined,
+        ollama_url: ollamaUrl.trim() || undefined,
+        openai_base_url: openaiBaseUrl.trim() || undefined,
+        provider_credentials_patch: Object.keys(patch).length ? patch : undefined,
+      });
+      setCfg(next);
+      setApiToken('');
+      showMsg('Vision guardada. Se usa para analizar imágenes en el chat.');
+    } catch (e) {
+      showError(e instanceof Error ? e.message : 'Error al guardar');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <p className="text-[11px] text-gray-500 mb-4">Cargando Vision…</p>;
+  }
+  if (!cfg) {
+    return (
+      <p className="text-[11px] text-amber-400/90 mb-4">
+        {visionLoadError || 'No disponible.'}
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] text-gray-500 mb-2">
+        Modelo usado para <strong className="text-gray-300">analizar imágenes</strong> en el chat (independiente de los modelos de texto). Con OMINIS indica URL de tu Ollama y, si aplica, API key (proxy/Bearer).
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-[10px] text-gray-500 uppercase mb-1">Proveedor</label>
+          <select
+            value={llmProvider}
+            onChange={(e) => {
+              setLlmProvider(e.target.value);
+              setBackendModel('');
+            }}
+            className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+          >
+            {(providerOptions.length ? providerOptions : [{ id: 'ominis', label: 'OMINIS (Ollama)', credential_key: 'ominis' }]).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] text-gray-500 uppercase mb-1">Modelo {loadingModels ? '(cargando…)' : ''}</label>
+          {modelSelectOptions.length > 0 ? (
+            <select
+              value={backendModel}
+              onChange={(e) => setBackendModel(e.target.value)}
+              className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+            >
+              <option value="">— Seleccionar —</option>
+              {modelSelectOptions.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={backendModel}
+              onChange={(e) => setBackendModel(e.target.value)}
+              placeholder="ej. minicpm-v o qwen2.5-vl"
+              className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+            />
+          )}
+        </div>
+      </div>
+      {llmProvider === 'ominis' && (
+        <div>
+          <label className="block text-[10px] text-gray-500 uppercase mb-1">URL Ollama (Vision)</label>
+          <input
+            type="text"
+            value={ollamaUrl}
+            onChange={(e) => setOllamaUrl(e.target.value)}
+            placeholder="http://host:11434"
+            className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+          />
+        </div>
+      )}
+      {llmProvider !== 'ominis' && (
+        <div>
+          <label className="block text-[10px] text-gray-500 uppercase mb-1">URL base OpenAI-compatible (opcional)</label>
+          <input
+            type="text"
+            value={openaiBaseUrl}
+            onChange={(e) => setOpenaiBaseUrl(e.target.value)}
+            placeholder="Vacío = URL por defecto del proveedor"
+            className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+          />
+        </div>
+      )}
+      {needsToken && (
+        <div>
+          <label className="block text-[10px] text-gray-500 uppercase mb-1">API token (Vision)</label>
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={apiToken}
+            onChange={(e) => setApiToken(e.target.value)}
+            placeholder={hasStored ? 'Clave guardada — escribe solo para reemplazar' : 'Pega la API key'}
+            className="w-full px-2 py-1.5 bg-black/30 border border-white/20 rounded text-sm text-white"
+          />
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => void refreshModels()}
+          disabled={loadingModels}
+          className="text-xs px-3 py-1.5 border border-white/20 rounded text-gray-300 hover:bg-white/5 disabled:opacity-50"
+        >
+          Actualizar lista de modelos
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSave()}
+          disabled={saving}
+          className="px-4 py-2 bg-cyan-500/30 text-cyan-200 rounded text-sm hover:bg-cyan-500/40 disabled:opacity-50"
+        >
+          {saving ? 'Guardando…' : 'Guardar Vision'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -304,7 +755,10 @@ export default function DashboardPage() {
   const { user, loading: authLoading, isAdmin, isSuperAdmin } = useAuth();
 
   const [stats, setStats] = useState<SystemStats | null>(null);
-  const [health, setHealth] = useState<{ status: string; model: { version: string; status: string }; servers: Record<string, string> } | null>(null);
+  const [dashboardOverview, setDashboardOverview] = useState<DashboardOverview | null>(null);
+  const [querySeries, setQuerySeries] = useState<QuerySeries | null>(null);
+  const [querySeriesError, setQuerySeriesError] = useState<string>('');
+  const [health, setHealth] = useState<HealthSnapshot | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [storeStats, setStoreStats] = useState<{ totalDocuments: number; embeddingModel: string; storageType: string } | null>(null);
   const [healthDatastoreStatus, setHealthDatastoreStatus] = useState<{
@@ -357,7 +811,16 @@ export default function DashboardPage() {
   const [researchInstanceDetails, setResearchInstanceDetails] = useState<Record<'openscholar' | 'openscholar_128k', InstanceDetails | undefined>>({ openscholar: undefined, openscholar_128k: undefined });
   const [serversStatus, setServersStatus] = useState<ServerWithModels[]>([]);
   const [serverActionKey, setServerActionKey] = useState<string | null>(null);
-  const [chatDefaults, setChatDefaults] = useState<{ research_mode: boolean; rag_search: boolean; web_search: boolean; pubmed_search: boolean; openscholar_search: boolean; research_2_1: boolean; default_model?: string } | null>(null);
+  const [chatDefaults, setChatDefaults] = useState<{
+    research_mode: boolean;
+    rag_search: boolean;
+    web_search: boolean;
+    pubmed_search: boolean;
+    openscholar_search: boolean;
+    research_2_1: boolean;
+    public_access_enabled: boolean;
+    default_model?: string;
+  } | null>(null);
   const [chatDefaultsSaving, setChatDefaultsSaving] = useState(false);
   const [llmServersStatus, setLlmServersStatus] = useState<{
     servers: Array<{ label: string; url: string | null; reachable: boolean; models: string[]; note?: string; error?: string }>;
@@ -365,6 +828,20 @@ export default function DashboardPage() {
   const [llmModelsConfig, setLlmModelsConfig] = useState<LLMModelConfigItem[]>([]);
   const [llmConfigExpandedId, setLlmConfigExpandedId] = useState<string | null>(null);
   const [llmConfigSavingId, setLlmConfigSavingId] = useState<string | null>(null);
+
+  const [doctorDirStats, setDoctorDirStats] = useState<{
+    total_profiles: number;
+    by_source: Record<string, number>;
+    last_scraped_at: string | null;
+  } | null>(null);
+  const [doctorDirRuns, setDoctorDirRuns] = useState<DoctorDirectoryScrapeRun[]>([]);
+  const [doctorScrapeMax, setDoctorScrapeMax] = useState(40);
+  const [doctorScrapeDelay, setDoctorScrapeDelay] = useState(0.6);
+  const [doctorScrapeBusy, setDoctorScrapeBusy] = useState(false);
+  const [doctorCsvExporting, setDoctorCsvExporting] = useState(false);
+  const [doctorScrapeSource, setDoctorScrapeSource] = useState<
+    'topdoctors_mx' | 'doctoralia_mx' | 'doctoranytime_mx'
+  >('topdoctors_mx');
 
   type DashboardTab = 'overview' | 'servers' | 'llms' | 'rag' | 'users' | 'options';
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
@@ -381,7 +858,7 @@ export default function DashboardPage() {
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const [feedbackModalItem, setFeedbackModalItem] = useState<FeedbackOut | null>(null);
   const [feedbackModalInfra, setFeedbackModalInfra] = useState<{
-    health: typeof health;
+        health: HealthSnapshot | null;
     gpuPerf: typeof gpuPerf;
     serverPerf: typeof serverPerf;
   } | null>(null);
@@ -391,9 +868,10 @@ export default function DashboardPage() {
     setLoadingData(true);
     setError('');
     try {
-      const [healthRes, statsRes, storeRes, storeHealthRes, storeActivityRes, perfRes, gpuRes] = await Promise.allSettled([
+      const [healthRes, statsRes, qsRes, storeRes, storeHealthRes, storeActivityRes, perfRes, gpuRes] = await Promise.allSettled([
         getHealth(),
         getSystemStats(),
+        getQuerySeries(),
         getStoreStats(),
         getHealthDatastoreStatus(),
         getHealthDatastoreRecentActivity(30),
@@ -401,8 +879,16 @@ export default function DashboardPage() {
         getGpuServerPerformance(),
       ]);
 
-      if (healthRes.status === 'fulfilled') setHealth(healthRes.value as typeof health);
+      if (healthRes.status === 'fulfilled') setHealth(healthRes.value as HealthSnapshot);
       if (statsRes.status === 'fulfilled') setStats((statsRes.value as { data: SystemStats }).data);
+      if (qsRes.status === 'fulfilled') {
+        setQuerySeries((qsRes.value as { data: QuerySeries }).data);
+        setQuerySeriesError('');
+      } else {
+        setQuerySeries(null);
+        const r = qsRes.reason;
+        setQuerySeriesError(r instanceof Error ? r.message : 'No se pudieron cargar las series de consultas.');
+      }
       if (storeRes.status === 'fulfilled') setStoreStats(storeRes.value as typeof storeStats);
       if (storeHealthRes.status === 'fulfilled') setHealthDatastoreStatus(storeHealthRes.value as typeof healthDatastoreStatus);
       if (storeActivityRes.status === 'fulfilled') {
@@ -413,24 +899,54 @@ export default function DashboardPage() {
       if (gpuRes.status === 'fulfilled') setGpuPerf(gpuRes.value as typeof gpuPerf);
 
       if (isAdmin) {
-        try {
-          const [ri, li, cd, lss, serversRes, llmConfigRes] = await Promise.all([
-            getResearchInstanceStatus(),
-            getLlmInstanceStatus(),
-            getChatDefaults(),
-            getLlmServersStatus(),
-            getServersStatus().catch(() => ({ servers: [] })),
-            getLLMModelsConfig().catch(() => []),
-          ]);
+        const [riRes, liRes, cdRes, lssRes, serversRes, llmConfigRes, dashRes] = await Promise.allSettled([
+          getResearchInstanceStatus(),
+          getLlmInstanceStatus(),
+          getChatDefaults(),
+          getLlmServersStatus(),
+          getServersStatus(),
+          getLLMModelsConfig(),
+          getDashboardOverview(),
+        ]);
+
+        if (riRes.status === 'fulfilled') {
+          const ri = riRes.value;
           setResearchInstances({ openscholar: ri.openscholar, openscholar_128k: ri.openscholar_128k });
           setResearchInstanceDetails(ri.details ?? { openscholar: undefined, openscholar_128k: undefined });
+        }
+        if (liRes.status === 'fulfilled') {
+          const li = liRes.value;
           setLlmInstances({ 'ominis-2.0': li['ominis-2.0'], 'ominis-2.0-med': li['ominis-2.0-med'] ?? null });
           setLlmInstanceDetails(li.details ?? { 'ominis-2.0': undefined, 'ominis-2.0-med': undefined });
-          setChatDefaults(cd);
-          setLlmServersStatus(lss);
-          setServersStatus(serversRes?.servers ?? []);
-          setLlmModelsConfig(Array.isArray(llmConfigRes) ? llmConfigRes : []);
-        } catch { /* non-critical */ }
+        }
+        if (cdRes.status === 'fulfilled') {
+          setChatDefaults(cdRes.value);
+        } else {
+          setChatDefaults(null);
+        }
+        if (lssRes.status === 'fulfilled') {
+          setLlmServersStatus(lssRes.value);
+        } else {
+          setLlmServersStatus({ servers: [] });
+        }
+        if (serversRes.status === 'fulfilled') {
+          setServersStatus(serversRes.value?.servers ?? []);
+        } else {
+          setServersStatus([]);
+        }
+        if (llmConfigRes.status === 'fulfilled') {
+          const v = llmConfigRes.value;
+          setLlmModelsConfig(Array.isArray(v) ? v : []);
+        } else {
+          setLlmModelsConfig([]);
+        }
+        if (dashRes.status === 'fulfilled') {
+          setDashboardOverview((dashRes.value as { data: DashboardOverview }).data);
+          const h = (dashRes.value as { data: DashboardOverview }).data?.health;
+          if (h) setHealth(h);
+        } else {
+          setDashboardOverview(null);
+        }
       }
 
       if (isSuperAdmin) {
@@ -469,7 +985,7 @@ export default function DashboardPage() {
         getServerPerformance(),
       ]);
       setFeedbackModalInfra({
-        health: hRes.status === 'fulfilled' ? (hRes.value as typeof health) : null,
+        health: hRes.status === 'fulfilled' ? (hRes.value as HealthSnapshot) : null,
         gpuPerf: gRes.status === 'fulfilled' ? (gRes.value as typeof gpuPerf) : null,
         serverPerf: sRes.status === 'fulfilled' ? (sRes.value as typeof serverPerf) : null,
       });
@@ -483,6 +999,22 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!authLoading && isAdmin) loadData();
   }, [authLoading, isAdmin, loadData]);
+
+  const loadDoctorDirectory = useCallback(async () => {
+    if (!isAdmin) return;
+    try {
+      const [stats, runs] = await Promise.all([getDoctorDirectoryStats(), getDoctorDirectoryRuns(25)]);
+      setDoctorDirStats(stats);
+      setDoctorDirRuns(Array.isArray(runs) ? runs : []);
+    } catch {
+      setDoctorDirStats(null);
+      setDoctorDirRuns([]);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    if (!authLoading && isAdmin && activeTab === 'rag') void loadDoctorDirectory();
+  }, [authLoading, isAdmin, activeTab, loadDoctorDirectory]);
 
   // ---------- User actions ----------
   const showMsg = (msg: string) => { setActionError(''); setActionMsg(msg); setTimeout(() => setActionMsg(''), 4000); };
@@ -600,7 +1132,16 @@ export default function DashboardPage() {
     }
   };
 
-  const handleChatDefaultToggle = async (key: 'research_mode' | 'rag_search' | 'web_search' | 'pubmed_search' | 'openscholar_search' | 'research_2_1') => {
+  const handleChatDefaultToggle = async (
+    key:
+      | 'research_mode'
+      | 'rag_search'
+      | 'web_search'
+      | 'pubmed_search'
+      | 'openscholar_search'
+      | 'research_2_1'
+      | 'public_access_enabled'
+  ) => {
     if (!chatDefaults) return;
     const next = !chatDefaults[key];
     setChatDefaults((prev) => (prev ? { ...prev, [key]: next } : prev));
@@ -699,17 +1240,178 @@ export default function DashboardPage() {
           ))}
         </nav>
 
-        {/* ===== Visión general ===== */}
+        {/* ===== Visión general — 2×3 grid (1/3 col each on xl) ===== */}
         {activeTab === 'overview' && (
         <section className="mb-6">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            <StatCard label="Estado" value={health?.status || '—'} color={health?.status === 'healthy' ? 'green' : 'red'} />
-            <StatCard label="Modelo" value={health?.model?.version || '—'} sub={health?.model?.status} color={health?.model?.status === 'online' ? 'cyan' : 'red'} />
-            <StatCard label="Servidor Primario" value={health?.servers?.primary || '—'} color={health?.servers?.primary === 'online' ? 'green' : 'red'} />
-            <StatCard label="Consultas 24h" value={stats?.totalQueries24h ?? '—'} color="blue" />
-            <StatCard label="Docs en pgvector" value={storeStats?.totalDocuments ?? '—'} sub={storeStats?.storageType} color="purple" />
-            <StatCard label="Consultas Mes" value={stats?.totalQueriesMonth ?? '—'} color="amber" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2 xl:min-h-[min(336px,calc(100vh-14rem))] xl:grid-rows-2 xl:[grid-template-rows:repeat(2,minmax(0,1fr))]">
+            {/* 1. Estado general */}
+            <div className="bg-gradient-to-br from-green-500/15 to-green-600/5 border border-green-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Estado general</p>
+              <p className="text-xl font-bold mt-0.5 text-white shrink-0 leading-tight">
+                {dashboardOverview?.overall?.status === 'healthy' ? 'Operativo' : dashboardOverview ? 'Limitado' : '—'}
+              </p>
+              <ul className="mt-1 space-y-0.5 text-xs text-gray-300 flex-1 min-h-0 overflow-y-auto pr-0.5 leading-snug">
+                {(dashboardOverview?.health_checks ?? []).map((c) => (
+                  <li key={c.key} className="flex items-start gap-2">
+                    <StatusGlyph level={c.level} />
+                    <span>
+                      <span className="text-gray-200">{c.label}</span>
+                      {c.detail != null && String(c.detail).length > 0 && (
+                        <span className="text-gray-500"> · {c.detail}</span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* 2. Servidores activos */}
+            <div className="bg-gradient-to-br from-cyan-500/15 to-cyan-600/5 border border-cyan-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Servidores activos</p>
+              <p className="text-[11px] text-gray-500 mt-0.5 mb-1 shrink-0 leading-tight">EC2 · investigación · Vast Serverless</p>
+              <div className="space-y-1.5 flex-1 min-h-0 overflow-y-auto pr-1 text-xs leading-snug">
+                {(dashboardOverview?.servers ?? []).map((sv) => {
+                  const costLine = formatServerCostLine(sv);
+                  const idLine = [sv.instance_id, sv.instance_type].filter(Boolean).join(' · ');
+                  return (
+                    <div key={sv.id} className="flex items-start gap-2 text-gray-300">
+                      <StatusGlyph level={sv.level} />
+                      <span className="flex-1 min-w-0">
+                        <span className="text-gray-100 font-medium break-words block">{sv.label}</span>
+                        {idLine.length > 0 && (
+                          <span className="text-[10px] text-gray-400 font-mono block mt-0.5 break-all">{idLine}</span>
+                        )}
+                        {sv.detail != null && String(sv.detail).length > 0 && (
+                          <span className="text-[10px] text-gray-500 block mt-0.5">{sv.detail}</span>
+                        )}
+                        {costLine && (
+                          <span className="text-[10px] text-gray-500 block mt-0.5">{costLine}</span>
+                        )}
+                        <span className="text-[10px] text-gray-500 block mt-0.5">{sv.state}</span>
+                      </span>
+                    </div>
+                  );
+                })}
+                {(!dashboardOverview?.servers || dashboardOverview.servers.length === 0) && (
+                  <span className="text-gray-500">—</span>
+                )}
+              </div>
+            </div>
+
+            {/* 3. Consultas — un renglón por métrica */}
+            <div className="bg-gradient-to-br from-blue-500/15 to-blue-600/5 border border-blue-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Consultas</p>
+              <div className="mt-1.5 flex flex-col gap-1 flex-1 justify-center">
+                {(
+                  [
+                    ['Últ. 1h', dashboardOverview?.queries?.last1h ?? stats?.totalQueries1h],
+                    ['Últ. 24h', dashboardOverview?.queries?.last24h ?? stats?.totalQueries24h],
+                    ['Últ. semana', dashboardOverview?.queries?.last7d ?? stats?.totalQueriesWeek],
+                    ['Últ. mes', dashboardOverview?.queries?.last30d ?? stats?.totalQueriesMonth],
+                  ] as const
+                ).map(([label, val]) => (
+                  <div key={label} className="flex items-baseline justify-between gap-2">
+                    <span className="text-xs text-gray-500 shrink-0">{label}</span>
+                    <span className="text-2xl font-bold text-blue-200 tabular-nums leading-none">{val ?? '—'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 4. Fuentes — detalle largo solo en tooltip (title) */}
+            <div className="bg-gradient-to-br from-purple-500/15 to-purple-600/5 border border-purple-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Fuentes</p>
+              <ul className="mt-1 space-y-0.5 flex-1 min-h-0 overflow-y-auto pr-0.5 text-xs text-gray-300 leading-snug">
+                {(Array.isArray(dashboardOverview?.sources) ? dashboardOverview.sources : []).map((row) => {
+                  const detailStr =
+                    row.detail != null && String(row.detail).length > 0 ? String(row.detail) : undefined;
+                  return (
+                    <li
+                      key={row.key}
+                      className={`flex items-start gap-2 ${detailStr ? 'cursor-help' : ''}`}
+                      title={detailStr}
+                    >
+                      <StatusGlyph level={row.level} />
+                      <span className="flex-1 min-w-0">
+                        <span className="text-gray-200 break-words">{row.label}</span>
+                        {row.count != null && (
+                          <span className="text-purple-200 font-medium tabular-nums ml-1">
+                            · {formatSourceCount(row.count)}
+                          </span>
+                        )}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+
+            {/* 5. Usuarios — un renglón por tipo */}
+            <div className="bg-gradient-to-br from-amber-500/15 to-amber-600/5 border border-amber-500/25 rounded-lg p-2.5 flex flex-col justify-between min-h-[108px] xl:min-h-0 xl:h-full">
+              <div className="flex-1 flex flex-col justify-center">
+                <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Usuarios registrados</p>
+                <div className="mt-1.5 flex flex-col gap-1">
+                  {(
+                    [
+                      ['Total', dashboardOverview?.users?.total],
+                      ['Admins', dashboardOverview?.users?.admins],
+                      ['Investigadores', dashboardOverview?.users?.researchers],
+                    ] as const
+                  ).map(([label, val]) => (
+                    <div key={label} className="flex items-baseline justify-between gap-2">
+                      <span className="text-xs text-gray-500 shrink-0">{label}</span>
+                      <span className="text-2xl font-bold text-amber-100 tabular-nums leading-none">{val ?? '—'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {dashboardOverview != null && dashboardOverview.users.developers > 0 && (
+                <p className="text-xs text-gray-500 mt-1.5 text-center shrink-0 leading-tight">
+                  Desarrolladores (rol): {dashboardOverview.users.developers}
+                </p>
+              )}
+            </div>
+
+            {/* 6. Ingesta */}
+            <div className="bg-gradient-to-br from-emerald-500/15 to-emerald-600/5 border border-emerald-500/25 rounded-lg p-2.5 flex flex-col min-h-[108px] xl:min-h-0 xl:h-full">
+              <p className="text-xs text-gray-400 uppercase tracking-wide shrink-0">Ingesta</p>
+              <p className="text-[11px] text-gray-500 mt-0.5 mb-1 shrink-0 leading-tight">Trabajos activos (scrapers, embedders)</p>
+              <div className="flex-1 min-h-0 overflow-y-auto pr-0.5 space-y-1">
+                {(dashboardOverview?.ingestion?.jobs ?? []).length === 0 ? (
+                  <p className="text-xs text-gray-500">Ningún trabajo de ingesta en curso.</p>
+                ) : (
+                  (dashboardOverview?.ingestion?.jobs ?? []).map((job) => (
+                    <div key={job.id} className="text-xs text-gray-300 leading-snug">
+                      <div>
+                        <span className="text-emerald-400/90 font-medium">{job.kind}</span>
+                        <span className="text-gray-500"> · </span>
+                        <span className="text-gray-400 break-words">{job.detail}</span>
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-0.5 pl-0.5">
+                        Últ. ingesta:{' '}
+                        <span className="text-gray-400 tabular-nums">{formatIngestionDateTime(job.last_ingestion_at)}</span>
+                        {' · '}
+                        Resultados:{' '}
+                        <span className="text-gray-400 font-medium tabular-nums">
+                          {job.results_count != null ? job.results_count.toLocaleString('es-MX') : '—'}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
+          {querySeriesError && (
+            <div className="mt-6 p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-200/90 text-sm">
+              <span className="font-medium">Gráfica de consultas:</span> {querySeriesError}
+            </div>
+          )}
+          {querySeries && (
+            <div className="mt-6">
+              <QuerySeriesChart data={querySeries} />
+            </div>
+          )}
         </section>
         )}
 
@@ -990,7 +1692,11 @@ export default function DashboardPage() {
         <section className="mb-6">
           <Section title="Configuración de LLMs">
             <p className="text-[11px] text-gray-500 mb-4">
-              Asignaciones (qué modelo Ominis usa detrás), system prompt, versión y parámetros por modelo. Los cambios se aplican al guardar (sin reiniciar backend).
+              Asignaciones (proveedor, URL base, modelo en el API, temperatura, etc.), system prompt y parámetros por ranura (
+              <code className="text-cyan-400/90">ominis-2.0</code>, <code className="text-cyan-400/90">research-8k</code>, etc.). Usa el JSON
+              de parámetros extra para <code className="text-cyan-400/90">api_key_env</code>, <code className="text-cyan-400/90">openai_backend</code>, etc.
+              Los cambios se aplican al guardar. Si usas investigación 8K y 128K con el mismo motor, configura por separado{' '}
+              <code className="text-cyan-400/90">research-8k</code> y <code className="text-cyan-400/90">research-128k</code>.
             </p>
             {llmModelsConfig.length === 0 && !loadingData && (
               <p className="text-[11px] text-gray-500">No hay modelos de chat configurados o no se pudo cargar.</p>
@@ -1020,6 +1726,12 @@ export default function DashboardPage() {
               ))}
             </div>
           </Section>
+
+          {isAdmin && (
+            <Section title="Visión (imágenes en el chat)">
+              <VisionLLMConfigSection showError={showError} showMsg={showMsg} />
+            </Section>
+          )}
         </section>
         </>
         )}
@@ -1124,6 +1836,190 @@ export default function DashboardPage() {
               <p className="text-white font-medium">Gestión de fuentes DataStore</p>
               <p className="text-gray-400 text-sm mt-1">Ingestión, búsqueda y filtrado por taxonomía</p>
             </Link>
+          </Section>
+          <Section
+            title="Directorio médico México (scraping)"
+            action={
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void loadDoctorDirectory()}
+                  className="text-xs text-emerald-300 hover:text-emerald-200 border border-emerald-500/40 rounded-lg px-2.5 py-1.5 transition-colors"
+                >
+                  Actualizar estado
+                </button>
+                <button
+                  type="button"
+                  title="Descargar CSV (todos los perfiles en base)"
+                  disabled={doctorCsvExporting}
+                  onClick={async () => {
+                    setDoctorCsvExporting(true);
+                    try {
+                      await downloadDoctorDirectoryCsv();
+                      showMsg('CSV descargado.');
+                    } catch (e) {
+                      showError(e instanceof Error ? e.message : 'No se pudo exportar el CSV');
+                    } finally {
+                      setDoctorCsvExporting(false);
+                    }
+                  }}
+                  className="inline-flex items-center justify-center rounded-lg border border-emerald-500/40 p-1.5 text-emerald-300 hover:text-emerald-200 hover:bg-emerald-500/10 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                  aria-label="Descargar base de médicos en CSV"
+                >
+                  {doctorCsvExporting ? (
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden>
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            }
+          >
+            <p className="text-gray-400 text-sm mb-3">
+              Ingesta perfiles públicos:{' '}
+              <a href="https://www.topdoctors.mx/" target="_blank" rel="noopener noreferrer" className="text-emerald-300 hover:underline">
+                Top Doctors
+              </a>{' '}
+              (JSON-LD Physician),{' '}
+              <a href="https://www.doctoralia.com.mx/" target="_blank" rel="noopener noreferrer" className="text-emerald-300 hover:underline">
+                Doctoralia México
+              </a>{' '}
+              (microdata Physician + sitemaps) o{' '}
+              <a href="https://www.doctoranytime.mx/" target="_blank" rel="noopener noreferrer" className="text-emerald-300 hover:underline">
+                DoctorAnytime México
+              </a>{' '}
+              (sitemap de médicos + JSON-LD; robots sugiere crawl-delay 4 s — usa pausa ≥ 4 s en producción). Los perfiles se unen por nombre + especialidad + ubicación: una fila por persona con enlaces y fechas de ingesta por fuente. Respeta términos del sitio y un intervalo razonable entre solicitudes.
+            </p>
+            {doctorDirStats && (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                <StatCard label="Perfiles en base" value={doctorDirStats.total_profiles} color="green" />
+                <StatCard
+                  label="Fuentes"
+                  value={Object.keys(doctorDirStats.by_source || {}).length || 0}
+                  sub={Object.entries(doctorDirStats.by_source || {})
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(' · ') || '—'}
+                  color="cyan"
+                />
+                <StatCard
+                  label="Última ingesta"
+                  value={doctorDirStats.last_scraped_at ? new Date(doctorDirStats.last_scraped_at).toLocaleString('es-MX') : '—'}
+                  color="blue"
+                />
+              </div>
+            )}
+            <div className="flex flex-wrap items-end gap-3 mb-4">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Fuente</label>
+                <select
+                  value={doctorScrapeSource}
+                  onChange={(e) =>
+                    setDoctorScrapeSource(
+                      e.target.value as 'topdoctors_mx' | 'doctoralia_mx' | 'doctoranytime_mx',
+                    )
+                  }
+                  className="bg-white/10 border border-white/10 text-white text-sm rounded px-2 py-1.5 min-w-[11rem]"
+                >
+                  <option value="topdoctors_mx">Top Doctors (topdoctors.mx)</option>
+                  <option value="doctoralia_mx">Doctoralia (doctoralia.com.mx)</option>
+                  <option value="doctoranytime_mx">DoctorAnytime (doctoranytime.mx)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Máx. perfiles (esta corrida)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={5000}
+                  value={doctorScrapeMax}
+                  onChange={(e) => setDoctorScrapeMax(Number(e.target.value) || 1)}
+                  className="bg-white/10 border border-white/10 text-white text-sm rounded px-2 py-1.5 w-28"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Pausa entre páginas (s)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={30}
+                  step={0.1}
+                  value={doctorScrapeDelay}
+                  onChange={(e) => setDoctorScrapeDelay(Number(e.target.value) || 0)}
+                  className="bg-white/10 border border-white/10 text-white text-sm rounded px-2 py-1.5 w-24"
+                />
+              </div>
+              <button
+                type="button"
+                disabled={doctorScrapeBusy}
+                onClick={async () => {
+                  setDoctorScrapeBusy(true);
+                  try {
+                    const r = await startDoctorDirectoryScrape({
+                      source: doctorScrapeSource,
+                      max_profiles: doctorScrapeMax,
+                      delay_seconds: doctorScrapeDelay,
+                    });
+                    showMsg(`Ingesta iniciada (corrida #${r.run_id}). Puede tardar varios minutos.`);
+                    await loadDoctorDirectory();
+                  } catch (e) {
+                    showError(e instanceof Error ? e.message : 'No se pudo iniciar la ingesta');
+                  } finally {
+                    setDoctorScrapeBusy(false);
+                  }
+                }}
+                className="rounded-lg bg-emerald-600/80 hover:bg-emerald-500 text-white text-sm font-medium px-4 py-2 disabled:opacity-50"
+              >
+                {doctorScrapeBusy
+                  ? 'Iniciando…'
+                  : doctorScrapeSource === 'doctoralia_mx'
+                    ? 'Iniciar ingesta Doctoralia'
+                    : doctorScrapeSource === 'doctoranytime_mx'
+                      ? 'Iniciar ingesta DoctorAnytime'
+                      : 'Iniciar ingesta Top Doctors'}
+              </button>
+            </div>
+            {doctorDirRuns.length > 0 && (
+              <div className="overflow-x-auto rounded-lg border border-white/10 mt-2">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-gray-400 text-xs uppercase border-b border-white/10 bg-white/5">
+                      <th className="py-2 px-3">ID</th>
+                      <th className="py-2 px-3">Estado</th>
+                      <th className="py-2 px-3">Sitio</th>
+                      <th className="py-2 px-3">Procesados</th>
+                      <th className="py-2 px-3">Guardados</th>
+                      <th className="py-2 px-3">Fallos</th>
+                      <th className="py-2 px-3">Inicio / fin</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {doctorDirRuns.map((run) => (
+                      <tr key={run.id} className="hover:bg-white/5">
+                        <td className="py-2 px-3 text-gray-300">{run.id}</td>
+                        <td className="py-2 px-3"><StatusBadge status={run.status} /></td>
+                        <td className="py-2 px-3 text-gray-400">{run.source_site}</td>
+                        <td className="py-2 px-3 text-gray-400">{run.profiles_attempted}</td>
+                        <td className="py-2 px-3 text-emerald-300/90">{run.profiles_upserted}</td>
+                        <td className="py-2 px-3 text-amber-300/90">{run.profiles_failed}</td>
+                        <td className="py-2 px-3 text-gray-500 text-xs whitespace-nowrap">
+                          {run.started_at ? new Date(run.started_at).toLocaleString('es-MX') : '—'}
+                          <br />
+                          {run.finished_at ? new Date(run.finished_at).toLocaleString('es-MX') : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {doctorDirRuns[0]?.error_message && (
+                  <p className="text-xs text-amber-300 px-3 py-2 border-t border-white/10">{doctorDirRuns[0].error_message}</p>
+                )}
+              </div>
+            )}
           </Section>
         </div>
         )}
@@ -1310,8 +2206,22 @@ export default function DashboardPage() {
                     className="bg-white/10 border border-white/20 text-white text-sm rounded-lg px-3 py-1.5 focus:ring-1 focus:ring-cyan-400"
                   >
                     <option value="ominis-2.0">Ominis 2.0</option>
-                    <option value="ominis-2.0-med">Ominis 2.0 Med</option>
+                    <option value="ominis-2.0-med">Ominis Med</option>
+                    <option value="ominis-2.0-research">Ominis Research</option>
                   </select>
+                </div>
+                <div className="flex items-center justify-between py-2 border-b border-white/10">
+                  <div>
+                    <p className="text-sm font-medium text-white">Acceso público</p>
+                    <p className="text-[10px] text-gray-500">Si está apagado: solo se puede entrar con registro (cuenta).</p>
+                  </div>
+                  <ResearchInstanceSwitch
+                    status={chatDefaults.public_access_enabled ? 'running' : 'stopped'}
+                    loading={chatDefaultsSaving}
+                    onToggle={() => handleChatDefaultToggle('public_access_enabled')}
+                    labelOff="Requiere registro"
+                    labelOn="Permitido"
+                  />
                 </div>
                 <div className="flex items-center justify-between py-2 border-b border-white/10">
                   <div>
@@ -1393,7 +2303,15 @@ export default function DashboardPage() {
                 </div>
               </div>
             )}
-            {!chatDefaults && !chatDefaultsSaving && <p className="text-gray-500 text-sm">Cargando…</p>}
+            {!chatDefaults && !chatDefaultsSaving && loadingData && (
+              <p className="text-gray-500 text-sm">Cargando…</p>
+            )}
+            {!chatDefaults && !chatDefaultsSaving && !loadingData && (
+              <p className="text-amber-400/90 text-sm">
+                No se pudieron cargar las opciones por defecto. Pulsa «Actualizar» o revisa la sesión y que el backend responda en{' '}
+                <code className="text-cyan-400/90">NEXT_PUBLIC_API_URL</code>.
+              </p>
+            )}
           </Section>
 
           {isSuperAdmin && (
@@ -1515,7 +2433,12 @@ export default function DashboardPage() {
                       <div className="bg-white/5 rounded-lg p-3">
                         <p className="text-gray-500 text-xs mb-1">Estado del sistema</p>
                         <p className="text-white">Estado: {feedbackModalInfra.health.status}</p>
-                        <p className="text-gray-400 text-xs">Modelo: {feedbackModalInfra.health.model?.version || '—'} · {feedbackModalInfra.health.model?.status || '—'}</p>
+                        <p className="text-gray-400 text-xs">
+                          Ollama default: {inferenceStatusLabel(feedbackModalInfra.health.model?.status)} · {feedbackModalInfra.health.model?.version || '—'}
+                          {feedbackModalInfra.health.inference_summary && feedbackModalInfra.health.inference_summary.third_party_models > 0 && (
+                            <> · +{feedbackModalInfra.health.inference_summary.third_party_models} vía API</>
+                          )}
+                        </p>
                       </div>
                     )}
                     {feedbackModalInfra?.gpuPerf && (
