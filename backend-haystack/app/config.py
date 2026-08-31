@@ -428,9 +428,22 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""  # Optional; if empty, use default credential chain
     aws_secret_access_key: str = ""
 
+    # CIAS Auth (cias.ai integration — exclusive login for members)
+    cias_auth_url: str = "https://www.cias.ai"
+    cias_database_url: str = "postgresql+asyncpg://cias:e399585516d5ac9dc35993cd242794cdfd6e365c@44.215.64.245:5432/cias_red?sslmode=require"
+
+    # Didactiva OAuth (Moodle IdP for CIAS members)
+    didactiva_client_id: str = "cias-ai"
+    didactiva_client_secret: str = "826dba19f8f7d198edac6b02524f57cdc4cbc698ce3dfc56"
+    didactiva_base_url: str = "https://lms.didactiva.com"
+    didactiva_auth_url: str = "https://lms.didactiva.com/local/oauth2/login.php"
+    didactiva_token_url: str = "https://lms.didactiva.com/local/oauth2/token.php"
+    didactiva_userinfo_url: str = "https://lms.didactiva.com/local/oauth2/user_info.php"
+    didactiva_scopes: str = "user_info"
+
     # CORS
-    frontend_url: str = "http://localhost:3000"
-    allowed_origins: str = "http://localhost:3000"
+    frontend_url: str = "https://ia.ominis.org"
+    allowed_origins: str = "https://ia.ominis.org,https://ai.ominis.org,http://localhost:3000"
 
     # Google OAuth (optional; if set, "Continuar con Google" is enabled)
     google_client_id: str = ""

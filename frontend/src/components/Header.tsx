@@ -316,17 +316,19 @@ export default function Header() {
               </div>
             ) : (
               <div className="flex items-center gap-3">
-                <Link 
-                  href="/login"
+                <a
+                  href="https://www.cias.ai/auth"
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="text-gray-300 hover:text-white transition-colors text-sm"
                 >
-                  Iniciar Sesión
-                </Link>
+                  Unirse a CIAS
+                </a>
                 <Link 
-                  href="/register"
-                  className="bg-accent hover:bg-accent-light text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+                  href="/login"
+                  className="bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-400 hover:to-cyan-400 text-slate-950 text-sm font-bold px-4 py-2 rounded-lg transition-all shadow-md shadow-teal-500/15 flex items-center gap-1.5"
                 >
-                  Registrarse
+                  <span>Entrar con CIAS</span>
                 </Link>
               </div>
             )}
@@ -473,18 +475,20 @@ export default function Header() {
                   <div className="flex flex-col gap-3">
                     <Link 
                       href="/login"
-                      className="text-gray-300 hover:text-white transition-colors"
+                      className="bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-400 hover:to-cyan-400 text-slate-950 text-center font-bold px-4 py-2.5 rounded-lg transition-all"
                       onClick={() => setIsMenuOpen(false)}
                     >
-                      Iniciar Sesión
+                      Entrar con CIAS
                     </Link>
-                    <Link 
-                      href="/register"
-                      className="bg-accent hover:bg-accent-light text-white text-center font-medium px-4 py-2 rounded-lg transition-colors"
+                    <a 
+                      href="https://www.cias.ai/auth"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-gray-300 hover:text-white text-center text-sm transition-colors py-2"
                       onClick={() => setIsMenuOpen(false)}
                     >
-                      Registrarse
-                    </Link>
+                      ¿No eres miembro? Únete en cias.ai
+                    </a>
                   </div>
                 )}
               </div>

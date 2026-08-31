@@ -3,8 +3,8 @@ import { ForgotPasswordForm } from '@/components/auth';
 import Header from '@/components/Header';
 
 export const metadata = {
-  title: 'Recuperar Contraseña | Ominis AI',
-  description: 'Recupera tu contraseña de Ominis AI',
+  title: 'Recuperar Contraseña CIAS | OMINIS',
+  description: 'Gestión de contraseña a través de la Red CIAS',
 };
 
 export default function ForgotPasswordPage() {
