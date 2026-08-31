@@ -3,8 +3,8 @@ import { RegisterForm } from '@/components/auth';
 import Header from '@/components/Header';
 
 export const metadata = {
-  title: 'Crear Cuenta | Ominis AI',
-  description: 'Crea una cuenta de investigador en Ominis AI',
+  title: 'Registro Red CIAS | OMINIS',
+  description: 'Membresía requerida en la Red CIAS para acceder a OMINIS',
 };
 
 export default function RegisterPage() {

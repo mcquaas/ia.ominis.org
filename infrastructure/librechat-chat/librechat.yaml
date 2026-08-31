@@ -2,8 +2,34 @@
 # Custom endpoint points to Haystack backend (api.ominis.org).
 # Model IDs must match backend GET /v1/models: ominis-2.0, ominis-2.0-med, ominis-2.0-research-128k.
 # Vision is handled automatically by the backend when the user sends images (no separate model).
-version: 1.3.4
+version: 1.3.14
 cache: true
+
+interface:
+  customWelcome: 'Bienvenido a OMINIS Chat — Plataforma de Inteligencia Artificial para la Red CIAS.'
+  fileSearch: true
+  modelSelect: true
+  parameters: true
+  presets: true
+  prompts:
+    use: true
+    create: true
+    share: false
+    public: false
+  bookmarks: true
+  multiConvo: true
+  agents:
+    use: true
+    create: true
+    share: false
+    public: false
+  privacyPolicy:
+    externalUrl: 'https://www.cias.ai/privacidad'
+    openNewTab: true
+  termsOfService:
+    externalUrl: 'https://www.cias.ai/terminos'
+    openNewTab: true
+
 endpoints:
   custom:
     - name: "Ominis"
@@ -18,4 +44,5 @@ endpoints:
       titleConvo: true
       titleModel: "current_model"
       summarize: false
-      modelDisplayLabel: "Ominis"
+      modelDisplayLabel: "OMINIS"
+      description: "Modelos especializados de inteligencia artificial para salud e investigación."
